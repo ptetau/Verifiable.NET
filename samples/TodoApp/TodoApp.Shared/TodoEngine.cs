@@ -7,9 +7,15 @@ public static class TodoEngine
     [InboundPort]
     public static TodoTransition Add(TodoBoard board, TodoTitle title, UnixTimestamp now)
     {
-        Spec.Ensures<TodoTransition>(result => !result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1));
-        Spec.Ensures<TodoTransition>(result => !result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount));
-        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
+        Spec.Ensures<TodoTransition>(
+            result => !result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1),
+            "Adding a todo advances NextId by 1 and adds one active item.");
+        Spec.Ensures<TodoTransition>(
+            result => !result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount),
+            "Adding a new todo does not change completed or deleted counts.");
+        Spec.Ensures<TodoTransition>(
+            result => result.IsSuccess || result.Board == board,
+            "A rejected Add leaves the board completely unchanged.");
 
         if (board.Items.ContainsKey(board.NextId))
         {
@@ -30,9 +36,15 @@ public static class TodoEngine
     [InboundPort]
     public static TodoTransition Complete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
-        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
-        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board));
-        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board));
+        Spec.Ensures<TodoTransition>(
+            result => result.IsSuccess || result.Board == board,
+            "A failed Complete leaves the board unchanged.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+            "A deleted todo cannot be resurrected by completing it.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board),
+            "Completing an already-completed item is idempotent.");
 
         if (!board.Items.ContainsKey(id))
         {
@@ -68,8 +80,12 @@ public static class TodoEngine
     [InboundPort]
     public static TodoTransition Delete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
-        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
-        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board));
+        Spec.Ensures<TodoTransition>(
+            result => result.IsSuccess || result.Board == board,
+            "A failed Delete leaves the board unchanged.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board),
+            "Deleting an already-deleted item is idempotent.");
 
         if (!board.Items.ContainsKey(id))
         {
@@ -177,8 +193,12 @@ public static class TodoUiEngine
 
     public static TodoUiState OnCommitConfirmed(TodoUiState state, TodoCommitReceipt receipt)
     {
-        Spec.Requires(state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value);
-        Spec.Ensures<TodoUiState>(result => !result.IsSyncing && !result.PendingCommandId.HasValue);
+        Spec.Requires(
+            state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value,
+            "A confirmation receipt is only valid when the UI is syncing that exact pending command.");
+        Spec.Ensures<TodoUiState>(
+            result => !result.IsSyncing && !result.PendingCommandId.HasValue,
+            "Confirming a commit clears the in-flight syncing flag and pending command ID.");
 
         return state with
         {

@@ -5,31 +5,31 @@ using Verifiable.Contracts;
 
 namespace AccountingApp.Shared;
 
-[TypeAlias<int>]
+[TypeAlias<int>("Every account ID must be at least 1.")]
 public readonly partial record struct AccountId { public static bool IsValid(int value) => value >= 1; }
 
-[TypeAlias<int>]
+[TypeAlias<int>("Journal entry IDs start at 1 and increment monotonically.")]
 public readonly partial record struct JournalEntryId { public static bool IsValid(int value) => value >= 1; }
 
-[TypeAlias<decimal>]
+[TypeAlias<decimal>("Line-item amounts must be strictly positive (up to 1,000,000,000) to avoid zero or overflowing postings.")]
 public readonly partial record struct PositiveAmount { public static bool IsValid(decimal value) => value > 0m && value <= 1000000000m; }
 
-[TypeAlias<decimal>]
+[TypeAlias<decimal>("Running ledger totals cannot go negative.")]
 public readonly partial record struct NonNegativeDecimal { public static bool IsValid(decimal value) => value >= 0m; }
 
-[TypeAlias<decimal>]
+[TypeAlias<decimal>("Entry totals must be strictly positive so zero-value entries never enter the journal.")]
 public readonly partial record struct PositiveDecimal { public static bool IsValid(decimal value) => value > 0m; }
 
-[TypeAlias<string>]
+[TypeAlias<string>("Currency codes must be 3-letter ISO codes such as USD.")]
 public readonly partial record struct CurrencyCode { public static bool IsValid(string value) => value is { Length: >= 3 and <= 3 }; }
 
-[TypeAlias<string>]
+[TypeAlias<string>("Account names must be between 1 and 100 characters.")]
 public readonly partial record struct AccountName { public static bool IsValid(string value) => value is { Length: >= 1 and <= 100 }; }
 
-[TypeAlias<long>]
+[TypeAlias<long>("Ledger timestamps cannot be negative.")]
 public readonly partial record struct UnixTimestamp { public static bool IsValid(long value) => value >= 0; }
 
-[TypeAlias<Guid>]
+[TypeAlias<Guid>("Every ledger command requires a non-empty UUID for idempotent persistence.")]
 public readonly partial record struct CommandId { public static bool IsValid(Guid value) => value != Guid.Empty; }
 
 public enum AccountType
@@ -73,7 +73,7 @@ public readonly record struct PostedJournalEntry(
     bool IsReversed,
     JournalEntryId? ReversesEntryId)
 {
-    [Invariant]
+    [Invariant("Every posted journal entry must have equal debits and credits across at least two lines.")]
     public bool IsBalanced() => EntryDebitTotal == EntryCreditTotal && Lines.Count >= 2;
 }
 
@@ -85,7 +85,7 @@ public readonly record struct LedgerState(
     NonNegativeDecimal TotalDebits,
     NonNegativeDecimal TotalCredits)
 {
-    [Invariant]
+    [Invariant("Across the entire ledger, total debits must always equal total credits.")]
     public bool IsBalanced() => TotalDebits == TotalCredits;
 
     public static LedgerState CreateEmpty()
@@ -95,7 +95,8 @@ public readonly record struct LedgerState(
             && result.TotalCredits == 0m
             && result.NextEntryId == 1
             && result.Accounts.Count == 0
-            && result.Journal.Count == 0);
+            && result.Journal.Count == 0,
+            "An empty ledger starts balanced at zero with no accounts or entries and NextEntryId = 1.");
 
         return new(
             ImmutableDictionary<AccountId, Account>.Empty,

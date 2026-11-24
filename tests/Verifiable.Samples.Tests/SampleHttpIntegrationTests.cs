@@ -37,6 +37,8 @@ public class SampleHttpIntegrationTests
             // 1. Reject invalid wire input via generated [InboundPort]
             var badResp = await client.PostAsJsonAsync("/api/todos/add", new AddTodoHttpRequest(Guid.NewGuid(), "", 100));
             Assert.Equal(HttpStatusCode.BadRequest, badResp.StatusCode);
+            var badBody = await badResp.Content.ReadAsStringAsync();
+            Assert.Contains("between 1 and 200 characters", badBody);
 
             // 2. Add item
             var addCmd = Guid.NewGuid();

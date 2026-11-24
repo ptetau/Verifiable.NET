@@ -6,31 +6,31 @@ using Verifiable.Contracts;
 
 namespace TodoApp.Shared;
 
-[TypeAlias<int>]
+[TypeAlias<int>("Every todo ID must be a positive integer (1 or higher) so zero never aliases an uninitialized slot.")]
 public readonly partial record struct TodoId
 {
     public static bool IsValid(int value) => value >= 1;
 }
 
-[TypeAlias<int>]
+[TypeAlias<int>("Counts of active, completed, or deleted todos can never be negative.")]
 public readonly partial record struct NonNegativeInt
 {
     public static bool IsValid(int value) => value >= 0;
 }
 
-[TypeAlias<string>]
+[TypeAlias<string>("A todo title must be between 1 and 200 characters so blank items never appear on the board.")]
 public readonly partial record struct TodoTitle
 {
     public static bool IsValid(string value) => value is { Length: >= 1 and <= 200 };
 }
 
-[TypeAlias<long>]
+[TypeAlias<long>("Timestamps are measured from the Unix epoch and cannot be negative.")]
 public readonly partial record struct UnixTimestamp
 {
     public static bool IsValid(long value) => value >= 0;
 }
 
-[TypeAlias<Guid>]
+[TypeAlias<Guid>("Every command needs a non-empty UUID so retries stay safely idempotent.")]
 public readonly partial record struct CommandId
 {
     public static bool IsValid(Guid value) => value != Guid.Empty;
@@ -57,7 +57,7 @@ public readonly record struct TodoBoard(
     NonNegativeInt CompletedCount,
     NonNegativeInt DeletedCount)
 {
-    [Invariant]
+    [Invariant("Total stored items must equal the sum of active, completed, and deleted counts and match NextId - 1.")]
     public bool IsConsistent() =>
         Items.Count == ActiveCount + CompletedCount + DeletedCount
         && Items.Count == NextId - 1;
@@ -69,7 +69,8 @@ public readonly record struct TodoBoard(
             && result.Items.Count == 0
             && result.ActiveCount == 0
             && result.CompletedCount == 0
-            && result.DeletedCount == 0);
+            && result.DeletedCount == 0,
+            "A brand-new board starts at NextId = 1 with zero items in every bucket.");
 
         return new(
             TodoId.From(1),
