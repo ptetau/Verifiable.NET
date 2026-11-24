@@ -1,3 +1,88 @@
 Verifiable.NET: compile-time formal verification toolchain for C# (.NET 9 / .NET 10).
-Agent reference (being expanded alongside package implementation).
-Set VERIFIABLE_AGENT=1 for single-line JSON <verifiable-counterexample> diagnostics and GALAXYCHECK_AGENT=1 for GalaxyCheck agent mode.
+Packages: Verifiable.Contracts (runtime attributes & immutable unions, net9.0;net10.0), Verifiable.Generators (Refined<T> & InboundPort source generators, netstandard2.0), Verifiable.Analyzers (Gatekeeper VER001-006, Linear Checker VER007, Z3 SMT Prover VER101-104, netstandard2.0), Verifiable.CodeFixes (VER001/002/004/005/006 Roslyn fixes, netstandard2.0), Verifiable.Testing (GalaxyCheck + SQLite fault injection, net10.0).
+Set VERIFIABLE_AGENT=1 and GALAXYCHECK_AGENT=1 for deterministic, structured JSON agent output.
+
+== Quick Start ==
+1. Install Z3 once:
+   Windows: powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
+   Linux/macOS: bash scripts/install-z3.sh
+2. Declare refined types:
+   [Refined<int>("Value >= 1")] public readonly partial record struct TodoId;
+   [Refined<string>("Length is >= 1 and <= 200")] public readonly partial record struct TodoTitle;
+3. Seal domain logic in a [Verifiable] cage with contracts:
+   [Verifiable, InboundPort]
+   [Requires("amount.Value > 0m")]
+   [Ensures("result.Balance == account.Balance + amount.Value")]
+   public static Account Deposit(Account account, PositiveAmount amount) => account with { Balance = account.Balance + amount.Value };
+4. Build & test in agent mode:
+   VERIFIABLE_AGENT=1 GALAXYCHECK_AGENT=1 dotnet test Verifiable.NET.sln -c Release
+
+== Contracts & Types (Verifiable.Contracts) ==
+[Verifiable]: seals class/struct/method with build Errors (VER001-006) and Z3 SMT proof obligations (VER101-103).
+[VerifiableCandidate]: incremental migration mode; Gatekeeper rules emit Warnings instead of Errors.
+[Refined<TUnderlying>("predicate")]: attach to `public readonly partial record struct Name;`. Uses `Value` (or `Length` shorthand on strings).
+[Invariant("expr")]: type-level predicate checked on inputs/outputs by Z3 and evaluated at runtime by generated InboundPort gates.
+[Requires("expr")]: method precondition proved at call sites under dominant path condition (Occurrence Typing).
+[Ensures("expr")]: method postcondition referencing `result` (return value) and entry parameters.
+[LoopInvariant("expr")]: inductive loop invariant checked at entry and loop back-edge.
+[Decreases("expr")]: non-negative integer ranking expression strictly decreasing per iteration.
+[CheckedArithmetic]: enables 32/64-bit BitVec overflow verification in Z3 for int/long arithmetic.
+[MustConsume]: marks linear obligation struct that must reach a [ConsumesObligation] sink, return, or Obligation.Discard on every CFG path.
+[ConsumesObligation]: marks method as a terminal obligation sink for [MustConsume] parameters.
+[InboundPort]: generates Raw<T> DTOs, <T>Gate.TryMarshal, and <Class>Port.<Method> boundary wrappers.
+[Ghost]: marks proof-only specification members excluded from generated Raw DTOs.
+[PureAxiom]: marks trusted BCL/generator intrinsic whose contracts are assumed without analyzing body.
+Result<T, TError>: `Result<T, E>.Ok(v)` / `Result<T, E>.Fail(e)` with `.IsSuccess`, `.Value`, `.Error`.
+MarshalResult<T>: `MarshalResult<T>.Ok(v)` / `MarshalResult<T>.Fail(violations)` with `.IsValid`, `.Value`, `.Violations` (`ImmutableArray<ContractViolation>`).
+Obligation.Discard(token, "reason"): explicitly discharges a [MustConsume] token on failure/abort branches.
+
+== Source Generators (Verifiable.Generators) ==
+[Refined<T>] generates `*.Refined.g.cs`:
+  - `public readonly partial record struct Name(TUnderlying Value) : IComparable<Name>`
+  - `[Verifiable]`, `[Invariant(...)]`, `[JsonConverter(typeof(NameJsonConverter))]`
+  - `IsValid(TUnderlying value)`, `[PureAxiom] From(TUnderlying value)`, `TryFrom(value, out result)`, `MarshalResult<Name> TryFrom(value)`, `TryMarshal(value, fieldName)`
+  - `JsonConverter<Name>` with `ReadAsPropertyName`/`WriteAsPropertyName` so `ImmutableDictionary<RefinedKey, V>` serializes via System.Text.Json.
+  - Zero-based bounded ints (`Value >= 0 && Value < N` or `Value is >= 0 and < N`) also get `UpperBoundExclusive` and `[PureAxiom] ReadUnchecked<T>(ReadOnlySpan<T>)`.
+[InboundPort] generates `*.Gate.g.cs` and `*.InboundPort.g.cs`:
+  - Recursively maps `[Refined<T>]` -> underlying primitive, `ImmutableList<T>`/`ImmutableArray<T>`/`ImmutableHashSet<T>` -> `List<RawT>`, `ImmutableDictionary<K,V>` -> `Dictionary<RawK, RawV>`, records -> `Raw<Type>`.
+  - `<Type>Gate.TryMarshal(Raw<Type>? raw, string path = "")` checks leaf refined predicates, enums, nested types, and all `[Invariant]` attributes, accumulating `ContractViolation`s.
+  - `<DeclaringType>Port.<Method>(...)` marshals all raw arguments, evaluates `[Requires]`, and calls the verified method only if zero violations occur.
+
+== Diagnostics Reference ==
+Every diagnostic message ends with a `Fix:` instruction.
+VER001 (Error/[Verifiable], Warning/[VerifiableCandidate]): Mutable class, non-readonly struct, settable property, ref/out parameter, or member assignment. Fix: use `readonly record struct` or immutable `record` with `init;` and `with` expressions.
+VER002: Mutable collection (`List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `T[]`). Fix: replace with `ImmutableList<T>`, `ImmutableDictionary<K,V>`, `ImmutableHashSet<T>`, `ImmutableArray<T>`.
+VER003: Unchecked `default(T)` or parameterless `new T()` on `[Invariant]`/`[Refined<T>]` struct. Fix: use `T.From(...)`, `T.TryFrom(...)`, or `[InboundPort]`.
+VER004: Ambient authority (`DateTime.Now`/`UtcNow`, `DateTimeOffset.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, mutable static fields, `Environment.*`, `Console.*`, `System.IO.*`). Fix: pass explicit deterministic parameter (`UnixTimestamp now`, `Guid id`).
+VER005: Disallowed control flow (`while`/`do`/`foreach` without `[LoopInvariant]`/`[Decreases]`, `goto`, `async`/`await`/`Task`, `lock`, `throw`, `try`/`catch`). Fix: annotate loop or return `Result<T, TError>`.
+VER006: Unverified method call, `System.Reflection`, `dynamic`, or unanalyzed delegate invoke. Fix: mark callee `[Verifiable]`/`[PureAxiom]` or split via Sandwich I/O.
+VER007 (Always Error across all methods): Dropped, overwritten, double-consumed, or unconsumed `[MustConsume]` token on any CFG path. Fix: pass to `[ConsumesObligation]` method, return it, or call `Obligation.Discard(token, reason)`.
+VER101: Invalid or unsupported contract expression syntax. Fix: use supported C# boolean, arithmetic, string, pattern, or immutable collection expressions.
+VER102: Z3 found a counterexample (`SAT`) breaking `[Requires]`, `[Ensures]`, `[Invariant]`, `[LoopInvariant]`, `[Decreases]`, `[CheckedArithmetic]`, or collection bounds.
+VER103: Z3 returned `unknown` or timed out. Fix: simplify contract, add `[LoopInvariant]`/`[Decreases]`, or factor helper lemmas.
+VER104 (Warning): Z3 executable not found; SMT proof checking skipped. Fix: run `scripts/install-z3.ps1` / `scripts/install-z3.sh` or set `VERIFIABLE_Z3_PATH`.
+VER201: `[Refined<T>]` applied to type not declared `readonly partial record struct`. Fix: change to `public readonly partial record struct Name;`.
+VER202: Empty or syntactically invalid `[Refined<T>]` predicate.
+
+== Agent Mode & Counterexample JSON ==
+VERIFIABLE_AGENT=1 (or MSBuild `-p:VerifiableAgent=1`) emits single-line JSON inside `VER102` diagnostics:
+  <verifiable-counterexample>{"rule":"VER102","symbol":"Type.Method","kind":"Postcondition","contract":"[Ensures(\"...\")]","counterexample":{"param":"val"},"smtHash":"abc123def456","fix":"Fix: ..."}</verifiable-counterexample>
+GALAXYCHECK_AGENT=1 runs GalaxyCheck properties deterministically (seed 0) with concise <galaxycheck-failure> JSON blocks (`counterexample`, `csharp`, `replay`, `seed`, `rerun`, `Fix:`).
+GALAXYCHECK_SEED=n overrides the property test seed.
+VERIFIABLE_Z3_PATH=/path/to/z3 overrides Z3 binary discovery (search order: VERIFIABLE_Z3_PATH -> build_property.VerifiableZ3Path -> .tools/z3 -> ~/.verifiable/z3 -> PATH).
+
+== SMT Subset (Verifiable.Analyzers.Smt) ==
+Sorts: `int`/`long`/`enum`/`Guid` -> `Int` (or `BitVec 32`/`64` under `[CheckedArithmetic]`), `decimal` -> exact `Real` rational, `bool` -> `Bool`, `string` -> `VerStr` (null + `str.len`), `Nullable<T>` -> `Opt<T>`, records/`[Refined<T>]`/`Result<T,E>` -> `declare-datatype`, `ImmutableDictionary<K,V>` -> `Map(Array K V, Array K Bool, count)`, `ImmutableList<T>`/`ImmutableArray<T>` -> `Seq(Array Int T, count)`, `ImmutableHashSet<T>` -> `Set(Array T Bool, count)`.
+CFG lowering tracks path conditions (Occurrence Typing), `with` expressions, `&&`/`||`/`?:`/`switch`, modular callee `[Requires]`/`[Ensures]`, and inductive `[LoopInvariant]`/`[Decreases]`.
+Queries are SHA-256 cached in memory and `%TEMP%/verifiable-smt-cache-v1`.
+
+== Automated CodeFixes (Verifiable.CodeFixes) ==
+- HoistAmbientAuthorityCodeFixProvider (VER004): extracts `UtcNow`/`NewGuid()` into method parameter and updates call sites.
+- FreezeMutableStateCodeFixProvider (VER001/VER002): converts mutable classes/structs to immutable records with `init;`, rewrites property assignments to `with`, swaps `List`/`Dictionary`/`HashSet`/`T[]` for `System.Collections.Immutable`.
+- SandwichIoSplitCodeFixProvider (VER006/VER005): extracts pure middle slice between `await`/I/O calls into a `[Verifiable]` static core method.
+- ExceptionToUnionCodeFixProvider (VER005): rewrites `throw` branches into `Result<T, string>.Fail(...)` / `.Ok(...)`.
+
+== Testing with GalaxyCheck (Verifiable.Testing) ==
+`VerifiableGen.PositiveInt`, `PositiveDecimal`, `NonEmptyString`, `CurrencyCode`, `NonEmptyGuid`, `Refined<TRefined, TUnderlying>`, `PortRejectsInvalid`.
+`FaultInjectedSqliteHarness`: WAL-mode isolated SQLite harness with `PersistenceFaultKind` (`None`, `PreCommitCrash`, `PostCommitCrashBeforeAck`, `DuplicateDelivery`).
+`DifferentialPersistenceProperty.Create`: wraps `GalaxyCheck.Stateful.StatefulProperty.Create` to verify SQLite durability and `[InboundPort]` round-trip parity against pure `[Verifiable]` models.

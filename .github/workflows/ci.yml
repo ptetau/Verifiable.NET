@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  VERIFIABLE_AGENT: "1"
+  GALAXYCHECK_AGENT: "1"
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 9 & 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: Install Z3 (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/install-z3.sh
+
+      - name: Install Z3 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
+
+      - name: Restore
+        run: dotnet restore Verifiable.NET.sln
+
+      - name: Build (Release + Z3 SMT Verification)
+        run: dotnet build Verifiable.NET.sln -c Release --no-restore
+
+      - name: Test (GalaxyCheck + Roslyn + SQLite Fault Injection)
+        run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
+
+      - name: Pack NuGet Packages
+        run: |
+          dotnet pack src/Verifiable.Contracts/Verifiable.Contracts.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.Generators/Verifiable.Generators.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.Analyzers/Verifiable.Analyzers.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.CodeFixes/Verifiable.CodeFixes.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.Testing/Verifiable.Testing.csproj -c Release --no-build -o artifacts/nupkg

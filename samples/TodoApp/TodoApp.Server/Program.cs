@@ -5,8 +5,12 @@ using Verifiable.Contracts;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connStr = builder.Configuration["TodoDb:ConnectionString"] ?? "Data Source=todoapp.db";
-builder.Services.AddSingleton(new SqliteTodoRepository(connStr));
+builder.Services.AddSingleton(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var connStr = cfg["TodoDb:ConnectionString"] ?? "Data Source=todoapp.db";
+    return new SqliteTodoRepository(connStr);
+});
 
 var app = builder.Build();
 

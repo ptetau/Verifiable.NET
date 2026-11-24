@@ -6,8 +6,12 @@ using Verifiable.Contracts;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connStr = builder.Configuration["LedgerDb:ConnectionString"] ?? "Data Source=accounting.db";
-builder.Services.AddSingleton(new SqliteLedgerRepository(connStr));
+builder.Services.AddSingleton(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var connStr = cfg["LedgerDb:ConnectionString"] ?? "Data Source=accounting.db";
+    return new SqliteLedgerRepository(connStr);
+});
 
 var app = builder.Build();
 
