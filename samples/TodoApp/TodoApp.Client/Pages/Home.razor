@@ -1,0 +1,104 @@
+@page "/"
+@inject TodoCommandDispatcher Dispatcher
+
+<main style="max-width: 680px; margin: 2rem auto; font-family: system-ui, sans-serif;">
+    <h1>Verifiable TodoBoard</h1>
+    <p>Status: <strong>@_state.StatusText</strong> | Active: @_state.Board.ActiveCount | Completed: @_state.Board.CompletedCount | Deleted: @_state.Board.DeletedCount</p>
+
+    @if (!string.IsNullOrEmpty(_state.LastError))
+    {
+        <p style="color: #b91c1c;">@_state.LastError</p>
+    }
+
+    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+        <input @bind="_newTitle" placeholder="New todo title..." disabled="@_state.IsSyncing" style="flex: 1; padding: 0.5rem;" />
+        <button @onclick="HandleAddAsync" disabled="@_state.IsSyncing">Add</button>
+    </div>
+
+    <ul style="list-style: none; padding: 0;">
+        @foreach (var item in _state.Board.Items.Values.OrderBy(i => i.Id))
+        {
+            <li style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #e5e7eb;">
+                <span>#@item.Id.Value [@item.Status] @item.Title.Value</span>
+                <span style="display: flex; gap: 0.4rem;">
+                    @if (item.Status == TodoStatus.Active)
+                    {
+                        <button @onclick="() => HandleCompleteAsync(item.Id)" disabled="@_state.IsSyncing">Complete</button>
+                    }
+                    @if (item.Status != TodoStatus.Deleted)
+                    {
+                        <button @onclick="() => HandleDeleteAsync(item.Id)" disabled="@_state.IsSyncing">Delete</button>
+                    }
+                </span>
+            </li>
+        }
+    </ul>
+</main>
+
+@code {
+    private TodoUiState _state = TodoUiState.Initial();
+    private string _newTitle = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var loaded = await Dispatcher.LoadBoardAsync();
+        if (loaded.IsSuccess)
+        {
+            _state = _state with { Board = loaded.Value, StatusText = "Loaded" };
+        }
+    }
+
+    private async Task HandleAddAsync()
+    {
+        var titleRes = TodoTitle.TryFrom(_newTitle);
+        if (!titleRes.IsValid)
+        {
+            _state = TodoUiEngine.OnCommitFailed(_state, titleRes.Violations[0].Message);
+            return;
+        }
+
+        var (nextState, cmd) = TodoUiEngine.OnSubmitAdd(
+            _state,
+            titleRes.Value,
+            CommandId.From(Guid.NewGuid()),
+            UnixTimestamp.From(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        _state = nextState;
+        _newTitle = string.Empty;
+
+        var res = await Dispatcher.DispatchAsync(cmd);
+        _state = res.IsSuccess && _state.IsSyncing && _state.PendingCommandId == res.Value.CommandId
+            ? TodoUiEngine.OnCommitConfirmed(_state, res.Value)
+            : TodoUiEngine.OnCommitFailed(_state, res.IsSuccess ? "Mismatched receipt CommandId." : res.Error);
+    }
+
+    private async Task HandleCompleteAsync(TodoId id)
+    {
+        var (nextState, cmd) = TodoUiEngine.OnSubmitComplete(
+            _state,
+            id,
+            CommandId.From(Guid.NewGuid()),
+            UnixTimestamp.From(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        _state = nextState;
+        var res = await Dispatcher.DispatchAsync(cmd);
+        _state = res.IsSuccess && _state.IsSyncing && _state.PendingCommandId == res.Value.CommandId
+            ? TodoUiEngine.OnCommitConfirmed(_state, res.Value)
+            : TodoUiEngine.OnCommitFailed(_state, res.IsSuccess ? "Mismatched receipt CommandId." : res.Error);
+    }
+
+    private async Task HandleDeleteAsync(TodoId id)
+    {
+        var (nextState, cmd) = TodoUiEngine.OnSubmitDelete(
+            _state,
+            id,
+            CommandId.From(Guid.NewGuid()),
+            UnixTimestamp.From(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        _state = nextState;
+        var res = await Dispatcher.DispatchAsync(cmd);
+        _state = res.IsSuccess && _state.IsSyncing && _state.PendingCommandId == res.Value.CommandId
+            ? TodoUiEngine.OnCommitConfirmed(_state, res.Value)
+            : TodoUiEngine.OnCommitFailed(_state, res.IsSuccess ? "Mismatched receipt CommandId." : res.Error);
+    }
+}
