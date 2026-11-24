@@ -18,7 +18,8 @@ internal sealed record ProofObligation(
     string PathCondition,
     string GoalTerm,
     string ScriptPreamble,
-    IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters);
+    IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters,
+    string? Reason = null);
 
 internal sealed record LoweringOutcome(
     IReadOnlyList<ProofObligation> Obligations,
@@ -44,16 +45,17 @@ internal sealed class CfgSsaLowerer
         IParameterSymbol? LambdaParam,
         IOperation BodyExpr,
         Location Location,
-        string DisplayText);
+        string DisplayText,
+        string? Because = null);
 
     private sealed record LoopSpecGroup(
         ILoopOperation Loop,
-        List<(IOperation Condition, Location Location, string DisplayText)> LoopInvariants,
-        List<(IOperation Measure, Location Location, string DisplayText)> Decreases);
+        List<(IOperation Condition, Location Location, string DisplayText, string? Because)> LoopInvariants,
+        List<(IOperation Measure, Location Location, string DisplayText, string? Because)> Decreases);
 
     private sealed class MethodSpecs
     {
-        public List<(IOperation Condition, Location Location, string DisplayText)> Requires { get; } = new();
+        public List<(IOperation Condition, Location Location, string DisplayText, string? Because)> Requires { get; } = new();
         public List<EnsuresSpec> Ensures { get; } = new();
         public List<LoopSpecGroup> Loops { get; } = new();
         public List<(string Contract, Location Location, string Error)> Errors { get; } = new();
@@ -293,13 +295,17 @@ internal sealed class CfgSsaLowerer
                 var loc = inv.Syntax.GetLocation();
                 var text = inv.Syntax.ToString();
 
+                var because = inv.Arguments.Length >= 2
+                    ? ExtractConstantStringArg(inv.Arguments[1].Value)
+                    : null;
+
                 switch (inv.TargetMethod.Name)
                 {
-                    case "Requires" when inv.Arguments.Length == 1:
-                        specs.Requires.Add((inv.Arguments[0].Value, loc, text));
+                    case "Requires" when inv.Arguments.Length is 1 or 2:
+                        specs.Requires.Add((inv.Arguments[0].Value, loc, text, because));
                         return;
 
-                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length == 1:
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 1 or 2:
                     {
                         var declaredType = inv.TargetMethod.TypeArguments[0];
                         if (!SymbolEqualityComparer.Default.Equals(declaredType, method.ReturnType))
@@ -315,30 +321,30 @@ internal sealed class CfgSsaLowerer
                             return;
                         }
 
-                        specs.Ensures.Add(new EnsuresSpec(lambdaParam, bodyExpr!, loc, text));
+                        specs.Ensures.Add(new EnsuresSpec(lambdaParam, bodyExpr!, loc, text, because));
                         return;
                     }
 
-                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length == 1:
-                        specs.Ensures.Add(new EnsuresSpec(null, inv.Arguments[0].Value, loc, text));
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 1 or 2:
+                        specs.Ensures.Add(new EnsuresSpec(null, inv.Arguments[0].Value, loc, text, because));
                         return;
 
-                    case "LoopInvariant" when inv.Arguments.Length == 1:
+                    case "LoopInvariant" when inv.Arguments.Length is 1 or 2:
                         if (enclosingLoop is null)
                         {
                             specs.Errors.Add((text, loc, "Spec.LoopInvariant(...) must be called inside a loop body."));
                             return;
                         }
-                        loopGroups[enclosingLoop].LoopInvariants.Add((inv.Arguments[0].Value, loc, text));
+                        loopGroups[enclosingLoop].LoopInvariants.Add((inv.Arguments[0].Value, loc, text, because));
                         return;
 
-                    case "Decreases" when inv.Arguments.Length == 1:
+                    case "Decreases" when inv.Arguments.Length is 1 or 2:
                         if (enclosingLoop is null)
                         {
                             specs.Errors.Add((text, loc, "Spec.Decreases(...) must be called inside a loop body."));
                             return;
                         }
-                        loopGroups[enclosingLoop].Decreases.Add((inv.Arguments[0].Value, loc, text));
+                        loopGroups[enclosingLoop].Decreases.Add((inv.Arguments[0].Value, loc, text, because));
                         return;
                 }
             }
@@ -427,16 +433,16 @@ internal sealed class CfgSsaLowerer
         var headerLoc = header.BranchValue?.Syntax.GetLocation() ?? _method.Locations.FirstOrDefault() ?? Location.None;
 
         var loopSpecs = FindLoopSpecGroup(header, loopBody);
-        var loopInvs = loopSpecs?.LoopInvariants ?? new List<(IOperation Condition, Location Location, string DisplayText)>();
-        var decreasesExprs = loopSpecs?.Decreases ?? new List<(IOperation Measure, Location Location, string DisplayText)>();
+        var loopInvs = loopSpecs?.LoopInvariants ?? new List<(IOperation Condition, Location Location, string DisplayText, string? Because)>();
+        var decreasesExprs = loopSpecs?.Decreases ?? new List<(IOperation Measure, Location Location, string DisplayText, string? Because)>();
 
         // 1. Check LoopInvariant entry and Decreases >= 0 at pre-loop state
-        foreach (var (condOp, loc, display) in loopInvs)
+        foreach (var (condOp, loc, display, because) in loopInvs)
         {
             try
             {
                 var invTerm = LowerExpression(condOp, preGamma, preEnv, emitObligations: false);
-                AddObligation("LoopInvariantEntry", $"{display} on entry", loc, preGamma, invTerm.Term);
+                AddObligation("LoopInvariantEntry", $"{display} on entry", loc, preGamma, invTerm.Term, because);
             }
             catch (ContractLoweringException ex)
             {
@@ -444,14 +450,14 @@ internal sealed class CfgSsaLowerer
             }
         }
 
-        foreach (var (decOp, loc, display) in decreasesExprs)
+        foreach (var (decOp, loc, display, because) in decreasesExprs)
         {
             try
             {
                 var decTerm = LowerExpression(decOp, preGamma, preEnv, emitObligations: false);
                 var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
-                AddObligation("LoopDecreasesEntry", $"{display} >= 0 on entry", loc, preGamma, $"({geOp} {decTerm.Term} {zero})");
+                AddObligation("LoopDecreasesEntry", $"{display} >= 0 on entry", loc, preGamma, $"({geOp} {decTerm.Term} {zero})", because);
             }
             catch (ContractLoweringException ex)
             {
@@ -471,7 +477,7 @@ internal sealed class CfgSsaLowerer
         }
 
         var invAssumptions = new List<string>();
-        foreach (var (condOp, loc, display) in loopInvs)
+        foreach (var (condOp, loc, display, _) in loopInvs)
         {
             try
             {
@@ -484,8 +490,8 @@ internal sealed class CfgSsaLowerer
             }
         }
 
-        var decBeforeTerms = new List<(IOperation MeasureOp, Location Loc, string Display, SmtTypedTerm Term)>();
-        foreach (var (decOp, loc, display) in decreasesExprs)
+        var decBeforeTerms = new List<(IOperation MeasureOp, Location Loc, string Display, string? Because, SmtTypedTerm Term)>();
+        foreach (var (decOp, loc, display, because) in decreasesExprs)
         {
             try
             {
@@ -493,7 +499,7 @@ internal sealed class CfgSsaLowerer
                 var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
                 invAssumptions.Add($"({geOp} {decTerm.Term} {zero})");
-                decBeforeTerms.Add((decOp, loc, display, decTerm));
+                decBeforeTerms.Add((decOp, loc, display, because, decTerm));
             }
             catch (ContractLoweringException ex)
             {
@@ -613,17 +619,17 @@ internal sealed class CfgSsaLowerer
         HashSet<BasicBlock> loopBody,
         Dictionary<BasicBlock, List<IncomingEdge>> bodyIncoming,
         Dictionary<BasicBlock, List<IncomingEdge>> outerIncoming,
-        List<(IOperation Condition, Location Location, string DisplayText)> loopInvs,
-        List<(IOperation MeasureOp, Location Loc, string Display, SmtTypedTerm Term)> decBeforeTerms)
+        List<(IOperation Condition, Location Location, string DisplayText, string? Because)> loopInvs,
+        List<(IOperation MeasureOp, Location Loc, string Display, string? Because, SmtTypedTerm Term)> decBeforeTerms)
     {
         if (ReferenceEquals(dst, header))
         {
-            foreach (var (condOp, loc, display) in loopInvs)
+            foreach (var (condOp, loc, display, because) in loopInvs)
             {
                 try
                 {
                     var invTerm = LowerExpression(condOp, edgeGamma, env, emitObligations: false);
-                    AddObligation("LoopInvariantStep", $"{display} preservation", loc, edgeGamma, invTerm.Term);
+                    AddObligation("LoopInvariantStep", $"{display} preservation", loc, edgeGamma, invTerm.Term, because);
                 }
                 catch (ContractLoweringException ex)
                 {
@@ -631,7 +637,7 @@ internal sealed class CfgSsaLowerer
                 }
             }
 
-            foreach (var (decOp, loc, display, beforeTerm) in decBeforeTerms)
+            foreach (var (decOp, loc, display, because, beforeTerm) in decBeforeTerms)
             {
                 try
                 {
@@ -641,7 +647,7 @@ internal sealed class CfgSsaLowerer
                     var geOp = isBv ? "bvsge" : ">=";
                     var ltOp = isBv ? "bvslt" : "<";
                     AddObligation("LoopDecreasesStep", $"{display} decreases", loc, edgeGamma,
-                        $"(and ({geOp} {afterTerm.Term} {zero}) ({ltOp} {afterTerm.Term} {beforeTerm.Term}))");
+                        $"(and ({geOp} {afterTerm.Term} {zero}) ({ltOp} {afterTerm.Term} {beforeTerm.Term}))", because);
                 }
                 catch (ContractLoweringException ex)
                 {
@@ -748,7 +754,7 @@ internal sealed class CfgSsaLowerer
                 ensEnv.SpecResult = retTerm;
 
                 var goal = LowerExpression(ens.BodyExpr, gamma, ensEnv, emitObligations: false);
-                AddObligation("Postcondition", ens.DisplayText, retLoc, gamma, goal.Term);
+                AddObligation("Postcondition", ens.DisplayText, retLoc, gamma, goal.Term, ens.Because);
             }
             catch (ContractLoweringException ex)
             {
@@ -783,11 +789,12 @@ internal sealed class CfgSsaLowerer
         {
             try
             {
+                SmtTypeSystem.TryGetConstrainedUnderlying(value.Type, out _, out var typeDescription);
                 var unwrapped = _translator.UnwrapRefinedIfApplicable(value);
                 var valEnv = new BlockEnv();
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var goal = LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false);
-                AddObligation("TypeInvariant", $"{value.Type.Name}.IsValid", loc, gamma, goal.Term);
+                AddObligation("TypeInvariant", $"{value.Type.Name}.IsValid", loc, gamma, goal.Term, typeDescription);
             }
             catch (ContractLoweringException ex)
             {
@@ -807,9 +814,10 @@ internal sealed class CfgSsaLowerer
 
             try
             {
+                var invDescription = SmtTypeSystem.GetInvariantDescription(invMember);
                 var invEnv = new BlockEnv { ThisOverride = value };
                 var goal = LowerExpression(invBody!, gamma, invEnv, emitObligations: false);
-                AddObligation("TypeInvariant", $"[Invariant] {value.Type.Name}.{invMember.Name}", loc, gamma, goal.Term);
+                AddObligation("TypeInvariant", $"[Invariant] {value.Type.Name}.{invMember.Name}", loc, gamma, goal.Term, invDescription);
             }
             catch (ContractLoweringException ex)
             {
@@ -1880,7 +1888,7 @@ internal sealed class CfgSsaLowerer
             try
             {
                 var reqTerm = LowerExpression(req.Condition, gamma, calleeEnv, emitObligations: false);
-                AddObligation("Precondition", $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}", callLoc, gamma, reqTerm.Term);
+                AddObligation("Precondition", $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}", callLoc, gamma, reqTerm.Term, req.Because);
             }
             catch (ContractLoweringException ex)
             {
@@ -2186,10 +2194,20 @@ internal sealed class CfgSsaLowerer
         return new SmtTypedTerm(name, value.Type);
     }
 
-    private void AddObligation(string kind, string description, Location location, string gamma, string goalTerm)
+    private void AddObligation(string kind, string description, Location location, string gamma, string goalTerm, string? reason = null)
     {
         var preamble = string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions));
-        _obligations.Add(new ProofObligation(kind, description, location, gamma, goalTerm, preamble, _trackedParams.ToList()));
+        _obligations.Add(new ProofObligation(kind, description, location, gamma, goalTerm, preamble, _trackedParams.ToList(), reason));
+    }
+
+    private static string? ExtractConstantStringArg(IOperation argOp)
+    {
+        var cur = argOp;
+        while (cur is IConversionOperation conv)
+        {
+            cur = conv.Operand;
+        }
+        return cur.ConstantValue.HasValue ? cur.ConstantValue.Value as string : null;
     }
 
     private static string CombineAnd(string a, string b)

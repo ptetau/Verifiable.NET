@@ -87,12 +87,16 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                 foreach (var err in allErrors)
                 {
+                    var elmErr = ElmDiagnosticFormatter.Format(
+                        "UNSUPPORTED CONTRACT",
+                        err.Location,
+                        $"Could not translate contract `{err.Contract}` in `{method.ContainingType?.Name}.{method.Name}` into an SMT formula.",
+                        explanation: $"Reason: {err.Error}",
+                        fixHint: "Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.");
                     opCtx.ReportDiagnostic(Diagnostic.Create(
                         VerifiableDescriptors.InvalidContractExpression,
                         err.Location,
-                        err.Contract,
-                        $"{method.ContainingType?.Name}.{method.Name}",
-                        err.Error));
+                        elmErr));
                 }
 
                 foreach (var ob in allObligations)
@@ -104,9 +108,17 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     {
                         if (Interlocked.Exchange(ref reportedUnavailable, 1) == 0)
                         {
+                            var z3Loc = method.Locations.FirstOrDefault() ?? ob.Location;
+                            var elmMissing = ElmDiagnosticFormatter.Format(
+                                "Z3 SOLVER NOT FOUND",
+                                z3Loc,
+                                "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped.",
+                                explanation: "Checked `VERIFIABLE_Z3_PATH`, `.tools/z3`, `~/.verifiable/z3`, and `PATH`.",
+                                fixHint: "Run `scripts/install-z3.ps1` (Windows) or `scripts/install-z3.sh` (Linux/macOS), or set `VERIFIABLE_Z3_PATH`.");
                             opCtx.ReportDiagnostic(Diagnostic.Create(
                                 VerifiableDescriptors.Z3SolverUnavailable,
-                                method.Locations.FirstOrDefault() ?? ob.Location));
+                                z3Loc,
+                                elmMissing));
                         }
                         return;
                     }
@@ -115,26 +127,37 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     {
                         var ceSummary = FormatCounterexampleSummary(ob, result.Model);
                         var fixHint = GetFixHint(ob.Kind);
-                        var fullFix = isAgentMode
-                            ? $"{fixHint} {BuildAgentJsonBlock(method, ob, result, fixHint)}"
-                            : fixHint;
+                        var agentPayload = isAgentMode
+                            ? BuildAgentJsonBlock(method, ob, result, fixHint)
+                            : null;
+                        var elmFail = ElmDiagnosticFormatter.Format(
+                            "PROOF FAILED",
+                            ob.Location,
+                            $"Z3 found inputs that break a {FormatKindLabel(ob.Kind)} in `{method.ContainingType?.Name}.{method.Name}`.",
+                            spirit: ob.Reason,
+                            contract: $"{ob.Kind}: {ob.ContractText}",
+                            counterexample: ceSummary,
+                            fixHint: fixHint,
+                            agentPayload: agentPayload);
 
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
-                            ob.ContractText,
-                            $"{method.ContainingType?.Name}.{method.Name}",
-                            ceSummary,
-                            fullFix));
+                            elmFail));
                     }
                     else if (result.Status is SmtStatus.Unknown or SmtStatus.Error)
                     {
+                        var elmUnknown = ElmDiagnosticFormatter.Format(
+                            "SOLVER COULD NOT DECIDE",
+                            ob.Location,
+                            $"Z3 returned `{result.Status}` while checking `{ob.ContractText}` in `{method.ContainingType?.Name}.{method.Name}`.",
+                            spirit: ob.Reason,
+                            explanation: string.IsNullOrWhiteSpace(result.ErrorMessage) ? null : result.ErrorMessage,
+                            fixHint: "Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.");
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.SmtSolverUnknown,
                             ob.Location,
-                            ob.ContractText,
-                            $"{method.ContainingType?.Name}.{method.Name}",
-                            result.ErrorMessage ?? result.Status.ToString()));
+                            elmUnknown));
                     }
                 }
             });
@@ -234,9 +257,24 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         }
 
         return bindings.Count > 0
-            ? $"counterexample {{ {string.Join(", ", bindings)} }}"
-            : "counterexample exists (solver found a violating assignment)";
+            ? string.Join("\n    ", bindings)
+            : "(solver found a violating assignment)";
     }
+
+    private static string FormatKindLabel(string obligationKind) => obligationKind switch
+    {
+        "Precondition" => "callee precondition",
+        "Postcondition" => "postcondition",
+        "TypeInvariant" => "type invariant",
+        "Overflow" => "checked arithmetic check",
+        "DivisionByZero" => "division-by-zero check",
+        "CollectionBounds" => "collection bounds check",
+        "LoopInvariantEntry" => "loop invariant on entry",
+        "LoopInvariantStep" => "loop invariant preservation",
+        "LoopDecreasesEntry" => "loop termination measure on entry",
+        "LoopDecreasesStep" => "loop termination decrease check",
+        _ => "contract obligation"
+    };
 
     private static string GetFixHint(string obligationKind) => obligationKind switch
     {
@@ -268,8 +306,11 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
         var symbol = $"{method.ContainingType?.Name}.{method.Name}";
         var shortHash = result.QueryHash.Length >= 12 ? result.QueryHash.Substring(0, 12) : result.QueryHash;
+        var reasonPart = !string.IsNullOrWhiteSpace(ob.Reason)
+            ? $",\"reason\":{JsonString(ob.Reason!.Trim())}"
+            : string.Empty;
         var json =
-            $"{{\"rule\":\"VER102\",\"symbol\":{JsonString(symbol)},\"kind\":{JsonString(ob.Kind)},\"contract\":{JsonString(ob.ContractText)},\"counterexample\":{{{string.Join(",", cePairs)}}},\"smtHash\":{JsonString(shortHash)},\"fix\":{JsonString(fixHint)}}}";
+            $"{{\"rule\":\"VER102\",\"symbol\":{JsonString(symbol)},\"kind\":{JsonString(ob.Kind)},\"contract\":{JsonString(ob.ContractText)}{reasonPart},\"counterexample\":{{{string.Join(",", cePairs)}}},\"smtHash\":{JsonString(shortHash)},\"fix\":{JsonString(fixHint)}}}";
         return $"<verifiable-counterexample>{json}</verifiable-counterexample>";
     }
 

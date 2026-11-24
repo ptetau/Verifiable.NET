@@ -203,4 +203,30 @@ public class GatekeeperTests
         Assert.Single(warnings);
         Assert.Single(errors);
     }
+
+    [Fact]
+    public async Task ElmFormatting_IncludesBannerSnippetCaretAndFix()
+    {
+        const string source = """
+            using System;
+            using Verifiable.Contracts;
+
+            namespace ElmFormatSample;
+
+            [Verifiable]
+            public static class ClockSample
+            {
+                public static DateTime ReadNow() => DateTime.UtcNow;
+            }
+            """;
+
+        var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
+        var err = Assert.Single(diags.Where(d => d.Id == "VER004"));
+        var msg = err.GetMessage();
+        Assert.Contains("-- AMBIENT AUTHORITY", msg);
+        Assert.Contains("Why this rule exists:", msg);
+        Assert.Contains("DateTime.UtcNow", msg);
+        Assert.Contains("^", msg);
+        Assert.Contains("Fix:", msg);
+    }
 }

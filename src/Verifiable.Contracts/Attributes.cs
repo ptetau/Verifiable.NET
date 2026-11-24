@@ -25,7 +25,13 @@ public sealed class VerifiableCandidateAttribute : Attribute;
 /// proved by Z3 and evaluated at <see cref="InboundPortAttribute"/> gates.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
-public sealed class InvariantAttribute : Attribute;
+public sealed class InvariantAttribute(string? description = null) : Attribute
+{
+    /// <summary>
+    /// Gets an optional human-readable explanation of the spirit of this invariant.
+    /// </summary>
+    public string? Description { get; } = description;
+}
 
 /// <summary>
 /// Marks a value type as a linear obligation token that must be passed to a <see cref="ConsumesObligationAttribute"/> sink on every control-flow path.
@@ -68,11 +74,23 @@ public sealed class CheckedArithmeticAttribute : Attribute;
 /// for constrained type alias generation by <c>Verifiable.Generators</c>.
 /// </summary>
 [AttributeUsage(AttributeTargets.Struct)]
-public sealed class TypeAliasAttribute<TUnderlying> : Attribute;
+public sealed class TypeAliasAttribute<TUnderlying>(string? description = null) : Attribute
+{
+    /// <summary>
+    /// Gets an optional human-readable explanation of why values of this type are constrained.
+    /// </summary>
+    public string? Description { get; } = description;
+}
 
 /// <summary>
 /// Marks a <c>readonly partial record struct</c> declaring <c>public static bool IsValid(TUnderlying value)</c>
 /// for refinement type expansion by <c>Verifiable.Generators</c>.
 /// </summary>
 [AttributeUsage(AttributeTargets.Struct)]
-public sealed class RefinedAttribute<TUnderlying> : Attribute;
+public sealed class RefinedAttribute<TUnderlying>(string? description = null) : Attribute
+{
+    /// <summary>
+    /// Gets an optional human-readable explanation of why values of this type are constrained.
+    /// </summary>
+    public string? Description { get; } = description;
+}

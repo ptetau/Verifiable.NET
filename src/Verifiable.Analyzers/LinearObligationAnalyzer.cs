@@ -215,12 +215,16 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 var span = loc.SourceSpan;
                 if (reported.Add((span.Start, span.Length, detail)))
                 {
+                    var elmMessage = ElmDiagnosticFormatter.Format(
+                        "UNCONSUMED OBLIGATION",
+                        loc,
+                        $"Linear obligation token `{tokenName}` (`{typeName}`) {detail}.",
+                        spirit: "A `[MustConsume]` token represents work that must finish along every code path (such as emitting a command or committing state).",
+                        fixHint: "Pass the `[MustConsume]` token to a `[ConsumesObligation]` method, return it to the caller, or explicitly call `Obligation.Discard(...)`.");
                     context.ReportDiagnostic(Diagnostic.Create(
                         VerifiableDescriptors.LinearObligationViolation,
                         loc,
-                        tokenName,
-                        typeName,
-                        detail));
+                        elmMessage));
                 }
             }
         }

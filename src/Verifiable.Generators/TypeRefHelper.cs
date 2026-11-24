@@ -56,7 +56,10 @@ internal static class TypeRefHelper
         return sb.ToString();
     }
 
-    public static bool TryGetConstrainedUnderlyingType(ITypeSymbol type, out ITypeSymbol? underlyingType)
+    public static bool TryGetConstrainedUnderlyingType(ITypeSymbol type, out ITypeSymbol? underlyingType) =>
+        TryGetConstrainedUnderlyingType(type, out underlyingType, out _);
+
+    public static bool TryGetConstrainedUnderlyingType(ITypeSymbol type, out ITypeSymbol? underlyingType, out string? description)
     {
         if (type is INamedTypeSymbol named)
         {
@@ -68,6 +71,9 @@ internal static class TypeRefHelper
                     if (defName is "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" or "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
                     {
                         underlyingType = attrClass.TypeArguments[0];
+                        description = attr.ConstructorArguments.Length >= 1
+                            ? attr.ConstructorArguments[0].Value as string
+                            : null;
                         return true;
                     }
                 }
@@ -75,6 +81,7 @@ internal static class TypeRefHelper
         }
 
         underlyingType = null;
+        description = null;
         return false;
     }
 
@@ -132,9 +139,9 @@ internal static class TypeRefHelper
         return null;
     }
 
-    public static IReadOnlyList<(string Name, bool IsMethod)> GetInvariantMembers(INamedTypeSymbol type)
+    public static IReadOnlyList<(string Name, bool IsMethod, string? Description)> GetInvariantMembers(INamedTypeSymbol type)
     {
-        var result = new List<(string Name, bool IsMethod)>();
+        var result = new List<(string Name, bool IsMethod, string? Description)>();
         var stack = new Stack<INamedTypeSymbol>();
         for (var cur = type; cur is not null && cur.SpecialType != SpecialType.System_Object && cur.SpecialType != SpecialType.System_ValueType; cur = cur.BaseType)
         {
@@ -150,9 +157,9 @@ internal static class TypeRefHelper
                     m.MethodKind == MethodKind.Ordinary &&
                     m.Parameters.Length == 0 &&
                     m.ReturnType.SpecialType == SpecialType.System_Boolean &&
-                    HasInvariantAttribute(m))
+                    TryGetInvariantDescription(m, out var description))
                 {
-                    result.Add((m.Name, true));
+                    result.Add((m.Name, true, description));
                 }
             }
 
@@ -161,9 +168,9 @@ internal static class TypeRefHelper
                 if (!p.IsStatic &&
                     !p.IsIndexer &&
                     p.Type.SpecialType == SpecialType.System_Boolean &&
-                    HasInvariantAttribute(p))
+                    TryGetInvariantDescription(p, out var description))
                 {
-                    result.Add((p.Name, false));
+                    result.Add((p.Name, false, description));
                 }
             }
         }
@@ -171,9 +178,9 @@ internal static class TypeRefHelper
         return result;
     }
 
-    public static IReadOnlyList<ExpressionSyntax> GetLeadingSpecRequiresExpressions(IMethodSymbol method)
+    public static IReadOnlyList<(ExpressionSyntax Condition, string? Because)> GetLeadingSpecRequiresExpressions(IMethodSymbol method)
     {
-        var result = new List<ExpressionSyntax>();
+        var result = new List<(ExpressionSyntax Condition, string? Because)>();
         foreach (var synRef in method.DeclaringSyntaxReferences)
         {
             if (synRef.GetSyntax() is MethodDeclarationSyntax md && md.Body is { } body)
@@ -187,15 +194,37 @@ internal static class TypeRefHelper
                         break;
                     }
 
-                    if (specMethodName == "Requires" && inv.ArgumentList.Arguments.Count == 1)
+                    if (specMethodName == "Requires" && inv.ArgumentList.Arguments.Count is 1 or 2)
                     {
-                        result.Add(inv.ArgumentList.Arguments[0].Expression);
+                        var because = inv.ArgumentList.Arguments.Count == 2
+                            && inv.ArgumentList.Arguments[1].Expression is LiteralExpressionSyntax lit
+                            && lit.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
+                            ? lit.Token.Value as string
+                            : null;
+                        result.Add((inv.ArgumentList.Arguments[0].Expression, because));
                     }
                 }
             }
         }
 
         return result;
+    }
+
+    private static bool TryGetInvariantDescription(ISymbol symbol, out string? description)
+    {
+        foreach (var attr in symbol.GetAttributes())
+        {
+            if (attr.AttributeClass?.ToDisplayString() == InvariantAttributeMetadataName)
+            {
+                description = attr.ConstructorArguments.Length >= 1
+                    ? attr.ConstructorArguments[0].Value as string
+                    : null;
+                return true;
+            }
+        }
+
+        description = null;
+        return false;
     }
 
     private static bool TryMatchSpecMethodName(ExpressionSyntax expr, out string methodName)

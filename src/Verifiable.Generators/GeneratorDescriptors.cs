@@ -9,7 +9,7 @@ internal static class GeneratorDescriptors
     public static readonly DiagnosticDescriptor RefinedMustBeReadOnlyPartialRecordStruct = new(
         id: "VER201",
         title: "Invalid constrained struct target declaration",
-        messageFormat: "Type '{0}' decorated with [TypeAlias<T>] or [Refined<T>] must be declared as a 'readonly partial record struct'. Fix: Change the declaration to 'public readonly partial record struct {0} {{ public static bool IsValid(...) => ...; }}'.",
+        messageFormat: "{0}",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -17,7 +17,7 @@ internal static class GeneratorDescriptors
     public static readonly DiagnosticDescriptor MissingOrInvalidIsValidMethod = new(
         id: "VER202",
         title: "Missing or invalid IsValid method on constrained type",
-        messageFormat: "Constrained type '{0}' must declare 'public static bool IsValid({1} value) => ...;' with a single boolean predicate expression. Fix: Add 'public static bool IsValid({1} value) => ...;' inside '{0}'.",
+        messageFormat: "{0}",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);

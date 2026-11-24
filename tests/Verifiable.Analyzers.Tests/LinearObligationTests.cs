@@ -158,6 +158,10 @@ public class LinearObligationTests
         """;
 
         var diags = await AnalyzerTestHarness.AnalyzeAsync(code, new LinearObligationAnalyzer());
-        Assert.Contains(diags, d => d.Id == "VER007");
+        var err = Assert.Single(diags, d => d.Id == "VER007" && d.GetMessage().Contains("`pending`"));
+        var msg = err.GetMessage();
+        Assert.Contains("-- UNCONSUMED OBLIGATION", msg);
+        Assert.Contains("^", msg);
+        Assert.Contains("Fix:", msg);
     }
 }

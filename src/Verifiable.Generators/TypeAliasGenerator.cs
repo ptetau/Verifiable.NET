@@ -15,6 +15,7 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
     private sealed record ConstrainedTarget(
         INamedTypeSymbol Symbol,
         ITypeSymbol UnderlyingType,
+        string? Description,
         Location DiagnosticLocation,
         bool IsValidDeclaration,
         IReadOnlyList<string> UsingDirectives,
@@ -51,7 +52,7 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
             return null;
         }
 
-        if (!TypeRefHelper.TryGetConstrainedUnderlyingType(symbol, out var underlyingType) || underlyingType is null)
+        if (!TypeRefHelper.TryGetConstrainedUnderlyingType(symbol, out var underlyingType, out var description) || underlyingType is null)
         {
             return null;
         }
@@ -69,6 +70,7 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
         return new ConstrainedTarget(
             symbol,
             underlyingType,
+            description,
             context.TargetNode.GetLocation(),
             isReadOnlyPartialRecordStruct,
             usings,
@@ -79,10 +81,16 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
     {
         if (!target.IsValidDeclaration)
         {
+            var msg = ElmGeneratorFormatter.Format(
+                "INVALID CONSTRAINED TYPE",
+                target.DiagnosticLocation,
+                $"The type `{target.Symbol.Name}` has `[TypeAlias<T>]` or `[Refined<T>]`, so it must be a `readonly partial record struct`.",
+                "Why this rule exists: constrained value types are zero-allocation immutable structs whose generated `.From(...)`, `.TryFrom(...)`, and JSON converters are emitted into a partial declaration.",
+                $"Change the declaration to `public readonly partial record struct {target.Symbol.Name} {{ public static bool IsValid(...) => ...; }}`.");
             spc.ReportDiagnostic(Diagnostic.Create(
                 GeneratorDescriptors.RefinedMustBeReadOnlyPartialRecordStruct,
                 target.DiagnosticLocation,
-                target.Symbol.Name));
+                msg));
             return;
         }
 
@@ -96,11 +104,17 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
             bodyExpr is null ||
             paramName is null)
         {
+            var underlyingName = target.UnderlyingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+            var msg = ElmGeneratorFormatter.Format(
+                "MISSING ISVALID PREDICATE",
+                target.DiagnosticLocation,
+                $"The constrained type `{target.Symbol.Name}` needs a single-expression `IsValid({underlyingName} value)` method.",
+                "Why this rule exists: the generator and Z3 prover share this predicate both to check raw inputs at runtime and to reason about valid values at compile time.",
+                $"Add `public static bool IsValid({underlyingName} value) => ...;` inside `{target.Symbol.Name}`.");
             spc.ReportDiagnostic(Diagnostic.Create(
                 GeneratorDescriptors.MissingOrInvalidIsValidMethod,
                 target.DiagnosticLocation,
-                target.Symbol.Name,
-                target.UnderlyingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
+                msg));
             return;
         }
 
@@ -125,7 +139,8 @@ public sealed class TypeAliasGenerator : IIncrementalGenerator
             accessibility,
             target.UsingDirectives,
             GetEnclosingPartialDeclarations(target.Symbol),
-            target.HintSuffix);
+            target.HintSuffix,
+            target.Description);
     }
 
     private static List<string> GetEnclosingPartialDeclarations(INamedTypeSymbol symbol)

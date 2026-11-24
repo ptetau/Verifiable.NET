@@ -30,7 +30,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         IReadOnlyList<DomainMember> ConstructorMembers,
         IReadOnlyList<DomainMember> InitMembers,
         ISet<string> AllInstanceMemberNames,
-        IReadOnlyList<(string Name, bool IsMethod)> InvariantMembers,
+        IReadOnlyList<(string Name, bool IsMethod, string? Description)> InvariantMembers,
         IReadOnlyList<string> UsingDirectives);
 
     /// <inheritdoc />
@@ -331,12 +331,15 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         }
         sb.AppendLine(";");
 
-        foreach (var (invName, isMethod) in shape.InvariantMembers)
+        foreach (var (invName, isMethod, invDesc) in shape.InvariantMembers)
         {
             var checkExpr = isMethod ? $"candidate.{invName}()" : $"candidate.{invName}";
             var invPath = $"string.IsNullOrEmpty(path) ? {TypeRefHelper.EscapeStringLiteral(shape.Symbol.Name)} : path";
             var invLit = TypeRefHelper.EscapeStringLiteral(invName);
-            var invMsg = TypeRefHelper.EscapeStringLiteral($"Invariant '{invName}' failed on {shape.Symbol.Name}.");
+            var invText = !string.IsNullOrWhiteSpace(invDesc)
+                ? $"Invariant '{invName}' failed on {shape.Symbol.Name}: {invDesc!.Trim()}"
+                : $"Invariant '{invName}' failed on {shape.Symbol.Name}.";
+            var invMsg = TypeRefHelper.EscapeStringLiteral(invText);
             sb.Append(b).Append("    if (!").Append(checkExpr).AppendLine(")");
             sb.Append(b).AppendLine("    {");
             sb.Append(b).Append("        __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(")
@@ -482,14 +485,17 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                     .Select(m => m.Name),
                 StringComparer.Ordinal);
 
-            foreach (var reqExpr in requiresExprs)
+            foreach (var (reqExpr, because) in requiresExprs)
             {
                 var reqText = reqExpr.ToString();
                 var evalExpr = method.IsStatic
                     ? reqText
                     : PredicateHelper.QualifyMembers(reqExpr, "__ver_instance", instanceMemberNames);
                 var reqLit = TypeRefHelper.EscapeStringLiteral(reqText);
-                var msgLit = TypeRefHelper.EscapeStringLiteral($"Precondition '{reqText}' failed.");
+                var msgText = !string.IsNullOrWhiteSpace(because)
+                    ? $"Precondition failed: {because!.Trim()} ({reqText})."
+                    : $"Precondition '{reqText}' failed.";
+                var msgLit = TypeRefHelper.EscapeStringLiteral(msgText);
                 sb.Append(b).Append("if (!(").Append(evalExpr).AppendLine("))");
                 sb.Append(b).AppendLine("{");
                 sb.Append(b).Append("    __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(\"requires\", ")

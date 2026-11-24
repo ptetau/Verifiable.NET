@@ -539,4 +539,55 @@ public class SmtProverTests
         Assert.Contains(ver102s, d => d.GetMessage().Contains("Precondition") && d.GetMessage().Contains("count ="));
         Assert.Contains(ver102s, d => d.GetMessage().Contains("TypeInvariant") && d.GetMessage().Contains("count ="));
     }
+
+    [Fact]
+    public async Task ElmErrorAndSpiritStrings_SurfaceInVer102HumanMessageAndAgentJson()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+
+            namespace SpiritSamples;
+
+            [TypeAlias<decimal>("Deposits must be strictly positive so transfers never drain an account backwards.")]
+            public readonly partial record struct PositiveDeposit
+            {
+                public static bool IsValid(decimal v) => v > 0m;
+            }
+
+            [Verifiable]
+            public static class Vault
+            {
+                public static decimal Withdraw(decimal balance, decimal amount)
+                {
+                    Spec.Requires(amount > 0m, "Withdrawal amounts must be positive.");
+                    Spec.Ensures<decimal>(result => result >= 0m, "Vault accounts do not allow overdrafts.");
+                    return balance - amount;
+                }
+
+                public static PositiveDeposit MakeDeposit(decimal raw) =>
+                    PositiveDeposit.From(raw);
+            }
+            """;
+
+        var props = new Dictionary<string, string> { ["build_property.VerifiableAgent"] = "1" };
+        var diags = await AnalyzerTestHarness.AnalyzeWithOptionsAsync(source, props, new VerifiableSmtAnalyzer());
+        var ver102s = diags.Where(d => d.Id == "VER102").ToList();
+
+        var withdrawErr = Assert.Single(ver102s, d => d.GetMessage().Contains("Vault.Withdraw"));
+        var wMsg = withdrawErr.GetMessage();
+        Assert.Contains("-- PROOF FAILED", wMsg);
+        Assert.Contains("Why this rule exists:", wMsg);
+        Assert.Contains("Vault accounts do not allow overdrafts.", wMsg);
+        Assert.Contains("^", wMsg);
+        Assert.Contains("Fix:", wMsg);
+
+        var match = Regex.Match(wMsg, @"<verifiable-counterexample>(?<json>\{.*\})</verifiable-counterexample>");
+        Assert.True(match.Success, $"Expected <verifiable-counterexample> JSON in: {wMsg}");
+        using (var doc = JsonDocument.Parse(match.Groups["json"].Value))
+        {
+            Assert.Equal("Vault accounts do not allow overdrafts.", doc.RootElement.GetProperty("reason").GetString());
+        }
+
+        Assert.Contains(ver102s, d => d.GetMessage().Contains("Vault.MakeDeposit") && d.GetMessage().Contains("Deposits must be strictly positive"));
+    }
 }

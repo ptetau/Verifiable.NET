@@ -19,7 +19,8 @@ internal static class RefinedStructEmitter
         string accessibilityModifier,
         IReadOnlyList<string> usingDirectives,
         IReadOnlyList<string> enclosingPartialDeclarations,
-        string hintSuffix)
+        string hintSuffix,
+        string? description = null)
     {
         var typeName = symbol.Name;
         var targetNamespace = TypeRefHelper.GetNamespace(symbol);
@@ -116,16 +117,31 @@ internal static class RefinedStructEmitter
             ? "value is not null && IsValid(value)"
             : "IsValid(value)";
 
+        var hasDescription = !string.IsNullOrWhiteSpace(description);
+        var cleanDescription = hasDescription ? description!.Trim() : null;
+
         // From
         sb.Append(memberIndent).AppendLine("[global::Verifiable.Contracts.PureAxiom]");
         sb.Append(memberIndent).Append("public static ").Append(typeName).Append(" From(").Append(underlyingGlobal).AppendLine(" value)");
         sb.Append(memberIndent).AppendLine("{");
-        sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Requires(").Append(validCheckExpr).AppendLine(");");
+        if (cleanDescription is not null)
+        {
+            sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Requires(")
+                .Append(validCheckExpr).Append(", ")
+                .Append(TypeRefHelper.EscapeStringLiteral(cleanDescription)).AppendLine(");");
+        }
+        else
+        {
+            sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Requires(").Append(validCheckExpr).AppendLine(");");
+        }
         sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Ensures<").Append(typeName).AppendLine(">(result => result.Value == value);");
         sb.Append(memberIndent).Append("    if (!(").Append(validCheckExpr).AppendLine("))");
         sb.Append(memberIndent).AppendLine("    {");
+        var outOfRangeMsg = cleanDescription is not null
+            ? $"Invalid {typeName}: {cleanDescription} Fix: Pass a value satisfying {typeName}.IsValid."
+            : $"Invalid {typeName}: value violates {typeName}.IsValid. Fix: Pass a value satisfying {typeName}.IsValid.";
         sb.Append(memberIndent).Append("        throw new global::System.ArgumentOutOfRangeException(nameof(value), value, ")
-            .Append(TypeRefHelper.EscapeStringLiteral($"Invalid {typeName}: value violates {typeName}.IsValid. Fix: Pass a value satisfying {typeName}.IsValid."))
+            .Append(TypeRefHelper.EscapeStringLiteral(outOfRangeMsg))
             .AppendLine(");");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).Append("    return new ").Append(typeName).AppendLine("(value);");
@@ -162,8 +178,17 @@ internal static class RefinedStructEmitter
         sb.Append(memberIndent).Append("        return global::Verifiable.Contracts.MarshalResult<").Append(typeName).Append(">.Ok(new ").Append(typeName).AppendLine("(value));");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).Append("    return global::Verifiable.Contracts.MarshalResult<").Append(typeName).AppendLine(">.Fail(");
-        sb.Append(memberIndent).Append("        new global::Verifiable.Contracts.ContractViolation(fieldName, ").Append(isValidPredicateName).Append(", ")
-            .Append("$\"Value '{value}' failed ").Append(typeName).AppendLine(".IsValid.\"));");
+        if (cleanDescription is not null)
+        {
+            sb.Append(memberIndent).Append("        new global::Verifiable.Contracts.ContractViolation(fieldName, ").Append(isValidPredicateName).Append(", ")
+                .Append("$\"Value '{value}' failed ").Append(typeName).Append(".IsValid: \" + ")
+                .Append(TypeRefHelper.EscapeStringLiteral(cleanDescription)).AppendLine("));");
+        }
+        else
+        {
+            sb.Append(memberIndent).Append("        new global::Verifiable.Contracts.ContractViolation(fieldName, ").Append(isValidPredicateName).Append(", ")
+                .Append("$\"Value '{value}' failed ").Append(typeName).AppendLine(".IsValid.\"));");
+        }
         sb.Append(memberIndent).AppendLine("}");
 
         // Bounded unchecked accessor
@@ -185,7 +210,7 @@ internal static class RefinedStructEmitter
 
         // JsonConverter
         sb.AppendLine();
-        EmitJsonConverter(sb, memberIndent, typeName, underlyingType, underlyingGlobal);
+        EmitJsonConverter(sb, memberIndent, typeName, underlyingType, underlyingGlobal, cleanDescription);
 
         sb.Append(indent).AppendLine("}");
 
@@ -240,7 +265,8 @@ internal static class RefinedStructEmitter
         string indent,
         string typeName,
         ITypeSymbol underlyingType,
-        string underlyingGlobal)
+        string underlyingGlobal,
+        string? cleanDescription)
     {
         sb.Append(indent).Append("public sealed class ").Append(typeName).Append("JsonConverter : global::System.Text.Json.Serialization.JsonConverter<").Append(typeName).AppendLine(">");
         sb.Append(indent).AppendLine("{");
@@ -251,8 +277,16 @@ internal static class RefinedStructEmitter
         sb.Append(m).Append("    var raw = global::System.Text.Json.JsonSerializer.Deserialize<").Append(underlyingGlobal).AppendLine(">(ref reader, options);");
         sb.Append(m).Append("    if (!").Append(typeName).AppendLine(".TryFrom(raw!, out var result))");
         sb.Append(m).AppendLine("    {");
-        sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON value '{raw}' failed ").Append(typeName)
-            .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(".\");");
+        if (cleanDescription is not null)
+        {
+            sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON value '{raw}' failed ").Append(typeName)
+                .Append(".IsValid: \" + ").Append(TypeRefHelper.EscapeStringLiteral($"{cleanDescription} Fix: Provide a valid {typeName}.")).AppendLine(");");
+        }
+        else
+        {
+            sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON value '{raw}' failed ").Append(typeName)
+                .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(".\");");
+        }
         sb.Append(m).AppendLine("    }");
         sb.Append(m).AppendLine("    return result;");
         sb.Append(m).AppendLine("}");
@@ -271,8 +305,16 @@ internal static class RefinedStructEmitter
             sb.Append(m).AppendLine("    var keyText = reader.GetString() ?? throw new global::System.Text.Json.JsonException(\"Null property name.\");");
             sb.Append(m).Append("    if (!(").Append(propParseExpr).Append(") || !").Append(typeName).AppendLine(".TryFrom(parsed, out var result))");
             sb.Append(m).AppendLine("    {");
-            sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON property key '{keyText}' failed ").Append(typeName)
-                .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(" key.\");");
+            if (cleanDescription is not null)
+            {
+                sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON property key '{keyText}' failed ").Append(typeName)
+                    .Append(".IsValid: \" + ").Append(TypeRefHelper.EscapeStringLiteral($"{cleanDescription} Fix: Provide a valid {typeName} key.")).AppendLine(");");
+            }
+            else
+            {
+                sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON property key '{keyText}' failed ").Append(typeName)
+                    .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(" key.\");");
+            }
             sb.Append(m).AppendLine("    }");
             sb.Append(m).AppendLine("    return result;");
             sb.Append(m).AppendLine("}");

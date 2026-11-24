@@ -17,7 +17,7 @@ public readonly partial record struct AliasOrderId { public static bool IsValid(
 [TypeAlias<int>]
 public readonly partial record struct AliasNonNegCount { public static bool IsValid(int v) => v >= 0; }
 
-[TypeAlias<decimal>]
+[TypeAlias<decimal>("An order amount must be between 0.01 and 1,000,000 so fees and ledger totals stay positive and bounded.")]
 public readonly partial record struct AliasPositiveMoney { public static bool IsValid(decimal v) => v > 0m && v <= 1000000m; }
 
 [TypeAlias<string>]
@@ -97,6 +97,11 @@ public class TypeAliasTests
         var mismatch = AliasPortEnginePort.RecordOrder(raw, 1, "OK", 10m, null);
         Assert.False(mismatch.IsValid);
         Assert.Contains(mismatch.Violations, v => v.Predicate == "CountMatchesItems");
+
+        var rawZero = new RawAliasLedger { Count = 0, Items = new Dictionary<int, decimal>() };
+        var badAmount = AliasPortEnginePort.RecordOrder(rawZero, 1, "OK", 0m, null);
+        Assert.False(badAmount.IsValid);
+        Assert.Contains(badAmount.Violations, v => v.Message.Contains("fees and ledger totals stay positive and bounded"));
     }
 
     [Property]

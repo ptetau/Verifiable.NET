@@ -199,4 +199,76 @@ public class RefinedTypeSnapshotTests
         var portSrc = sources["SampleDomain.EnginePort.InboundPort.g.cs"];
         Assert.Contains("board.NextId >= 1", portSrc);
     }
+
+    [Fact]
+    public void SpiritDescriptionAndBecause_PropagateIntoGeneratedSpecAndGates()
+    {
+        const string code = """
+            using Verifiable.Contracts;
+
+            namespace SampleDomain;
+
+            [TypeAlias<int>("IDs start at 1 so zero never aliases an uninitialized record.")]
+            public readonly partial record struct CustomerId
+            {
+                public static bool IsValid(int value) => value >= 1;
+            }
+
+            public sealed record Account(CustomerId Owner, int Balance)
+            {
+                [Invariant("Accounts cannot go into overdraft.")]
+                public bool IsSolvent => Balance >= 0;
+            }
+
+            [Verifiable]
+            public static class AccountEngine
+            {
+                [InboundPort]
+                public static Account Deposit(Account account, int amount)
+                {
+                    Spec.Requires(amount > 0, "Only positive deposits increase a balance.");
+                    return account with { Balance = account.Balance + amount };
+                }
+            }
+            """;
+
+        var (output, genDiags, sources) = RunGenerators(code);
+
+        Assert.Empty(genDiags);
+        Assert.Empty(output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var typeSrc = sources["SampleDomain.CustomerId.TypeAlias.g.cs"];
+        Assert.Contains("\"IDs start at 1 so zero never aliases an uninitialized record.\"", typeSrc);
+
+        var gateSrc = sources["SampleDomain.Account.Gate.g.cs"];
+        Assert.Contains("Accounts cannot go into overdraft.", gateSrc);
+
+        var portSrc = sources["SampleDomain.AccountEnginePort.InboundPort.g.cs"];
+        Assert.Contains("Only positive deposits increase a balance.", portSrc);
+    }
+
+    [Fact]
+    public void InvalidTargetDiagnostics_FormatWithElmBannerCaretAndFix()
+    {
+        const string code = """
+            using Verifiable.Contracts;
+
+            namespace BrokenDomain;
+
+            [TypeAlias<int>]
+            public record struct NotReadOnlyOrPartial
+            {
+                public static bool IsValid(int value) => value >= 1;
+            }
+            """;
+
+        var (_, genDiags, _) = RunGenerators(code);
+        var diag = Assert.Single(genDiags.Where(d => d.Id == "VER201"));
+        var msg = diag.GetMessage();
+        Assert.Contains("-- INVALID CONSTRAINED TYPE", msg);
+        Assert.Contains("Why this rule exists:", msg);
+        Assert.Contains("|", msg);
+        Assert.Contains("^", msg);
+        Assert.Contains("Fix:", msg);
+    }
 }

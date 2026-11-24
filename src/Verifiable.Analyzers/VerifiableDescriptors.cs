@@ -12,7 +12,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor HeapAliasingOrMutableState = new(
         id: "VER001",
         title: "Prohibited mutable state or heap aliasing in verifiable scope",
-        messageFormat: "Construct '{0}' violates immutability/aliasing rules inside a verifiable cage. Fix: Use a 'readonly record struct' or immutable 'record' with 'with' expressions instead of mutable heap state or ref/out aliasing.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -20,7 +20,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor MutableCollection = new(
         id: "VER002",
         title: "Prohibited mutable collection in verifiable scope",
-        messageFormat: "Mutable collection '{0}' cannot be used inside a verifiable cage. Fix: Replace with 'ImmutableList<T>', 'ImmutableDictionary<K, V>', 'ImmutableHashSet<T>', or 'ImmutableArray<T>'.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -28,7 +28,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor UncheckedInitialization = new(
         id: "VER003",
         title: "Unchecked initialization of constrained type",
-        messageFormat: "Unchecked initialization of '{0}' bypasses its [Invariant] or [TypeAlias<T>] contract. Fix: Construct '{0}' using '{0}.From(...)', '{0}.TryFrom(...)', or an [InboundPort] gate.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -36,7 +36,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor NondeterminismOrAmbientAuthority = new(
         id: "VER004",
         title: "Prohibited nondeterminism or ambient authority in verifiable scope",
-        messageFormat: "Ambient authority or nondeterministic construct '{0}' is prohibited inside a verifiable cage. Fix: Pass explicit deterministic parameters such as 'UnixTimestamp now' or 'Guid nextId'.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -44,7 +44,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor DisallowedControlFlow = new(
         id: "VER005",
         title: "Prohibited control flow or exception in verifiable scope",
-        messageFormat: "Control flow construct '{0}' is prohibited inside a verifiable cage. Fix: Use bounded loops or Spec.LoopInvariant/Spec.Decreases, avoid async/lock/goto, and return 'Result<T, TError>' instead of throwing exceptions.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -52,7 +52,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor UnverifiedCallOrDynamic = new(
         id: "VER006",
         title: "Unverified call or dynamic dispatch crosses verifiable boundary",
-        messageFormat: "Call or construct '{0}' is outside the closed verifiable world. Fix: Mark the target method [Verifiable] or [PureAxiom], or extract pure logic via Sandwich I/O splitting.",
+        messageFormat: "{0}",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -60,7 +60,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor LinearObligationViolation = new(
         id: "VER007",
         title: "Linear obligation token contract violated",
-        messageFormat: "Linear obligation token '{0}' ({1}) {2}. Fix: Pass the [MustConsume] token to a [ConsumesObligation] method, return it, or explicitly call 'Obligation.Discard(...)'.",
+        messageFormat: "{0}",
         category: LinearCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -68,7 +68,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor InvalidContractExpression = new(
         id: "VER101",
         title: "Invalid or unsupported contract specification",
-        messageFormat: "Contract '{0}' on '{1}' cannot be lowered to SMT: {2}. Fix: Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.",
+        messageFormat: "{0}",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -76,7 +76,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor ProofObligationFailed = new(
         id: "VER102",
         title: "SMT verification obligation failed",
-        messageFormat: "Proof obligation '{0}' failed for '{1}' ({2}) - {3}",
+        messageFormat: "{0}",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -84,7 +84,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor SmtSolverUnknown = new(
         id: "VER103",
         title: "SMT solver returned unknown or timed out",
-        messageFormat: "Z3 returned 'unknown' for '{0}' on '{1}' ({2}). Fix: Simplify the contract, add Spec.LoopInvariant or Spec.Decreases annotations, or factor complex steps into helper lemmas.",
+        messageFormat: "{0}",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -92,7 +92,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor Z3SolverUnavailable = new(
         id: "VER104",
         title: "Z3 SMT solver executable not found",
-        messageFormat: "Z3 solver executable was not found (checked VERIFIABLE_Z3_PATH, .tools/z3, ~/.verifiable/z3, and PATH), so SMT verification was skipped. Fix: Run scripts/install-z3.ps1 (Windows) or scripts/install-z3.sh (Linux/macOS) or set VERIFIABLE_Z3_PATH.",
+        messageFormat: "{0}",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
@@ -106,7 +106,8 @@ internal static class VerifiableDescriptors
     {
         var severity = isCandidate ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error;
         var warningLevel = isCandidate ? 1 : 0;
-        var formatted = string.Format(descriptor.MessageFormat.ToString(), args);
+        var subject = args.Length > 0 ? args[0]?.ToString() ?? string.Empty : string.Empty;
+        var formatted = FormatGatekeeperOrFallback(descriptor.Id, location, subject, args);
         return Diagnostic.Create(
             id: descriptor.Id,
             category: descriptor.Category,
@@ -122,5 +123,53 @@ internal static class VerifiableDescriptors
             additionalLocations: null,
             customTags: descriptor.CustomTags,
             properties: properties);
+    }
+
+    private static string FormatGatekeeperOrFallback(
+        string id,
+        Location location,
+        string subject,
+        object?[] args)
+    {
+        return id switch
+        {
+            "VER001" => ElmDiagnosticFormatter.Format(
+                "MUTABLE STATE",
+                location,
+                $"Inside a `[Verifiable]` scope, `{subject}` allows aliasing or in-place mutation.",
+                spirit: "Two references to the same mutable object make it impossible to prove locally what changed across a method call.",
+                fixHint: "Use a `readonly record struct` or immutable `record` with `with` expressions instead of mutable heap state or ref/out aliasing."),
+            "VER002" => ElmDiagnosticFormatter.Format(
+                "MUTABLE COLLECTION",
+                location,
+                $"Mutable collection `{subject}` cannot cross or live inside a `[Verifiable]` cage.",
+                spirit: "Mutable lists, dictionaries, and arrays can be changed out from under a proof after a check passes.",
+                fixHint: "Replace with `ImmutableList<T>`, `ImmutableDictionary<K, V>`, `ImmutableHashSet<T>`, or `ImmutableArray<T>`."),
+            "VER003" => ElmDiagnosticFormatter.Format(
+                "UNCHECKED INITIALIZATION",
+                location,
+                $"Using `default` or `new` on `{subject}` skips its `[TypeAlias<T>]` / `[Invariant]` validation.",
+                spirit: "Unchecked struct defaults can put an impossible value (like an empty ID or negative quantity) inside a verified cage.",
+                fixHint: $"Construct `{subject}` using `{subject}.From(...)`, `{subject}.TryFrom(...)`, or an `[InboundPort]` gate."),
+            "VER004" => ElmDiagnosticFormatter.Format(
+                "AMBIENT AUTHORITY",
+                location,
+                $"Non-deterministic or ambient construct `{subject}` cannot be called inside a `[Verifiable]` scope.",
+                spirit: "Verified code must always return the same output for the same inputs so Z3 proofs and GalaxyCheck replays remain 100% reproducible.",
+                fixHint: "Hoist the time/ID/random value into an explicit parameter such as `UnixTimestamp now` or `Guid nextId`."),
+            "VER005" => ElmDiagnosticFormatter.Format(
+                "DISALLOWED CONTROL FLOW",
+                location,
+                $"Control flow `{subject}` is not allowed inside a `[Verifiable]` cage.",
+                spirit: "Hidden exceptions, async state machines, and unannotated loops break straight-line mathematical reasoning.",
+                fixHint: "Use bounded loops or `Spec.LoopInvariant`/`Spec.Decreases`, avoid async/lock/goto, and return `Result<T, TError>` instead of throwing exceptions."),
+            "VER006" => ElmDiagnosticFormatter.Format(
+                "UNVERIFIED CALL",
+                location,
+                $"Call `{subject}` crosses out of the verified closed world.",
+                spirit: "Z3 cannot prove invariants hold if a verified method calls unverified code whose behavior is unknown.",
+                fixHint: "Mark the callee `[Verifiable]` or `[PureAxiom]`, or move the I/O outside via Sandwich I/O splitting."),
+            _ => args.Length == 1 ? subject : string.Join(" ", args)
+        };
     }
 }

@@ -306,7 +306,10 @@ internal sealed class SmtTypeSystem
         return "0";
     }
 
-    public static bool TryGetConstrainedUnderlying(ITypeSymbol type, out ITypeSymbol? underlying)
+    public static bool TryGetConstrainedUnderlying(ITypeSymbol type, out ITypeSymbol? underlying) =>
+        TryGetConstrainedUnderlying(type, out underlying, out _);
+
+    public static bool TryGetConstrainedUnderlying(ITypeSymbol type, out ITypeSymbol? underlying, out string? description)
     {
         if (type is INamedTypeSymbol named)
         {
@@ -318,6 +321,9 @@ internal sealed class SmtTypeSystem
                     if (defName is "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" or "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
                     {
                         underlying = ac.TypeArguments[0];
+                        description = attr.ConstructorArguments.Length >= 1
+                            ? attr.ConstructorArguments[0].Value as string
+                            : null;
                         return true;
                     }
                 }
@@ -325,6 +331,7 @@ internal sealed class SmtTypeSystem
         }
 
         underlying = null;
+        description = null;
         return false;
     }
 
@@ -347,6 +354,21 @@ internal sealed class SmtTypeSystem
 
         method = null;
         return false;
+    }
+
+    public static string? GetInvariantDescription(ISymbol symbol)
+    {
+        foreach (var attr in symbol.GetAttributes())
+        {
+            if (attr.AttributeClass?.ToDisplayString() == VerifiableSymbolHelpers.InvariantAttr)
+            {
+                return attr.ConstructorArguments.Length >= 1
+                    ? attr.ConstructorArguments[0].Value as string
+                    : null;
+            }
+        }
+
+        return null;
     }
 
     public static IReadOnlyList<ISymbol> GetInvariantMembers(ITypeSymbol type)
