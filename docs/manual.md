@@ -1,226 +1,228 @@
-# Verifiable.NET Reference Manual
+# Verifiable.NET User Manual
 
-**Verifiable.NET** brings compile-time formal verification, type-safe specification contracts, constrained nominal types, protocol obligation tracking, and incremental refactoring directly into standard C# (.NET 9 and .NET 10). Everything compiles cleanly with zero third-party runtime overhead.
-
----
-
-## Table of Contents
-
-1. [Core Philosophy: Verifiable Cages](#1-core-philosophy-verifiable-cages)
-2. [Getting Started & Installing Z3](#2-getting-started--installing-z3)
-3. [Constrained Type Aliases (`[TypeAlias<T>]` & `[Refined<T>]`)](#3-constrained-type-aliases-typealiast--refinedt)
-4. [Hierarchical `[Verifiable]` Scopes & The Gatekeeper (`VER001`–`VER006`)](#4-hierarchical-verifiable-scopes--the-gatekeeper-ver001ver006)
-5. [Type-Safe Contracts & The Z3 SMT Prover (`Spec.*` & `[Invariant]`)](#5-type-safe-contracts--the-z3-smt-prover-spec--invariant)
-6. [Safe I/O Boundaries with `[InboundPort]`](#6-safe-io-boundaries-with-inboundport)
-7. [Linear Obligation Tokens (`[MustConsume]`)](#7-linear-obligation-tokens-mustconsume)
-8. [Incremental Migration with `[VerifiableCandidate]` & CodeFixes](#8-incremental-migration-with-verifiablecandidate--codefixes)
-9. [Property-Based & Fault-Injected Persistence Testing with GalaxyCheck](#9-property-based--fault-injected-persistence-testing-with-galaxycheck)
-10. [Walkthroughs: `TodoApp` and `AccountingApp`](#10-walkthroughs-todoapp-and-accountingapp)
-11. [Agent UX (`VERIFIABLE_AGENT=1` & `GALAXYCHECK_AGENT=1`)](#11-agent-ux-verifiable_agent1--galaxycheck_agent1)
-12. [Complete Diagnostic Reference (`VER001`–`VER202`)](#12-complete-diagnostic-reference-ver001ver202)
+This manual is organized around the concrete problems you run into while building reliable C# applications, with plain-English recipes you can copy straight into your project.
 
 ---
 
-## 1. Core Philosophy: Verifiable Cages
+## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
 
-Real applications deal with HTTP requests, SQLite databases, clocks (`DateTimeOffset.UtcNow`), random GUIDs, and UI state. Formal verification works best when you isolate **untrusted I/O shells** from **deterministic domain cores** (*Sandwich Architecture*):
+**Problem:** Primitive types like `int`, `decimal`, `string`, and `Guid` let bad data (`0`, `-5m`, empty strings, `Guid.Empty`) walk through your entire system until something crashes later.
 
-1. **Untrusted I/O Shell** parses JSON / SQL rows / UI input.
-2. **Inbound Port (`[InboundPort]`)** validates and marshals raw primitives into constrained domain types (`MarshalResult<T>`).
-3. **Verifiable Cage (`[Verifiable]`)** executes pure, deterministic domain functions whose preconditions, postconditions, loop invariants, and type invariants (`Spec.*`, `[Invariant]`) are proved at compile time by **Z3**.
-4. **Linear Obligation Tokens (`[MustConsume]`)** enforce end-to-end protocol safety across UI -> API -> DB (`VER007`).
-
----
-
-## 2. Getting Started & Installing Z3
-
-### Prerequisites
-- .NET SDK 9 or .NET SDK 10
-- Z3 SMT Solver binary (`z3.exe` on Windows, `z3` on Linux/macOS)
-
-```powershell
-# Windows (installs into %USERPROFILE%\.verifiable\z3\)
-powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
-```
-
-```bash
-# Linux / macOS (installs into ~/.verifiable/z3/)
-bash scripts/install-z3.sh
-```
-
-Discovery order: `VERIFIABLE_Z3_PATH` -> MSBuild `-p:VerifiableZ3Path=...` -> `.tools/z3/` -> `~/.verifiable/z3/` -> `PATH`.
-
-Run full verification across all libraries, Blazor Wasm clients, Z3 proofs, and GalaxyCheck tests:
-
-```powershell
-.\scripts\verify.ps1   # or ./scripts/verify.sh
-```
-
----
-
-## 3. Constrained Type Aliases (`[TypeAlias<T>]` & `[Refined<T>]`)
-
-Push domain invariants into nominal `readonly partial record struct` types by writing a type-checked `public static bool IsValid(T value)` predicate:
+**Solution:** Declare a one-line `readonly partial record struct` with `[TypeAlias<T>]` (or `[Refined<T>]`), a single predicate expression `IsValid`, and a plain-English reason explaining *why* the rule exists:
 
 ```csharp
-using System;
 using Verifiable.Contracts;
 
-[TypeAlias<int>]
+[TypeAlias<int>("Todo IDs start at 1 so zero never aliases an uninitialized record.")]
 public readonly partial record struct TodoId
 {
     public static bool IsValid(int value) => value >= 1;
 }
 
-[TypeAlias<int>]
-public readonly partial record struct NonNegativeInt
-{
-    public static bool IsValid(int value) => value >= 0;
-}
-
-[TypeAlias<decimal>]
-public readonly partial record struct PositiveAmount
-{
-    public static bool IsValid(decimal value) => value > 0m && value <= 1000000000m;
-}
-
-[TypeAlias<string>]
+[TypeAlias<string>("Titles must be 1–200 characters so blank items never enter the board.")]
 public readonly partial record struct TodoTitle
 {
     public static bool IsValid(string value) => value is { Length: >= 1 and <= 200 };
 }
-
-[TypeAlias<Guid>]
-public readonly partial record struct CommandId
-{
-    public static bool IsValid(Guid value) => value != Guid.Empty;
-}
 ```
 
-`[Refined<T>]` behaves identically (generating `*.Refined.g.cs` instead of `*.TypeAlias.g.cs`) when you want to add custom instance members alongside `IsValid`.
+### What gets generated for you
 
-### Generated Members
-Every `[TypeAlias<T>]` / `[Refined<T>]` generates:
-- Constructor `Name(TUnderlying Value)`, `IComparable<Name>.CompareTo`, `ToString()` (delegating to `Value`), `ToString(string? format)` / `ToString(string?, IFormatProvider?)` on numeric types & `Guid`, and `Length` on `string`.
-- `[PureAxiom] public static implicit operator TUnderlying(Name alias) => alias.Value` for seamless widening without `.Value` clutter.
-- `[PureAxiom]` relational operators `<`, `<=`, `>`, `>=` on numeric types and `char`.
-- `[PureAxiom] From(TUnderlying value)` with `Spec.Requires(IsValid(value))` and `Spec.Ensures<Name>(result => result.Value == value)` proved by Z3 at call sites.
-- `TryFrom(value, out result)`, `TryFrom(value) -> MarshalResult<Name>`, and `TryMarshal(value, fieldName)` for non-throwing boundary checks.
-- `JsonConverter<Name>` enforcing `IsValid` on `Read` AND `ReadAsPropertyName` / `WriteAsPropertyName` so `ImmutableDictionary<AliasKey, V>` round-trips cleanly via `System.Text.Json`.
-- Zero-based integer range elimination (`value >= 0 && value < N` or `value is >= 0 and < N`) generating `UpperBoundExclusive` and `[PureAxiom] ReadUnchecked<T>(ReadOnlySpan<T> buffer)` with `Spec.Requires(buffer.Length >= N)`.
+For each constrained type, `Verifiable.Generators` creates:
 
-`IsValid(...)` may use an expression body (`=> ...`) or a single-statement `{ return ...; }` body. When the underlying type is a reference type and the parameter is non-nullable (`string value`), the generator automatically adds a `value is not null` guard at runtime and in `From`.
+- Primary constructor `(TUnderlying Value)` and `IComparable<T>`
+- Implicit widening back to `TUnderlying` (`int raw = todoId;`) so existing math and formatting stay ergonomic
+- Relational operators (`<`, `<=`, `>`, `>=`) for numeric types and `.Length` / `ToString()` for `string`
+- Checked `From(value)` (adds `Spec.Requires(IsValid(value), description)` for Z3 and throws `ArgumentOutOfRangeException` with your description on invalid runtime input)
+- Safe `TryFrom(value, out result)` and `TryFrom(value) -> MarshalResult<T>`
+- Validating `<Name>JsonConverter` (handles JSON values and dictionary keys, throwing `JsonException` with your description if invalid wire data arrives)
+- For `0 <= value < N` bounds predicates (`int`): `UpperBoundExclusive` and `ReadUnchecked<T>(ReadOnlySpan<T>)`
 
----
-
-## 4. Hierarchical `[Verifiable]` Scopes & The Gatekeeper (`VER001`–`VER006`)
-
-Apply `[Verifiable]`, `[VerifiableCandidate]`, and `[CheckedArithmetic]` at the **highest** appropriate level:
-- `[assembly: Verifiable]` (project-wide)
-- `[Verifiable]` on a `class`, `static class`, `record`, or `struct` (type-wide + nested types)
-- `[Verifiable]` on an individual method
-
-Opt out specific boundary types or helper methods via `[Unverifiable]`. The nearest attribute along `method -> enclosing type -> assembly` determines scope, and calling `[Unverifiable]` from `[Verifiable]` triggers `VER006` unless marked `[PureAxiom]`.
-
-### Gatekeeper Rules (`VER001`–`VER006`)
-- **`VER001` (Heap Aliasing / Mutation)**: No mutable classes, non-readonly structs, `set;` properties, `ref`/`out`, or member mutation. Use `readonly record struct` / `record` with `init;` and `with`.
-- **`VER002` (Collections)**: No `List<T>`, `Dictionary<K,V>`, `HashSet<T>`, or `T[]`. Use `System.Collections.Immutable`.
-- **`VER003` (Unchecked Init)**: No `default(T)` or `new T()` on structs with `[Invariant]`, `[TypeAlias<T>]`, or `[Refined<T>]`.
-- **`VER004` (Ambient Authority)**: No `DateTime.Now`/`UtcNow`, `DateTimeOffset.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, mutable statics, or I/O. Pass explicit parameters.
-- **`VER005` (Control Flow)**: No unannotated `while`/`do`/`foreach` (must contain `Spec.LoopInvariant` or `Spec.Decreases`), `goto`, `async`/`await`/`Task`, `lock`, `throw`, `try`/`catch`. Return `Result<T, TError>`.
-- **`VER006` (Closed World)**: No unverified calls, reflection, or `dynamic`.
+> **Tip:** Both `[TypeAlias<T>("...")]` and `[Refined<T>("...")]` are supported and generate identical runtime code; `[TypeAlias<T>]` is recommended for clarity.
 
 ---
 
-## 5. Type-Safe Contracts & The Z3 SMT Prover (`Spec.*` & `[Invariant]`)
+## 2. Grouping multi-field business rules (`[Invariant]`)
 
-### Method Specifications (`Spec`)
-`Verifiable.Contracts.Spec` provides type-checked C# contracts decorated with `[Conditional("VERIFIABLE_SPEC")]`:
+**Problem:** Individual fields can all look valid on their own (`ActiveCount = 5`, `Items = empty`), yet together they violate a rule of your domain model.
 
-- **`Spec.Requires(bool condition)`**: Assumed on entry inside the verified method, proved under the caller's path condition (**Occurrence Typing**) at `[Verifiable]` call sites, and enforced at runtime by `[InboundPort]` wrappers when placed at the start of an `[InboundPort]` method.
-- **`Spec.Ensures<TResult>(Func<TResult, bool> predicate)`** (or **`Spec.Ensures(bool condition)`** with **`Spec.Result<TResult>()`**): Proved on every `return` branch and assumed by modular `[Verifiable]` callers. The type parameter `TResult` is checked against the enclosing method's return type (`VER101` on mismatch).
-- **`Spec.LoopInvariant(bool condition)`** & **`Spec.Decreases(int/long measure)`**: Placed inside `while`/`for`/`foreach` bodies; Z3 verifies entry, inductive preservation on back-edges, non-negativity, and strict decrease. Each loop in a method can carry its own independent `Spec.LoopInvariant` / `Spec.Decreases`.
-
-Because `VERIFIABLE_SPEC` is not defined in normal builds, **the C# compiler omits all `Spec.*` calls and lambdas from emitted IL**—giving full IDE IntelliSense, rename refactoring, and zero runtime overhead.
-
-### Typed Invariants (`[Invariant]`)
-Attach `[Invariant]` to any non-static parameterless `bool` method or `bool` property returning a single pure expression:
+**Solution:** Put `[Invariant("why")]` on any parameterless `bool` method or computed property on your immutable record or struct:
 
 ```csharp
-public readonly record struct PostedJournalEntry(...)
+[Verifiable]
+public readonly record struct LedgerState(
+    ImmutableDictionary<AccountId, Account> Accounts,
+    ImmutableList<PostedJournalEntry> Journal,
+    JournalEntryId NextEntryId,
+    NonNegativeDecimal TotalDebits,
+    NonNegativeDecimal TotalCredits)
 {
-    [Invariant]
-    public bool IsBalanced() => EntryDebitTotal == EntryCreditTotal && Lines.Count >= 2;
+    [Invariant("Across the entire ledger, total debits must always equal total credits.")]
+    public bool IsBalanced() => TotalDebits == TotalCredits;
 }
 ```
 
-### Supported SMT Theories
-- `decimal` -> exact arbitrary-precision `Real` rationals.
-- `int` / `long` -> mathematical `Int`, or 32/64-bit `(_ BitVec 32)` / `(_ BitVec 64)` overflow proofs under `[CheckedArithmetic]`.
-- `string` -> `VerStr` (`str-null`, `str-val`, `str.len`, concatenation, `IsNullOrEmpty`, property pattern `{ Length: ... }`).
-- `ImmutableDictionary<K,V>`, `ImmutableList<T>`, `ImmutableArray<T>`, `ImmutableHashSet<T>` -> extensional array + count models with automatic bounds/key verification.
-- Records, `readonly record struct`, `with` updates, tuples, `Nullable<T>`, and `Result<T, TError>`.
+Both Z3 (at compile time) and generated `[InboundPort]` gates (at runtime) automatically verify every `[Invariant]` on return values and incoming payloads.
 
 ---
 
-## 6. Safe I/O Boundaries with `[InboundPort]`
+## 3. Proving method behavior for all inputs (`Spec.*`)
 
-Putting `[InboundPort]` on a domain method generates:
-- `Raw<Type>` DTOs (`*.Gate.g.cs`) excluding `[Ghost]` and `[Invariant]` members.
-- `<Type>Gate.TryMarshal(Raw<Type>? raw, string path = "")` checking nested types, `[TypeAlias<T>]`/`[Refined<T>]` `IsValid`, enums, non-null strings, and all `[Invariant]` members, returning `MarshalResult<T>`.
-- `<DeclaringType>Port.<Method>(...)` (`*.InboundPort.g.cs`) marshaling raw arguments and running leading `Spec.Requires(...)` preconditions before invoking the domain method.
+**Problem:** You want to be 100% sure a method maintains invariants, never overflows, and handles every branch—without relying solely on example unit tests.
+
+**Solution:** Write standard C# assertions with `Spec.Requires`, `Spec.Ensures<T>`, `Spec.Ensures`, and `Spec.Result<T>()`. Passing a plain-English `because` message as the second argument documents *the spirit of the rule* and surfaces inside Z3 failure reports:
+
+```csharp
+public static LedgerState PostCheckedAssetTransfer(
+    LedgerState state,
+    AccountId from,
+    AccountId to,
+    PositiveAmount amount,
+    string memo,
+    UnixTimestamp now)
+{
+    Spec.Requires(
+        from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount,
+        "Transfers require two distinct existing accounts and enough balance in the source account to avoid overdraft.");
+    Spec.Ensures<LedgerState>(
+        result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m,
+        "After the transfer, the source account remains non-negative.");
+    Spec.Ensures<LedgerState>(
+        result => result.TotalDebits == result.TotalCredits,
+        "Total debits still equal total credits across the ledger.");
+    // ...
+}
+```
+
+All `Spec.*` methods carry `[Conditional("VERIFIABLE_SPEC")]`, so the compiler strips them completely from compiled IL—zero runtime overhead.
+
+### Proving `while` loops (`Spec.LoopInvariant` & `Spec.Decreases`)
+
+**Problem:** Loops can loop forever or drift out of bounds unless you state what stays true each step and why the loop must stop.
+
+**Solution:** Inside any `while` loop in a `[Verifiable]` method, add `Spec.LoopInvariant(cond, because)` and `Spec.Decreases(measure, because)`:
+
+```csharp
+var i = 0;
+while (i < lines.Count)
+{
+    Spec.LoopInvariant(
+        i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m,
+        "Index stays in range and running debit/credit sums never go negative.");
+    Spec.Decreases(
+        lines.Count - i,
+        "Remaining journal lines shrink by one on each iteration.");
+
+    // process lines[i]
+    i = i + 1;
+}
+```
+
+Z3 checks four facts automatically:
+1. `LoopInvariant` holds right before entering the loop.
+2. `LoopInvariant` still holds at the end of every iteration.
+3. `Decreases` starts `>= 0`.
+4. `Decreases` stays `>= 0` and strictly drops on every iteration.
 
 ---
 
-## 7. Linear Obligation Tokens (`[MustConsume]`)
+## 4. Reading Elm-style compiler errors
 
-Annotate linear command/commit structs with `[MustConsume]`. `LinearObligationAnalyzer` (`VER007`) analyzes every method in the compilation via CFG dataflow analysis, ensuring every live obligation token reaches a `[ConsumesObligation]` method, a return statement, or `Obligation.Discard(token, reason)` on every execution path.
+When a rule breaks, Verifiable.NET formats compiler errors in an Elm-inspired layout so you can spot the problem in seconds:
 
----
+- A **banner** (`-- PROOF FAILED ---- File.cs`) naming the check and file
+- A short sentence saying what happened and where
+- The **exact line of code** with `^` carets pointing at the expression
+- **Why this rule exists** — showing your `because` / `description` string (or the built-in rationale for Gatekeeper rules `VER001`–`VER007`)
+- **Contract** and **Counterexample** (when Z3 finds failing inputs)
+- A concrete **Fix:** line
 
-## 8. Incremental Migration with `[VerifiableCandidate]` & CodeFixes
-
-1. Start with `[VerifiableCandidate]` (on assembly, class, or method) for Warning-level Gatekeeper diagnostics.
-2. Apply `Verifiable.CodeFixes` refactorings (`HoistAmbientAuthority`, `FreezeMutableState`, `SandwichIoSplit`, `ExceptionToUnion`).
-3. Promote to `[Verifiable]`, push constraints into `[TypeAlias<T>]` + `[Invariant]` types, and add `Spec.*` contracts.
-
----
-
-## 9. Property-Based & Fault-Injected Persistence Testing with GalaxyCheck
-
-`Verifiable.Testing` integrates **GalaxyCheck** (`external/galactic-heck`) via `VerifiableGen`, `FaultInjectedSqliteHarness` (`PreCommitCrash`, `PostCommitCrashBeforeAck`, `DuplicateDelivery`), and `DifferentialPersistenceProperty.Create` to verify SQLite durability and `[InboundPort]` rejection against your pure domain models.
+When `VERIFIABLE_AGENT=1` is set in CI or AI agent environments, `VER102` appends one single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` JSON payload containing `"reason"`, `"counterexample"`, `"smtHash"`, and `"fix"`.
 
 ---
 
-## 10. Walkthroughs: `TodoApp` and `AccountingApp`
+## 5. Validating HTTP and wire data cleanly (`[InboundPort]`)
 
-- **`samples/TodoApp`**: Showcases `[assembly: Verifiable]` + `[TypeAlias<T>]` (`TodoId`, `NonNegativeInt`, `TodoTitle`, `UnixTimestamp`, `CommandId`) + `[Invariant] public bool IsConsistent()` + `[Unverifiable]` wire DTOs + Blazor Wasm MVU + idempotent SQLite persistence.
-- **`samples/AccountingApp`**: Showcases class/struct `[Verifiable]` + `[TypeAlias<T>]` (`PositiveAmount`, `NonNegativeDecimal`, `PositiveDecimal`, `CurrencyCode`, etc.) + Z3-proved double-entry conservation, inductive `Spec.LoopInvariant` / `Spec.Decreases` loops, and SQLite `ReplayLedgerAsync()` parity.
+**Problem:** Raw HTTP JSON uses primitives (`int`, `string`, `decimal`, mutable `List<T>`) and can violate your domain rules before reaching your core logic.
+
+**Solution:** Decorate your entry-point method with `[InboundPort]`:
+
+```csharp
+[Verifiable]
+public static class TodoEngine
+{
+    [InboundPort]
+    public static TodoTransition Add(TodoBoard board, TodoTitle title, UnixTimestamp now) { /* ... */ }
+}
+```
+
+`Verifiable.Generators` emits `RawTodoBoard`, `TodoBoardGate.TryMarshal(...)`, and `TodoEnginePort.Add(...)`, checking nested constrained fields, `[Invariant("...")]` checks, and leading `Spec.Requires(..., "...")` preconditions, returning `MarshalResult<T>` with human-readable `ContractViolation` objects you can serialize directly as `400 Bad Request`.
 
 ---
 
-## 11. Agent UX (`VERIFIABLE_AGENT=1` & `GALAXYCHECK_AGENT=1`)
+## 6. Tracking work that cannot be dropped (`[MustConsume]`)
 
-See [`AGENTS.md`](../AGENTS.md), [`docs/agents.md`](agents.md), and [`llms.txt`](../llms.txt) for machine-readable `<verifiable-counterexample>` and `<galaxycheck-failure>` schemas.
+**Problem:** Returning an unsaved command or uncommitted transaction token makes it easy for a refactor to accidentally skip committing or sending it on an error branch.
+
+**Solution:** Mark the token struct `[MustConsume]`, create it normally, and consume it in `[ConsumesObligation]` methods (or return it up the call stack, or call `Obligation.Discard(token, "reason")`):
+
+```csharp
+[MustConsume]
+public readonly record struct PendingTodoCommit(/* ... */);
+
+[ConsumesObligation]
+public static TodoCommitReceipt PersistCommit(SqliteConnection conn, PendingTodoCommit commit) { /* ... */ }
+```
+
+Every path that drops, overwrites, double-consumes, or discards a `[MustConsume]` value triggers `VER007 -- UNCONSUMED OBLIGATION` at compile time.
 
 ---
 
-## 12. Complete Diagnostic Reference (`VER001`–`VER202`)
+## 7. Choosing where verification applies (Scopes)
 
-Every diagnostic message ends with a `Fix:` instruction.
+You rarely want to mark every individual helper method one by one. Scopes cascade downward cleanly:
 
-| ID | Severity | Trigger |
+1. **Assembly level** — `[assembly: Verifiable]` covers every type and method in your shared domain library (used by `TodoApp.Shared`).
+2. **Type level** — `[Verifiable]` on a class or struct covers all its methods (used by `AccountingApp.Shared`).
+3. **Method level** — `[Verifiable]` on one critical calculation inside a larger legacy service.
+4. **Opt-out** — `[Unverifiable]` excludes a single shell/adapter method or helper inside an otherwise verified class or assembly.
+
+Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable]`, and a class `[Verifiable]` overrides `[assembly: VerifiableCandidate]`.
+
+---
+
+## 8. Migrating legacy C# safely (`[VerifiableCandidate]` + CodeFixes)
+
+**Problem:** Flipping `[Verifiable]` onto an older service immediately raises too many errors at once.
+
+**Solution:**
+
+1. Start with `[VerifiableCandidate]` at the assembly or class level. Every `VER001`–`VER006` rule reports as a **warning** instead of an error.
+2. Apply automated refactorings from `Verifiable.CodeFixes`:
+   - `VER001` / `VER002`: Freeze mutable classes/collections into `readonly record struct` and `Immutable*` collections.
+   - `VER004`: Hoist `DateTime.UtcNow`, `DateTime.Now`, `Guid.NewGuid()`, and `Random` calls into explicit parameters.
+   - `VER005`: Convert `throw` statements into explicit `Result<T, TError>` returns.
+   - `VER006`: Apply **Sandwich I/O splitting** to separate I/O at the edges from pure logic in the middle.
+3. Promote `[VerifiableCandidate]` to `[Verifiable]`, add `[TypeAlias<T>("...")]` types and `Spec.*` contracts, and let Z3 verify your core logic.
+
+---
+
+## 9. Diagnostic Reference (`VER001`–`VER202`)
+
+| Code | Banner Title | What Happened & Typical Fix |
 | --- | --- | --- |
-| `VER001` | Error (`[Verifiable]`) / Warning (`[VerifiableCandidate]`) | Mutable class, non-readonly struct, `set;` property, `ref`/`out`, member mutation |
-| `VER002` | Error / Warning | Mutable collection (`List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `T[]`, etc.) |
-| `VER003` | Error / Warning | Unchecked `default(T)` or `new T()` on `[Invariant]`, `[TypeAlias<T>]`, or `[Refined<T>]` struct |
-| `VER004` | Error / Warning | Nondeterminism / ambient authority (`UtcNow`, `NewGuid()`, `Random`, `Stopwatch`, mutable statics, I/O) |
-| `VER005` | Error / Warning | Unannotated loops (no `Spec.LoopInvariant`/`Spec.Decreases`), `goto`, `async`/`await`/`Task`, `lock`, `throw`, `try`/`catch` |
-| `VER006` | Error / Warning | Unverified call outside `[Verifiable]`/`[PureAxiom]`/trusted BCL, reflection, `dynamic`, unanalyzed delegates |
-| `VER007` | Error (everywhere) | Dropped, overwritten, double-consumed, or leaked `[MustConsume]` token |
-| `VER101` | Error | Invalid or unsupported expression in `Spec.*`, `IsValid`, or `[Invariant]` (or mismatched `Spec.Ensures<T>`) |
-| `VER102` | Error | Z3 found a counterexample (`SAT`) violating a contract, invariant, overflow check, or collection index |
-| `VER103` | Error | Z3 returned `unknown`, timed out, or failed SMT lowering |
-| `VER104` | Warning | Z3 binary not found; SMT proof checking skipped |
-| `VER201` | Error | `[TypeAlias<T>]` or `[Refined<T>]` target is not `readonly partial record struct` |
-| `VER202` | Error | `[TypeAlias<T>]` or `[Refined<T>]` missing a valid `public static bool IsValid(T value)` expression |
+| `VER001` | `MUTABLE STATE` | Mutable class, non-readonly struct, settable property, or `ref`/`out` aliasing inside a verified cage. Use `readonly record struct` or immutable `record` with `with`. |
+| `VER002` | `MUTABLE COLLECTION` | Mutable collection (`List<T>`, `Dictionary<K,V>`, `T[]`, `HashSet<T>`). Switch to `ImmutableList<T>`, `ImmutableDictionary<K,V>`, `ImmutableHashSet<T>`, or `ImmutableArray<T>`. |
+| `VER003` | `UNCHECKED INITIALIZATION` | `default(T)` or `new T()` skipped `[TypeAlias<T>]` / `[Invariant]`. Construct via `T.From(...)`, `T.TryFrom(...)`, or `[InboundPort]`. |
+| `VER004` | `AMBIENT AUTHORITY` | Called `DateTime.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, `Environment.*`, or touched mutable static state. Pass values in as parameters. |
+| `VER005` | `DISALLOWED CONTROL FLOW` | Unannotated `while`/`foreach`, `async`/`await`, `throw`, `try/catch`, `lock`, or `goto`. Annotate `while` loops with `Spec.LoopInvariant` + `Spec.Decreases`; use `Result<T, TError>` instead of exceptions. |
+| `VER006` | `UNVERIFIED CALL` | Called an unverified external method, reflection, or `dynamic`. Mark deterministic helpers `[Verifiable]` / `[PureAxiom]`, or move I/O to the outer shell. |
+| `VER007` | `UNCONSUMED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
+| `VER101` | `UNSUPPORTED CONTRACT` | Contract could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. |
+| `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
+| `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |
+| `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`). Warning only; proof checks resume once Z3 is present. |
+| `VER201` | `INVALID CONSTRAINED TYPE` | Type with `[TypeAlias<T>]` / `[Refined<T>]` is missing `readonly partial record struct` modifiers. |
+| `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |
+
+For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds.

@@ -1,6 +1,6 @@
 # AGENTS.md — Agent UX Guide for Verifiable.NET
 
-Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and test formally proved C# code in tight, deterministic feedback loops using 100% type-safe contracts (`Spec.*`, `[Invariant]`, `[TypeAlias<T>]`).
+Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and test formally proved C# code in tight, deterministic feedback loops using 100% type-safe contracts (`Spec.*`, `[Invariant]`, `[TypeAlias<T>]`) with plain-English spirit strings (`because` / `description`) and Elm-style diagnostics.
 
 ## 1. Environment Variables (Always Set These in Agent Runs)
 
@@ -36,10 +36,10 @@ bash scripts/install-z3.sh
 ## 3. Reading Machine-Readable Failure Blocks
 
 ### Z3 SMT Proof Failure (`VER102`)
-When `VERIFIABLE_AGENT=1` is set, every `VER102` build error includes a `Fix:` hint and a single-line JSON block:
+Every Verifiable diagnostic uses an Elm-style layout (`-- TITLE ---- File.cs`, source snippet with `^` caret underline, `"Why this rule exists:"`, `Fix:` hint). When `VERIFIABLE_AGENT=1` is set, every `VER102` build error also appends a single-line JSON block (including `"reason"` whenever a `because` or attribute `description` string was provided):
 
 ```text
-<verifiable-counterexample>{"rule":"VER102","symbol":"LedgerEngine.Withdraw","kind":"Postcondition","contract":"Spec.Ensures<decimal>(result => result >= 0m)","counterexample":{"fromBal":"0.0","amount":"1.0"},"smtHash":"...","fix":"Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...)."}</verifiable-counterexample>
+<verifiable-counterexample>{"rule":"VER102","symbol":"LedgerEngine.Withdraw","kind":"Postcondition","contract":"Spec.Ensures<decimal>(result => result >= 0m)","reason":"Balances must stay non-negative after every withdrawal.","counterexample":{"fromBal":"0.0","amount":"1.0"},"smtHash":"...","fix":"Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...)."}</verifiable-counterexample>
 ```
 
 ### GalaxyCheck Property Failure
@@ -52,7 +52,7 @@ Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` J
    - `VER004` -> hoist `UtcNow`/`NewGuid()` into parameters
    - `VER001`/`VER002` -> freeze to `readonly record struct` / `Immutable*` + `with`
    - `VER006`/`VER005` -> split pure logic via Sandwich I/O and replace `throw` with `Result<T, TError>`
-3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>]` / `[Refined<T>]` (`public static bool IsValid(...)`), add `[Invariant]` bool methods/properties, and attach `Spec.Requires` / `Spec.Ensures<T>` / `Spec.LoopInvariant` / `Spec.Decreases` for Z3 verification.
+3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>("why")]` / `[Refined<T>("why")]` (`public static bool IsValid(...)`), add `[Invariant("why")]` bool methods/properties, and attach `Spec.Requires(..., "why")` / `Spec.Ensures<T>(..., "why")` / `Spec.LoopInvariant(..., "why")` / `Spec.Decreases(..., "why")` for Z3 verification.
 4. Keep I/O boundaries safe by exposing `[InboundPort]` and wiring `[MustConsume]` obligation tokens across UI -> API -> DB.
 
 ## 5. Documentation & Compact Reference

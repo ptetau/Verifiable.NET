@@ -13,21 +13,23 @@ dotnet build Verifiable.NET.sln -c Release
 dotnet test Verifiable.NET.sln -c Release --no-build
 ```
 
-### Structured Counterexample JSON (`VER102`)
-When Z3 refutes a contract (`SAT`), `Verifiable.Analyzers` outputs:
-- Concrete counterexample parameter values (`fromBal = 0m, amount = 1m`)
+### Structured Counterexample JSON (`VER102`) & Elm Output
+All diagnostics (`VER001`–`VER202`) use an Elm-style layout (`-- TITLE ---- File.cs`, numbered source excerpt with `^` caret underline, `"Why this rule exists:"`, and a concrete `Fix:` line).
+When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyzers` outputs:
+- Elm-style banner, source caret, optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, and `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`)
 - A `Fix:` line naming the exact remediation
 - A single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` payload containing:
   - `rule`: `"VER102"`
   - `symbol`: `"DeclaringType.Method"`
-  - `kind`: `"Precondition" | "Postcondition" | "TypeInvariant" | "Overflow" | "CollectionBounds" | "LoopInvariantEntry" | "LoopInvariantStep" | "LoopDecreasesEntry" | "LoopDecreasesStep"`
-  - `contract`: exact attribute or check description
+  - `kind`: `"Precondition" | "Postcondition" | "TypeInvariant" | "Overflow" | "DivisionByZero" | "CollectionBounds" | "LoopInvariantEntry" | "LoopInvariantStep" | "LoopDecreasesEntry" | "LoopDecreasesStep"`
+  - `contract`: exact contract or check description
+  - `reason` *(optional)*: human-readable `because` or attribute `description` string when present
   - `counterexample`: key-value map of parameter names to Z3 counterexample values
   - `smtHash`: 12-char prefix of the cached SMT-LIB2 SHA-256 query hash
   - `fix`: actionable fix string
 
 ### Every Diagnostic Ends With `Fix:`
-All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER202`) diagnostics include a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
+All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER202`) diagnostics include an Elm-style explanation and a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
 
 ## 2. Z3 Discovery & Caching
 
