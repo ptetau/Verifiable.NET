@@ -1,6 +1,6 @@
 # AGENTS.md — Agent UX Guide for Verifiable.NET
 
-Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and test formally proved C# code in tight, deterministic feedback loops.
+Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and test formally proved C# code in tight, deterministic feedback loops using 100% type-safe contracts (`Spec.*`, `[Invariant]`, `[TypeAlias<T>]`).
 
 ## 1. Environment Variables (Always Set These in Agent Runs)
 
@@ -39,7 +39,7 @@ bash scripts/install-z3.sh
 When `VERIFIABLE_AGENT=1` is set, every `VER102` build error includes a `Fix:` hint and a single-line JSON block:
 
 ```text
-<verifiable-counterexample>{"rule":"VER102","symbol":"LedgerEngine.Withdraw","kind":"Postcondition","contract":"[Ensures(\"result >= 0m\")]","counterexample":{"fromBal":"0.0","amount":"1.0"},"smtHash":"...","fix":"Fix: Strengthen [Requires] preconditions or correct the return value to satisfy [Ensures]."}</verifiable-counterexample>
+<verifiable-counterexample>{"rule":"VER102","symbol":"LedgerEngine.Withdraw","kind":"Postcondition","contract":"Spec.Ensures<decimal>(result => result >= 0m)","counterexample":{"fromBal":"0.0","amount":"1.0"},"smtHash":"...","fix":"Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...)."}</verifiable-counterexample>
 ```
 
 ### GalaxyCheck Property Failure
@@ -47,15 +47,16 @@ Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` J
 
 ## 4. Incremental Migration Workflow (`[VerifiableCandidate]`)
 
-1. Annotate a legacy class or method with `[VerifiableCandidate]` (emits Warnings, never breaks build).
+1. Annotate a legacy assembly, class, or method with `[VerifiableCandidate]` (emits Warnings, never breaks build).
 2. Fix `VER001`–`VER006` warnings mechanically (manually or via `Verifiable.CodeFixes`):
    - `VER004` -> hoist `UtcNow`/`NewGuid()` into parameters
    - `VER001`/`VER002` -> freeze to `readonly record struct` / `Immutable*` + `with`
    - `VER006`/`VER005` -> split pure logic via Sandwich I/O and replace `throw` with `Result<T, TError>`
-3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into types via `[TypeAlias<T>]` / `[Refined<T>]` and attach `[Requires]` / `[Ensures]` / `[Invariant]` for Z3 verification.
+3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>]` / `[Refined<T>]` (`public static bool IsValid(...)`), add `[Invariant]` bool methods/properties, and attach `Spec.Requires` / `Spec.Ensures<T>` / `Spec.LoopInvariant` / `Spec.Decreases` for Z3 verification.
 4. Keep I/O boundaries safe by exposing `[InboundPort]` and wiring `[MustConsume]` obligation tokens across UI -> API -> DB.
 
 ## 5. Documentation & Compact Reference
 
-- Human manual: `docs/manual.md`
+- User guide: `README.md`
+- Reference manual: `docs/manual.md`
 - Compact agent reference: `llms.txt` at the repository root (also packed at `\` inside every `Verifiable.*` NuGet package).
