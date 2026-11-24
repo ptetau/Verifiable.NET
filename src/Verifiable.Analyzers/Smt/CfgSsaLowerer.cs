@@ -43,12 +43,14 @@ internal sealed class CfgSsaLowerer
     {
         public Dictionary<ISymbol, SmtTypedTerm> Vars { get; } = new(SymbolEqualityComparer.Default);
         public Dictionary<CaptureId, SmtTypedTerm> Captures { get; } = new();
+        public Dictionary<CaptureId, ISymbol> CaptureAliases { get; } = new();
 
         public BlockEnv Clone()
         {
             var copy = new BlockEnv();
             foreach (var kv in Vars) copy.Vars[kv.Key] = kv.Value;
             foreach (var kv in Captures) copy.Captures[kv.Key] = kv.Value;
+            foreach (var kv in CaptureAliases) copy.CaptureAliases[kv.Key] = kv.Value;
             return copy;
         }
     }
@@ -644,6 +646,17 @@ internal sealed class CfgSsaLowerer
         switch (op)
         {
             case IConversionOperation conv:
+                if (conv.Operand is ILiteralOperation litNull && litNull.ConstantValue.HasValue && litNull.ConstantValue.Value is null)
+                {
+                    if (conv.Type is not null)
+                    {
+                        if (_types.TryGetNullableInfo(conv.Type, out _, out var optId, out _))
+                            return new SmtTypedTerm($"opt-none-{optId}", conv.Type);
+                        if (conv.Type.SpecialType == SpecialType.System_String)
+                            return new SmtTypedTerm("str-null", conv.Type);
+                        return new SmtTypedTerm(_types.GetDefaultTerm(conv.Type), conv.Type);
+                    }
+                }
                 var inner = LowerExpression(conv.Operand, gamma, env, paramEnv);
                 return conv.Type is not null ? _translator.ConvertTo(inner, conv.Type) : inner;
 
@@ -666,6 +679,12 @@ internal sealed class CfgSsaLowerer
                 var capVal = LowerExpression(cap.Value, gamma, env, paramEnv);
                 var capSsa = BindSsaValue("cap", capVal);
                 env.Captures[cap.Id] = capSsa;
+                if (cap.Value is ILocalReferenceOperation capLoc)
+                    env.CaptureAliases[cap.Id] = capLoc.Local;
+                else if (cap.Value is IParameterReferenceOperation capParam)
+                    env.CaptureAliases[cap.Id] = capParam.Parameter;
+                else
+                    env.CaptureAliases.Remove(cap.Id);
                 return capSsa;
 
             case IFlowCaptureReferenceOperation capRef:
@@ -782,11 +801,11 @@ internal sealed class CfgSsaLowerer
 
     private SmtTypedTerm LowerLiteralOperation(ILiteralOperation lit)
     {
+        var type = lit.Type ?? _compilation.GetSpecialType(SpecialType.System_String);
         if (!lit.ConstantValue.HasValue)
-            return new SmtTypedTerm("str-null", _compilation.GetSpecialType(SpecialType.System_String));
+            return new SmtTypedTerm("str-null", type);
 
         var val = lit.ConstantValue.Value;
-        var type = lit.Type!;
         if (val is null)
         {
             if (_types.TryGetNullableInfo(type, out _, out var optId, out _))
@@ -820,6 +839,17 @@ internal sealed class CfgSsaLowerer
         string gamma,
         Location loc)
     {
+        if (kind == BinaryOperatorKind.Add &&
+            (resultType.SpecialType == SpecialType.System_String ||
+             left.Type.SpecialType == SpecialType.System_String ||
+             right.Type.SpecialType == SpecialType.System_String))
+        {
+            var strType = _compilation.GetSpecialType(SpecialType.System_String);
+            var strSsa = BindSsaValue("strcat", new SmtTypedTerm("str-null", strType), isFreshFreeSymbol: true);
+            _assertions.Add($"(assert (not (= {strSsa.Term} str-null)))");
+            return strSsa;
+        }
+
         if (kind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals)
         {
             var (lEq, rEq, _) = _translator.UnifyForComparison(left, right);
@@ -960,9 +990,11 @@ internal sealed class CfgSsaLowerer
             if (_types.TryGetSequenceInfo(recv.Type, out _, out var seqId, out var eType))
             {
                 var idxTerm = _translator.IntTermForIndex(arg);
-                AddObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma,
-                    $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recv.Term})))");
-                return new SmtTypedTerm($"(select (seq_elems_{seqId} {recv.Term}) {idxTerm})", eType!);
+                var boundsCond = $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recv.Term})))";
+                AddObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma, boundsCond);
+                var elemVal = new SmtTypedTerm($"(select (seq_elems_{seqId} {recv.Term}) {idxTerm})", eType!);
+                EmitOnDemandElementAssumptions(boundsCond, elemVal, propRef.Syntax.GetLocation());
+                return elemVal;
             }
         }
 
@@ -997,6 +1029,11 @@ internal sealed class CfgSsaLowerer
         var field = fieldRef.Field;
         if (fieldRef.Instance is null)
         {
+            var containing = field.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
+            if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && field.Name == "Empty")
+            {
+                return new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type);
+            }
             if (field.ContainingType?.ToDisplayString() == "System.Guid" && field.Name == "Empty")
             {
                 return new SmtTypedTerm("0", field.Type);
@@ -1534,6 +1571,10 @@ internal sealed class CfgSsaLowerer
             : "(or " + string.Join(" ", edges.Select(e => e.ReachCond)) + ")";
 
         var mergedEnv = new BlockEnv();
+        foreach (var e in edges)
+        {
+            foreach (var kv in e.Env.CaptureAliases) mergedEnv.CaptureAliases[kv.Key] = kv.Value;
+        }
         var allSyms = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var e in edges)
         {
@@ -1597,7 +1638,7 @@ internal sealed class CfgSsaLowerer
         return (gamma, mergedEnv);
     }
 
-    private void AssignTarget(IOperation target, SmtTypedTerm value, BlockEnv env)
+    private void AssignTarget(IOperation target, SmtTypedTerm value, BlockEnv env, bool updateCaptureAlias = true)
     {
         switch (target)
         {
@@ -1609,6 +1650,10 @@ internal sealed class CfgSsaLowerer
                 break;
             case IFlowCaptureReferenceOperation cr:
                 env.Captures[cr.Id] = value;
+                if (updateCaptureAlias && env.CaptureAliases.TryGetValue(cr.Id, out var aliasedSym))
+                {
+                    env.Vars[aliasedSym] = _translator.ConvertTo(value, GetSymbolType(aliasedSym));
+                }
                 break;
             case IMemberReferenceOperation mr when mr.Instance is not null:
                 var recv = GetReceiverTerm(mr.Instance, env);
@@ -1628,7 +1673,8 @@ internal sealed class CfgSsaLowerer
                     }
                     var updated = BindSsaValue("upd_" + SmtTypeSystem.SanitizeName(mr.Member.Name),
                         new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", fieldTerms)})", recv.Type));
-                    AssignTarget(mr.Instance, updated, env);
+                    // Member assignment on a FlowCaptureReference is a 'with' clone; do not mutate the captured source variable.
+                    AssignTarget(mr.Instance, updated, env, updateCaptureAlias: false);
                 }
                 break;
         }
@@ -1843,6 +1889,19 @@ internal sealed class CfgSsaLowerer
 
     private static HashSet<ISymbol> CollectModifiedSymbols(HashSet<BasicBlock> loopBlocks)
     {
+        var captureAliases = new Dictionary<CaptureId, ISymbol>();
+        foreach (var b in loopBlocks)
+        {
+            foreach (var op in b.Operations)
+            {
+                foreach (var cap in op.DescendantsAndSelf().OfType<IFlowCaptureOperation>())
+                {
+                    if (cap.Value is ILocalReferenceOperation lr) captureAliases[cap.Id] = lr.Local;
+                    else if (cap.Value is IParameterReferenceOperation pr) captureAliases[cap.Id] = pr.Parameter;
+                }
+            }
+        }
+
         var set = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var b in loopBlocks)
         {
@@ -1856,13 +1915,13 @@ internal sealed class CfgSsaLowerer
                             set.Add(vd.Symbol);
                             break;
                         case ISimpleAssignmentOperation sa:
-                            AddAssignedSym(sa.Target, set);
+                            AddAssignedSym(sa.Target, captureAliases, set);
                             break;
                         case ICompoundAssignmentOperation ca:
-                            AddAssignedSym(ca.Target, set);
+                            AddAssignedSym(ca.Target, captureAliases, set);
                             break;
                         case IIncrementOrDecrementOperation inc:
-                            AddAssignedSym(inc.Target, set);
+                            AddAssignedSym(inc.Target, captureAliases, set);
                             break;
                     }
                 }
@@ -1871,10 +1930,11 @@ internal sealed class CfgSsaLowerer
         return set;
     }
 
-    private static void AddAssignedSym(IOperation target, HashSet<ISymbol> set)
+    private static void AddAssignedSym(IOperation target, Dictionary<CaptureId, ISymbol> captureAliases, HashSet<ISymbol> set)
     {
         if (target is ILocalReferenceOperation lr) set.Add(lr.Local);
         else if (target is IParameterReferenceOperation pr) set.Add(pr.Parameter);
+        else if (target is IFlowCaptureReferenceOperation cr && captureAliases.TryGetValue(cr.Id, out var sym)) set.Add(sym);
     }
 
     private static ITypeSymbol GetSymbolType(ISymbol sym) => sym switch
