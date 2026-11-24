@@ -27,7 +27,7 @@ When Z3 refutes a contract (`SAT`), `Verifiable.Analyzers` outputs:
   - `fix`: actionable fix string
 
 ### Every Diagnostic Ends With `Fix:`
-All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER202`) diagnostics include a concrete `Fix:` guidance clause.
+All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER204`) diagnostics include a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) for full details and examples.
 
 ## 2. Z3 Discovery & Caching
 

@@ -52,9 +52,10 @@ Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` J
    - `VER004` -> hoist `UtcNow`/`NewGuid()` into parameters
    - `VER001`/`VER002` -> freeze to `readonly record struct` / `Immutable*` + `with`
    - `VER006`/`VER005` -> split pure logic via Sandwich I/O and replace `throw` with `Result<T, TError>`
-3. Promote `[VerifiableCandidate]` -> `[Verifiable]` and attach `[Requires]` / `[Ensures]` / `[Invariant]` for Z3 verification.
+3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into types via `[TypeAlias<T>]` / `[Refined<T>]` and attach `[Requires]` / `[Ensures]` / `[Invariant]` for Z3 verification.
 4. Keep I/O boundaries safe by exposing `[InboundPort]` and wiring `[MustConsume]` obligation tokens across UI -> API -> DB.
 
-## 5. Compact Reference
+## 5. Documentation & Compact Reference
 
-Read `llms.txt` at the repository root (also packed at `\` inside every `Verifiable.*` NuGet package).
+- Human manual: `docs/manual.md`
+- Compact agent reference: `llms.txt` at the repository root (also packed at `\` inside every `Verifiable.*` NuGet package).
