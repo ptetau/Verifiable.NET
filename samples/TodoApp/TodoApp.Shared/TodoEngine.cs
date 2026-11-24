@@ -4,8 +4,8 @@ namespace TodoApp.Shared;
 
 public static class TodoEngine
 {
-    [Verifiable, InboundPort]
-    [Ensures("!result.IsSuccess || (result.Board.NextId.Value == board.NextId.Value + 1 && result.Board.ActiveCount == board.ActiveCount + 1)")]
+    [InboundPort]
+    [Ensures("!result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1)")]
     [Ensures("!result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount)")]
     [Ensures("result.IsSuccess || result.Board == board")]
     public static TodoTransition Add(TodoBoard board, TodoTitle title, UnixTimestamp now)
@@ -16,17 +16,17 @@ public static class TodoEngine
         }
 
         var item = new TodoItem(board.NextId, title, TodoStatus.Active, now, now);
-        var nextId = TodoId.From(board.NextId.Value + 1);
+        var nextId = TodoId.From(board.NextId + 1);
         var nextBoard = board with
         {
             NextId = nextId,
             Items = board.Items.Add(board.NextId, item),
-            ActiveCount = board.ActiveCount + 1
+            ActiveCount = NonNegativeInt.From(board.ActiveCount + 1)
         };
         return new TodoTransition(nextBoard, true, null, item.Id);
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("result.IsSuccess || result.Board == board")]
     [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board)")]
     [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board)")]
@@ -57,13 +57,13 @@ public static class TodoEngine
         var nextBoard = board with
         {
             Items = board.Items.SetItem(id, updated),
-            ActiveCount = board.ActiveCount - 1,
-            CompletedCount = board.CompletedCount + 1
+            ActiveCount = NonNegativeInt.From(board.ActiveCount - 1),
+            CompletedCount = NonNegativeInt.From(board.CompletedCount + 1)
         };
         return new TodoTransition(nextBoard, true, null, id);
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("result.IsSuccess || result.Board == board")]
     [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board)")]
     public static TodoTransition Delete(TodoBoard board, TodoId id, UnixTimestamp now)
@@ -90,8 +90,8 @@ public static class TodoEngine
             var nextActiveBoard = board with
             {
                 Items = board.Items.SetItem(id, updated),
-                ActiveCount = board.ActiveCount - 1,
-                DeletedCount = board.DeletedCount + 1
+                ActiveCount = NonNegativeInt.From(board.ActiveCount - 1),
+                DeletedCount = NonNegativeInt.From(board.DeletedCount + 1)
             };
             return new TodoTransition(nextActiveBoard, true, null, id);
         }
@@ -104,8 +104,8 @@ public static class TodoEngine
         var nextCompletedBoard = board with
         {
             Items = board.Items.SetItem(id, updated),
-            CompletedCount = board.CompletedCount - 1,
-            DeletedCount = board.DeletedCount + 1
+            CompletedCount = NonNegativeInt.From(board.CompletedCount - 1),
+            DeletedCount = NonNegativeInt.From(board.DeletedCount + 1)
         };
         return new TodoTransition(nextCompletedBoard, true, null, id);
     }
@@ -134,7 +134,7 @@ public static class TodoUiEngine
             StatusText = "Syncing...",
             LastError = null
         };
-        var cmd = new UnsentTodoCommand(commandId, "add", title.Value, null, now);
+        var cmd = new UnsentTodoCommand(commandId, "add", title, null, now);
         return (nextState, cmd);
     }
 
@@ -151,7 +151,7 @@ public static class TodoUiEngine
             StatusText = "Syncing...",
             LastError = null
         };
-        var cmd = new UnsentTodoCommand(commandId, "complete", null, id.Value, now);
+        var cmd = new UnsentTodoCommand(commandId, "complete", null, id, now);
         return (nextState, cmd);
     }
 
@@ -168,11 +168,10 @@ public static class TodoUiEngine
             StatusText = "Syncing...",
             LastError = null
         };
-        var cmd = new UnsentTodoCommand(commandId, "delete", null, id.Value, now);
+        var cmd = new UnsentTodoCommand(commandId, "delete", null, id, now);
         return (nextState, cmd);
     }
 
-    [Verifiable]
     [Requires("state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value")]
     [Ensures("!result.IsSyncing && !result.PendingCommandId.HasValue")]
     public static TodoUiState OnCommitConfirmed(TodoUiState state, TodoCommitReceipt receipt) =>
@@ -185,7 +184,6 @@ public static class TodoUiEngine
             LastError = null
         };
 
-    [Verifiable]
     public static TodoUiState OnCommitFailed(TodoUiState state, string error) =>
         state with
         {

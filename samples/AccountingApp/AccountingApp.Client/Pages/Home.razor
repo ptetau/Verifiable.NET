@@ -46,7 +46,7 @@
     <ul>
         @foreach (var acc in _state.State.Accounts.Values.OrderBy(a => a.Id))
         {
-            <li>#@acc.Id.Value @acc.Name.Value (@acc.Kind, @acc.Currency.Value): @acc.Balance.ToString("N2")</li>
+            <li>#@acc.Id @acc.Name (@acc.Kind, @acc.Currency): @acc.Balance.ToString("N2")</li>
         }
     </ul>
 
@@ -55,7 +55,7 @@
         @foreach (var entry in _state.State.Journal)
         {
             <li>
-                Entry #@entry.Id.Value — @entry.Memo (Debits: @entry.EntryDebitTotal.ToString("N2"), Credits: @entry.EntryCreditTotal.ToString("N2"))
+                Entry #@entry.Id — @entry.Memo (Debits: @entry.EntryDebitTotal.ToString("N2"), Credits: @entry.EntryCreditTotal.ToString("N2"))
                 @if (entry.IsReversed)
                 {
                     <span> [REVERSED]</span>

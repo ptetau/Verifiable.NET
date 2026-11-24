@@ -3,6 +3,16 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 
+[assembly: TypeAlias<int>("AccountId", "Value >= 1", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<int>("JournalEntryId", "Value >= 1", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<decimal>("PositiveAmount", "Value > 0m && Value <= 1000000000m", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<decimal>("NonNegativeDecimal", "Value >= 0m", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<decimal>("PositiveDecimal", "Value > 0m", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<string>("CurrencyCode", "Length is >= 3 and <= 3", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<string>("AccountName", "Length is >= 1 and <= 100", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<long>("UnixTimestamp", "Value >= 0", Namespace = "AccountingApp.Shared")]
+[assembly: TypeAlias<Guid>("CommandId", "Value != Guid.Empty", Namespace = "AccountingApp.Shared")]
+
 namespace AccountingApp.Shared;
 
 public enum AccountType
@@ -20,27 +30,6 @@ public enum EntrySide
     Credit = 1
 }
 
-[Refined<int>("Value >= 1")]
-public readonly partial record struct AccountId;
-
-[Refined<int>("Value >= 1")]
-public readonly partial record struct JournalEntryId;
-
-[Refined<decimal>("Value > 0m && Value <= 1000000000m")]
-public readonly partial record struct PositiveAmount;
-
-[Refined<string>("Length is >= 3 and <= 3")]
-public readonly partial record struct CurrencyCode;
-
-[Refined<string>("Length is >= 1 and <= 100")]
-public readonly partial record struct AccountName;
-
-[Refined<long>("Value >= 0")]
-public readonly partial record struct UnixTimestamp;
-
-[Refined<Guid>("Value != Guid.Empty")]
-public readonly partial record struct CommandId;
-
 [Verifiable]
 public readonly record struct Account(
     AccountId Id,
@@ -57,12 +46,12 @@ public readonly record struct JournalLine(
     PositiveAmount Amount);
 
 [Verifiable]
-[Invariant("EntryDebitTotal == EntryCreditTotal && EntryDebitTotal > 0m && Lines.Count >= 2")]
+[Invariant("EntryDebitTotal == EntryCreditTotal && Lines.Count >= 2")]
 public readonly record struct PostedJournalEntry(
     JournalEntryId Id,
     ImmutableList<JournalLine> Lines,
-    decimal EntryDebitTotal,
-    decimal EntryCreditTotal,
+    PositiveDecimal EntryDebitTotal,
+    PositiveDecimal EntryCreditTotal,
     string Memo,
     UnixTimestamp PostedAt,
     bool IsReversed,
@@ -70,23 +59,20 @@ public readonly record struct PostedJournalEntry(
 
 [Verifiable]
 [Invariant("TotalDebits == TotalCredits")]
-[Invariant("TotalDebits >= 0m")]
-[Invariant("NextEntryId.Value >= 1")]
 public readonly record struct LedgerState(
     ImmutableDictionary<AccountId, Account> Accounts,
     ImmutableList<PostedJournalEntry> Journal,
     JournalEntryId NextEntryId,
-    decimal TotalDebits,
-    decimal TotalCredits)
+    NonNegativeDecimal TotalDebits,
+    NonNegativeDecimal TotalCredits)
 {
-    [Verifiable]
-    [Ensures("result.TotalDebits == 0m && result.TotalCredits == 0m && result.NextEntryId.Value == 1 && result.Accounts.Count == 0 && result.Journal.Count == 0")]
+    [Ensures("result.TotalDebits == 0m && result.TotalCredits == 0m && result.NextEntryId == 1 && result.Accounts.Count == 0 && result.Journal.Count == 0")]
     public static LedgerState CreateEmpty() => new(
         ImmutableDictionary<AccountId, Account>.Empty,
         ImmutableList<PostedJournalEntry>.Empty,
         JournalEntryId.From(1),
-        0m,
-        0m);
+        NonNegativeDecimal.From(0m),
+        NonNegativeDecimal.From(0m));
 }
 
 [Verifiable]
@@ -97,7 +83,7 @@ public readonly record struct LedgerTransition(
     JournalEntryId? CreatedEntryId);
 
 [Verifiable]
-public readonly record struct EntryTotals(decimal DebitTotal, decimal CreditTotal);
+public readonly record struct EntryTotals(NonNegativeDecimal DebitTotal, NonNegativeDecimal CreditTotal);
 
 [Verifiable]
 public readonly record struct AccountUpdateOutcome(
@@ -138,7 +124,6 @@ public readonly record struct LedgerUiState(
     string StatusText,
     string? LastError)
 {
-    [Verifiable]
     public static LedgerUiState Initial() =>
         new(LedgerState.CreateEmpty(), false, null, "Ready", null);
 }

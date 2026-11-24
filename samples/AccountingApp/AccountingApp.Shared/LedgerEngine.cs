@@ -3,9 +3,9 @@ using Verifiable.Contracts;
 
 namespace AccountingApp.Shared;
 
+[Verifiable]
 public static class LedgerEngine
 {
-    [Verifiable]
     public static decimal SignedBalanceDelta(AccountType kind, EntrySide side, decimal amount)
     {
         if (kind == AccountType.Asset || kind == AccountType.Expense)
@@ -15,11 +15,10 @@ public static class LedgerEngine
         return side == EntrySide.Credit ? amount : -amount;
     }
 
-    [Verifiable]
-    [Requires("from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount.Value")]
+    [Requires("from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount")]
     [Ensures("result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m")]
     [Ensures("result.TotalDebits == result.TotalCredits")]
-    [Ensures("result.TotalDebits == state.TotalDebits + amount.Value")]
+    [Ensures("result.TotalDebits == state.TotalDebits + amount")]
     public static LedgerState PostCheckedAssetTransfer(
         LedgerState state,
         AccountId from,
@@ -31,8 +30,8 @@ public static class LedgerEngine
         var fromAcc = state.Accounts[from];
         var toAcc = state.Accounts[to];
 
-        var updatedFrom = fromAcc with { Balance = fromAcc.Balance - amount.Value };
-        var updatedTo = toAcc with { Balance = toAcc.Balance + amount.Value };
+        var updatedFrom = fromAcc with { Balance = fromAcc.Balance - amount };
+        var updatedTo = toAcc with { Balance = toAcc.Balance + amount };
         var nextAccounts = state.Accounts
             .SetItem(from, updatedFrom)
             .SetItem(to, updatedTo);
@@ -41,11 +40,12 @@ public static class LedgerEngine
         var creditLine = new JournalLine(from, EntrySide.Credit, amount);
         var lines = ImmutableList<JournalLine>.Empty.Add(debitLine).Add(creditLine);
 
+        var entryTotal = PositiveDecimal.From(amount);
         var entry = new PostedJournalEntry(
             state.NextEntryId,
             lines,
-            amount.Value,
-            amount.Value,
+            entryTotal,
+            entryTotal,
             memo,
             now,
             false,
@@ -55,13 +55,13 @@ public static class LedgerEngine
         {
             Accounts = nextAccounts,
             Journal = state.Journal.Add(entry),
-            NextEntryId = JournalEntryId.From(state.NextEntryId.Value + 1),
-            TotalDebits = state.TotalDebits + amount.Value,
-            TotalCredits = state.TotalCredits + amount.Value
+            NextEntryId = JournalEntryId.From(state.NextEntryId + 1),
+            TotalDebits = NonNegativeDecimal.From(state.TotalDebits + amount),
+            TotalCredits = NonNegativeDecimal.From(state.TotalCredits + amount)
         };
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("!result.IsSuccess || (result.State.TotalDebits == state.TotalDebits && result.State.TotalCredits == state.TotalCredits)")]
     [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition OpenAccount(
@@ -82,9 +82,9 @@ public static class LedgerEngine
         return new LedgerTransition(nextState, true, null, null);
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
-    [Ensures("!result.IsSuccess || result.State.TotalDebits == state.TotalDebits + amount.Value")]
+    [Ensures("!result.IsSuccess || result.State.TotalDebits == state.TotalDebits + amount")]
     [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition PostTransfer(
         LedgerState state,
@@ -112,8 +112,8 @@ public static class LedgerEngine
             return new LedgerTransition(state, false, "Currency mismatch between accounts.", null);
         }
 
-        var fromDelta = SignedBalanceDelta(fromAcc.Kind, EntrySide.Credit, amount.Value);
-        var toDelta = SignedBalanceDelta(toAcc.Kind, EntrySide.Debit, amount.Value);
+        var fromDelta = SignedBalanceDelta(fromAcc.Kind, EntrySide.Credit, amount);
+        var toDelta = SignedBalanceDelta(toAcc.Kind, EntrySide.Debit, amount);
         var newFromBalance = fromAcc.Balance + fromDelta;
         var newToBalance = toAcc.Balance + toDelta;
 
@@ -135,11 +135,12 @@ public static class LedgerEngine
             .Add(new JournalLine(to, EntrySide.Debit, amount))
             .Add(new JournalLine(from, EntrySide.Credit, amount));
 
+        var entryTotal = PositiveDecimal.From(amount);
         var entry = new PostedJournalEntry(
             state.NextEntryId,
             lines,
-            amount.Value,
-            amount.Value,
+            entryTotal,
+            entryTotal,
             memo,
             now,
             false,
@@ -149,18 +150,16 @@ public static class LedgerEngine
         {
             Accounts = nextAccounts,
             Journal = state.Journal.Add(entry),
-            NextEntryId = JournalEntryId.From(state.NextEntryId.Value + 1),
-            TotalDebits = state.TotalDebits + amount.Value,
-            TotalCredits = state.TotalCredits + amount.Value
+            NextEntryId = JournalEntryId.From(state.NextEntryId + 1),
+            TotalDebits = NonNegativeDecimal.From(state.TotalDebits + amount),
+            TotalCredits = NonNegativeDecimal.From(state.TotalCredits + amount)
         };
 
         return new LedgerTransition(nextState, true, null, entry.Id);
     }
 
-    [Verifiable]
     [LoopInvariant("i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m")]
     [Decreases("lines.Count - i")]
-    [Ensures("result.DebitTotal >= 0m && result.CreditTotal >= 0m")]
     public static EntryTotals SumEntrySides(ImmutableList<JournalLine> lines)
     {
         var debits = 0m;
@@ -169,23 +168,22 @@ public static class LedgerEngine
         while (i < lines.Count)
         {
             var line = lines[i];
-            if (line.Amount.Value > 0m)
+            if (line.Amount > 0m)
             {
                 if (line.Side == EntrySide.Debit)
                 {
-                    debits = debits + line.Amount.Value;
+                    debits = debits + line.Amount;
                 }
                 else
                 {
-                    credits = credits + line.Amount.Value;
+                    credits = credits + line.Amount;
                 }
             }
             i = i + 1;
         }
-        return new EntryTotals(debits, credits);
+        return new EntryTotals(NonNegativeDecimal.From(debits), NonNegativeDecimal.From(credits));
     }
 
-    [Verifiable]
     [LoopInvariant("i >= 0 && i <= lines.Count")]
     [Decreases("lines.Count - i")]
     public static AccountUpdateOutcome ApplyLinesToAccounts(
@@ -209,7 +207,7 @@ public static class LedgerEngine
                 return new AccountUpdateOutcome(accounts, false, "Journal entry mixes currencies.");
             }
 
-            var nextBal = acc.Balance + SignedBalanceDelta(acc.Kind, line.Side, line.Amount.Value);
+            var nextBal = acc.Balance + SignedBalanceDelta(acc.Kind, line.Side, line.Amount);
             if (!acc.AllowOverdraft && nextBal < 0m)
             {
                 return new AccountUpdateOutcome(accounts, false, "Overdraft guard violated on account.");
@@ -222,7 +220,7 @@ public static class LedgerEngine
         return new AccountUpdateOutcome(cur, true, null);
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
     [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition PostBalancedEntry(
@@ -258,8 +256,8 @@ public static class LedgerEngine
         var entry = new PostedJournalEntry(
             state.NextEntryId,
             lines,
-            totals.DebitTotal,
-            totals.CreditTotal,
+            PositiveDecimal.From(totals.DebitTotal),
+            PositiveDecimal.From(totals.CreditTotal),
             memo,
             now,
             false,
@@ -269,15 +267,14 @@ public static class LedgerEngine
         {
             Accounts = applied.Accounts,
             Journal = state.Journal.Add(entry),
-            NextEntryId = JournalEntryId.From(state.NextEntryId.Value + 1),
-            TotalDebits = state.TotalDebits + totals.DebitTotal,
-            TotalCredits = state.TotalCredits + totals.CreditTotal
+            NextEntryId = JournalEntryId.From(state.NextEntryId + 1),
+            TotalDebits = NonNegativeDecimal.From(state.TotalDebits + totals.DebitTotal),
+            TotalCredits = NonNegativeDecimal.From(state.TotalCredits + totals.CreditTotal)
         };
 
         return new LedgerTransition(nextState, true, null, entry.Id);
     }
 
-    [Verifiable]
     [LoopInvariant("i >= 0 && i <= journal.Count")]
     [Decreases("journal.Count - i")]
     [Ensures("result >= -1 && result < journal.Count")]
@@ -295,7 +292,6 @@ public static class LedgerEngine
         return -1;
     }
 
-    [Verifiable]
     [LoopInvariant("i >= 0 && i <= lines.Count && flipped.Count == i")]
     [Decreases("lines.Count - i")]
     [Ensures("result.Count == lines.Count")]
@@ -313,7 +309,7 @@ public static class LedgerEngine
         return flipped;
     }
 
-    [Verifiable, InboundPort]
+    [InboundPort]
     [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
     [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition ReverseEntry(
@@ -333,7 +329,7 @@ public static class LedgerEngine
             return new LedgerTransition(state, false, "Journal entry has already been reversed.", null);
         }
 
-        if (orig.Lines.Count < 2 || orig.EntryDebitTotal <= 0m)
+        if (orig.Lines.Count < 2)
         {
             return new LedgerTransition(state, false, "Original journal entry is invalid.", null);
         }
@@ -370,14 +366,15 @@ public static class LedgerEngine
         {
             Accounts = applied.Accounts,
             Journal = updatedJournal,
-            NextEntryId = JournalEntryId.From(state.NextEntryId.Value + 1),
-            TotalDebits = state.TotalDebits + orig.EntryCreditTotal,
-            TotalCredits = state.TotalCredits + orig.EntryDebitTotal
+            NextEntryId = JournalEntryId.From(state.NextEntryId + 1),
+            TotalDebits = NonNegativeDecimal.From(state.TotalDebits + orig.EntryCreditTotal),
+            TotalCredits = NonNegativeDecimal.From(state.TotalCredits + orig.EntryDebitTotal)
         };
 
         return new LedgerTransition(nextState, true, null, reversalEntry.Id);
     }
 
+    [Unverifiable]
     public static PendingLedgerCommit CreatePendingCommit(
         CommandId commandId,
         string operationKind,
@@ -389,8 +386,10 @@ public static class LedgerEngine
         new(commandId, operationKind, nextState, openedAccount, appendedEntry, reversedEntryId, timestamp);
 }
 
+[Verifiable]
 public static class LedgerUiEngine
 {
+    [Unverifiable]
     public static (LedgerUiState State, UnsentLedgerCommand Command) OnSubmitOpenAccount(
         LedgerUiState state,
         OpenAccountHttpRequest req,
@@ -401,6 +400,7 @@ public static class LedgerUiEngine
         return (next, cmd);
     }
 
+    [Unverifiable]
     public static (LedgerUiState State, UnsentLedgerCommand Command) OnSubmitTransfer(
         LedgerUiState state,
         PostTransferHttpRequest req,
@@ -411,6 +411,7 @@ public static class LedgerUiEngine
         return (next, cmd);
     }
 
+    [Unverifiable]
     public static (LedgerUiState State, UnsentLedgerCommand Command) OnSubmitReverse(
         LedgerUiState state,
         ReverseEntryHttpRequest req,
@@ -421,7 +422,6 @@ public static class LedgerUiEngine
         return (next, cmd);
     }
 
-    [Verifiable]
     [Requires("state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value")]
     [Ensures("!result.IsSyncing && !result.PendingCommandId.HasValue")]
     public static LedgerUiState OnCommitConfirmed(LedgerUiState state, LedgerCommitReceipt receipt) =>
@@ -434,7 +434,6 @@ public static class LedgerUiEngine
             LastError = null
         };
 
-    [Verifiable]
     public static LedgerUiState OnCommitFailed(LedgerUiState state, string error) =>
         state with
         {

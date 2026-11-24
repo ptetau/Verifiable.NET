@@ -2,6 +2,13 @@ using System;
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 
+[assembly: Verifiable]
+[assembly: TypeAlias<int>("TodoId", "Value >= 1", Namespace = "TodoApp.Shared")]
+[assembly: TypeAlias<int>("NonNegativeInt", "Value >= 0", Namespace = "TodoApp.Shared")]
+[assembly: TypeAlias<string>("TodoTitle", "Length is >= 1 and <= 200", Namespace = "TodoApp.Shared")]
+[assembly: TypeAlias<long>("UnixTimestamp", "Value >= 0", Namespace = "TodoApp.Shared")]
+[assembly: TypeAlias<Guid>("CommandId", "Value != Guid.Empty", Namespace = "TodoApp.Shared")]
+
 namespace TodoApp.Shared;
 
 public enum TodoStatus
@@ -11,19 +18,6 @@ public enum TodoStatus
     Deleted = 2
 }
 
-[Refined<int>("Value >= 1")]
-public readonly partial record struct TodoId;
-
-[Refined<string>("Length is >= 1 and <= 200")]
-public readonly partial record struct TodoTitle;
-
-[Refined<long>("Value >= 0")]
-public readonly partial record struct UnixTimestamp;
-
-[Refined<Guid>("Value != Guid.Empty")]
-public readonly partial record struct CommandId;
-
-[Verifiable]
 public readonly record struct TodoItem(
     TodoId Id,
     TodoTitle Title,
@@ -31,27 +25,24 @@ public readonly record struct TodoItem(
     UnixTimestamp CreatedAt,
     UnixTimestamp UpdatedAt);
 
-[Verifiable]
-[Invariant("NextId.Value >= 1")]
-[Invariant("ActiveCount >= 0 && CompletedCount >= 0 && DeletedCount >= 0")]
 [Invariant("Items.Count == ActiveCount + CompletedCount + DeletedCount")]
-[Invariant("Items.Count == NextId.Value - 1")]
+[Invariant("Items.Count == NextId - 1")]
 public readonly record struct TodoBoard(
     TodoId NextId,
     ImmutableDictionary<TodoId, TodoItem> Items,
-    int ActiveCount,
-    int CompletedCount,
-    int DeletedCount)
+    NonNegativeInt ActiveCount,
+    NonNegativeInt CompletedCount,
+    NonNegativeInt DeletedCount)
 {
-    [Verifiable]
-    [Ensures("result.NextId.Value == 1 && result.Items.Count == 0 && result.ActiveCount == 0 && result.CompletedCount == 0 && result.DeletedCount == 0")]
+    [Ensures("result.NextId == 1 && result.Items.Count == 0 && result.ActiveCount == 0 && result.CompletedCount == 0 && result.DeletedCount == 0")]
     public static TodoBoard CreateEmpty() => new(
         TodoId.From(1),
         ImmutableDictionary<TodoId, TodoItem>.Empty,
-        0, 0, 0);
+        NonNegativeInt.From(0),
+        NonNegativeInt.From(0),
+        NonNegativeInt.From(0));
 }
 
-[Verifiable]
 public readonly record struct TodoTransition(
     TodoBoard Board,
     bool IsSuccess,
@@ -74,13 +65,11 @@ public readonly record struct UnsentTodoCommand(
     int? TargetIdValue,
     UnixTimestamp Timestamp);
 
-[Verifiable]
 public readonly record struct TodoCommitReceipt(
     CommandId CommandId,
     TodoBoard Board,
     bool WasDuplicate);
 
-[Verifiable]
 public readonly record struct TodoUiState(
     TodoBoard Board,
     bool IsSyncing,
@@ -88,12 +77,18 @@ public readonly record struct TodoUiState(
     string StatusText,
     string? LastError)
 {
-    [Verifiable]
     public static TodoUiState Initial() =>
         new(TodoBoard.CreateEmpty(), false, null, "Ready", null);
 }
 
+[Unverifiable]
 public sealed record AddTodoHttpRequest(Guid CommandId, string? Title, long Timestamp);
+
+[Unverifiable]
 public sealed record CompleteTodoHttpRequest(Guid CommandId, int TodoId, long Timestamp);
+
+[Unverifiable]
 public sealed record DeleteTodoHttpRequest(Guid CommandId, int TodoId, long Timestamp);
+
+[Unverifiable]
 public sealed record ApiErrorResponse(string Message, ImmutableArray<ContractViolation> Violations);

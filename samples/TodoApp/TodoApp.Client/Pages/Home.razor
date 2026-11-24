@@ -19,7 +19,7 @@
         @foreach (var item in _state.Board.Items.Values.OrderBy(i => i.Id))
         {
             <li style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #e5e7eb;">
-                <span>#@item.Id.Value [@item.Status] @item.Title.Value</span>
+                <span>#@item.Id [@item.Status] @item.Title</span>
                 <span style="display: flex; gap: 0.4rem;">
                     @if (item.Status == TodoStatus.Active)
                     {
