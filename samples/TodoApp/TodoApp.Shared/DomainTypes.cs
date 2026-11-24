@@ -3,13 +3,38 @@ using System.Collections.Immutable;
 using Verifiable.Contracts;
 
 [assembly: Verifiable]
-[assembly: TypeAlias<int>("TodoId", "Value >= 1", Namespace = "TodoApp.Shared")]
-[assembly: TypeAlias<int>("NonNegativeInt", "Value >= 0", Namespace = "TodoApp.Shared")]
-[assembly: TypeAlias<string>("TodoTitle", "Length is >= 1 and <= 200", Namespace = "TodoApp.Shared")]
-[assembly: TypeAlias<long>("UnixTimestamp", "Value >= 0", Namespace = "TodoApp.Shared")]
-[assembly: TypeAlias<Guid>("CommandId", "Value != Guid.Empty", Namespace = "TodoApp.Shared")]
 
 namespace TodoApp.Shared;
+
+[TypeAlias<int>]
+public readonly partial record struct TodoId
+{
+    public static bool IsValid(int value) => value >= 1;
+}
+
+[TypeAlias<int>]
+public readonly partial record struct NonNegativeInt
+{
+    public static bool IsValid(int value) => value >= 0;
+}
+
+[TypeAlias<string>]
+public readonly partial record struct TodoTitle
+{
+    public static bool IsValid(string value) => value is { Length: >= 1 and <= 200 };
+}
+
+[TypeAlias<long>]
+public readonly partial record struct UnixTimestamp
+{
+    public static bool IsValid(long value) => value >= 0;
+}
+
+[TypeAlias<Guid>]
+public readonly partial record struct CommandId
+{
+    public static bool IsValid(Guid value) => value != Guid.Empty;
+}
 
 public enum TodoStatus
 {
@@ -25,8 +50,6 @@ public readonly record struct TodoItem(
     UnixTimestamp CreatedAt,
     UnixTimestamp UpdatedAt);
 
-[Invariant("Items.Count == ActiveCount + CompletedCount + DeletedCount")]
-[Invariant("Items.Count == NextId - 1")]
 public readonly record struct TodoBoard(
     TodoId NextId,
     ImmutableDictionary<TodoId, TodoItem> Items,
@@ -34,13 +57,27 @@ public readonly record struct TodoBoard(
     NonNegativeInt CompletedCount,
     NonNegativeInt DeletedCount)
 {
-    [Ensures("result.NextId == 1 && result.Items.Count == 0 && result.ActiveCount == 0 && result.CompletedCount == 0 && result.DeletedCount == 0")]
-    public static TodoBoard CreateEmpty() => new(
-        TodoId.From(1),
-        ImmutableDictionary<TodoId, TodoItem>.Empty,
-        NonNegativeInt.From(0),
-        NonNegativeInt.From(0),
-        NonNegativeInt.From(0));
+    [Invariant]
+    public bool IsConsistent() =>
+        Items.Count == ActiveCount + CompletedCount + DeletedCount
+        && Items.Count == NextId - 1;
+
+    public static TodoBoard CreateEmpty()
+    {
+        Spec.Ensures<TodoBoard>(result =>
+            result.NextId == 1
+            && result.Items.Count == 0
+            && result.ActiveCount == 0
+            && result.CompletedCount == 0
+            && result.DeletedCount == 0);
+
+        return new(
+            TodoId.From(1),
+            ImmutableDictionary<TodoId, TodoItem>.Empty,
+            NonNegativeInt.From(0),
+            NonNegativeInt.From(0),
+            NonNegativeInt.From(0));
+    }
 }
 
 public readonly record struct TodoTransition(

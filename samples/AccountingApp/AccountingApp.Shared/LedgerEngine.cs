@@ -15,10 +15,6 @@ public static class LedgerEngine
         return side == EntrySide.Credit ? amount : -amount;
     }
 
-    [Requires("from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount")]
-    [Ensures("result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m")]
-    [Ensures("result.TotalDebits == result.TotalCredits")]
-    [Ensures("result.TotalDebits == state.TotalDebits + amount")]
     public static LedgerState PostCheckedAssetTransfer(
         LedgerState state,
         AccountId from,
@@ -27,6 +23,11 @@ public static class LedgerEngine
         string memo,
         UnixTimestamp now)
     {
+        Spec.Requires(from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount);
+        Spec.Ensures<LedgerState>(result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m);
+        Spec.Ensures<LedgerState>(result => result.TotalDebits == result.TotalCredits);
+        Spec.Ensures<LedgerState>(result => result.TotalDebits == state.TotalDebits + amount);
+
         var fromAcc = state.Accounts[from];
         var toAcc = state.Accounts[to];
 
@@ -62,8 +63,6 @@ public static class LedgerEngine
     }
 
     [InboundPort]
-    [Ensures("!result.IsSuccess || (result.State.TotalDebits == state.TotalDebits && result.State.TotalCredits == state.TotalCredits)")]
-    [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition OpenAccount(
         LedgerState state,
         AccountId id,
@@ -72,6 +71,9 @@ public static class LedgerEngine
         CurrencyCode currency,
         bool allowOverdraft)
     {
+        Spec.Ensures<LedgerTransition>(result => !result.IsSuccess || (result.State.TotalDebits == state.TotalDebits && result.State.TotalCredits == state.TotalCredits));
+        Spec.Ensures<LedgerTransition>(result => result.IsSuccess || result.State == state);
+
         if (state.Accounts.ContainsKey(id))
         {
             return new LedgerTransition(state, false, "Account already exists.", null);
@@ -83,9 +85,6 @@ public static class LedgerEngine
     }
 
     [InboundPort]
-    [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
-    [Ensures("!result.IsSuccess || result.State.TotalDebits == state.TotalDebits + amount")]
-    [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition PostTransfer(
         LedgerState state,
         AccountId from,
@@ -94,6 +93,10 @@ public static class LedgerEngine
         string memo,
         UnixTimestamp now)
     {
+        Spec.Ensures<LedgerTransition>(result => result.State.TotalDebits == result.State.TotalCredits);
+        Spec.Ensures<LedgerTransition>(result => !result.IsSuccess || result.State.TotalDebits == state.TotalDebits + amount);
+        Spec.Ensures<LedgerTransition>(result => result.IsSuccess || result.State == state);
+
         if (from == to)
         {
             return new LedgerTransition(state, false, "Source and destination accounts must differ.", null);
@@ -158,8 +161,6 @@ public static class LedgerEngine
         return new LedgerTransition(nextState, true, null, entry.Id);
     }
 
-    [LoopInvariant("i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m")]
-    [Decreases("lines.Count - i")]
     public static EntryTotals SumEntrySides(ImmutableList<JournalLine> lines)
     {
         var debits = 0m;
@@ -167,6 +168,9 @@ public static class LedgerEngine
         var i = 0;
         while (i < lines.Count)
         {
+            Spec.LoopInvariant(i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m);
+            Spec.Decreases(lines.Count - i);
+
             var line = lines[i];
             if (line.Amount > 0m)
             {
@@ -184,8 +188,6 @@ public static class LedgerEngine
         return new EntryTotals(NonNegativeDecimal.From(debits), NonNegativeDecimal.From(credits));
     }
 
-    [LoopInvariant("i >= 0 && i <= lines.Count")]
-    [Decreases("lines.Count - i")]
     public static AccountUpdateOutcome ApplyLinesToAccounts(
         ImmutableDictionary<AccountId, Account> accounts,
         ImmutableList<JournalLine> lines,
@@ -195,6 +197,9 @@ public static class LedgerEngine
         var i = 0;
         while (i < lines.Count)
         {
+            Spec.LoopInvariant(i >= 0 && i <= lines.Count);
+            Spec.Decreases(lines.Count - i);
+
             var line = lines[i];
             if (!cur.ContainsKey(line.AccountId))
             {
@@ -221,14 +226,15 @@ public static class LedgerEngine
     }
 
     [InboundPort]
-    [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
-    [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition PostBalancedEntry(
         LedgerState state,
         ImmutableList<JournalLine> lines,
         string memo,
         UnixTimestamp now)
     {
+        Spec.Ensures<LedgerTransition>(result => result.State.TotalDebits == result.State.TotalCredits);
+        Spec.Ensures<LedgerTransition>(result => result.IsSuccess || result.State == state);
+
         if (lines.Count < 2)
         {
             return new LedgerTransition(state, false, "Journal entry requires at least 2 lines.", null);
@@ -275,14 +281,16 @@ public static class LedgerEngine
         return new LedgerTransition(nextState, true, null, entry.Id);
     }
 
-    [LoopInvariant("i >= 0 && i <= journal.Count")]
-    [Decreases("journal.Count - i")]
-    [Ensures("result >= -1 && result < journal.Count")]
     public static int FindJournalIndex(ImmutableList<PostedJournalEntry> journal, JournalEntryId entryId)
     {
+        Spec.Ensures<int>(result => result >= -1 && result < journal.Count);
+
         var i = 0;
         while (i < journal.Count)
         {
+            Spec.LoopInvariant(i >= 0 && i <= journal.Count);
+            Spec.Decreases(journal.Count - i);
+
             if (journal[i].Id == entryId)
             {
                 return i;
@@ -292,15 +300,17 @@ public static class LedgerEngine
         return -1;
     }
 
-    [LoopInvariant("i >= 0 && i <= lines.Count && flipped.Count == i")]
-    [Decreases("lines.Count - i")]
-    [Ensures("result.Count == lines.Count")]
     public static ImmutableList<JournalLine> FlipEntryLines(ImmutableList<JournalLine> lines)
     {
+        Spec.Ensures<ImmutableList<JournalLine>>(result => result.Count == lines.Count);
+
         var flipped = ImmutableList<JournalLine>.Empty;
         var i = 0;
         while (i < lines.Count)
         {
+            Spec.LoopInvariant(i >= 0 && i <= lines.Count && flipped.Count == i);
+            Spec.Decreases(lines.Count - i);
+
             var line = lines[i];
             var oppSide = line.Side == EntrySide.Debit ? EntrySide.Credit : EntrySide.Debit;
             flipped = flipped.Add(line with { Side = oppSide });
@@ -310,13 +320,14 @@ public static class LedgerEngine
     }
 
     [InboundPort]
-    [Ensures("result.State.TotalDebits == result.State.TotalCredits")]
-    [Ensures("result.IsSuccess || result.State == state")]
     public static LedgerTransition ReverseEntry(
         LedgerState state,
         JournalEntryId entryId,
         UnixTimestamp now)
     {
+        Spec.Ensures<LedgerTransition>(result => result.State.TotalDebits == result.State.TotalCredits);
+        Spec.Ensures<LedgerTransition>(result => result.IsSuccess || result.State == state);
+
         var idx = FindJournalIndex(state.Journal, entryId);
         if (idx < 0)
         {
@@ -422,10 +433,12 @@ public static class LedgerUiEngine
         return (next, cmd);
     }
 
-    [Requires("state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value")]
-    [Ensures("!result.IsSyncing && !result.PendingCommandId.HasValue")]
-    public static LedgerUiState OnCommitConfirmed(LedgerUiState state, LedgerCommitReceipt receipt) =>
-        state with
+    public static LedgerUiState OnCommitConfirmed(LedgerUiState state, LedgerCommitReceipt receipt)
+    {
+        Spec.Requires(state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value);
+        Spec.Ensures<LedgerUiState>(result => !result.IsSyncing && !result.PendingCommandId.HasValue);
+
+        return state with
         {
             State = receipt.State,
             IsSyncing = false,
@@ -433,6 +446,7 @@ public static class LedgerUiEngine
             StatusText = "Saved",
             LastError = null
         };
+    }
 
     public static LedgerUiState OnCommitFailed(LedgerUiState state, string error) =>
         state with

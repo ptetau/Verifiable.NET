@@ -5,11 +5,12 @@ namespace TodoApp.Shared;
 public static class TodoEngine
 {
     [InboundPort]
-    [Ensures("!result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1)")]
-    [Ensures("!result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount)")]
-    [Ensures("result.IsSuccess || result.Board == board")]
     public static TodoTransition Add(TodoBoard board, TodoTitle title, UnixTimestamp now)
     {
+        Spec.Ensures<TodoTransition>(result => !result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1));
+        Spec.Ensures<TodoTransition>(result => !result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount));
+        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
+
         if (board.Items.ContainsKey(board.NextId))
         {
             return new TodoTransition(board, false, "Duplicate next TodoId detected.", null);
@@ -27,11 +28,12 @@ public static class TodoEngine
     }
 
     [InboundPort]
-    [Ensures("result.IsSuccess || result.Board == board")]
-    [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board)")]
-    [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board)")]
     public static TodoTransition Complete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
+        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
+        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board));
+        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board));
+
         if (!board.Items.ContainsKey(id))
         {
             return new TodoTransition(board, false, "Todo item not found.", null);
@@ -64,10 +66,11 @@ public static class TodoEngine
     }
 
     [InboundPort]
-    [Ensures("result.IsSuccess || result.Board == board")]
-    [Ensures("!board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board)")]
     public static TodoTransition Delete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
+        Spec.Ensures<TodoTransition>(result => result.IsSuccess || result.Board == board);
+        Spec.Ensures<TodoTransition>(result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board));
+
         if (!board.Items.ContainsKey(id))
         {
             return new TodoTransition(board, false, "Todo item not found.", null);
@@ -172,10 +175,12 @@ public static class TodoUiEngine
         return (nextState, cmd);
     }
 
-    [Requires("state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value")]
-    [Ensures("!result.IsSyncing && !result.PendingCommandId.HasValue")]
-    public static TodoUiState OnCommitConfirmed(TodoUiState state, TodoCommitReceipt receipt) =>
-        state with
+    public static TodoUiState OnCommitConfirmed(TodoUiState state, TodoCommitReceipt receipt)
+    {
+        Spec.Requires(state.IsSyncing && state.PendingCommandId.HasValue && receipt.CommandId == state.PendingCommandId.Value);
+        Spec.Ensures<TodoUiState>(result => !result.IsSyncing && !result.PendingCommandId.HasValue);
+
+        return state with
         {
             Board = receipt.Board,
             IsSyncing = false,
@@ -183,6 +188,7 @@ public static class TodoUiEngine
             StatusText = "Saved",
             LastError = null
         };
+    }
 
     public static TodoUiState OnCommitFailed(TodoUiState state, string error) =>
         state with

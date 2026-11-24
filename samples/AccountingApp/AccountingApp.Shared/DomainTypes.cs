@@ -3,17 +3,34 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 
-[assembly: TypeAlias<int>("AccountId", "Value >= 1", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<int>("JournalEntryId", "Value >= 1", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<decimal>("PositiveAmount", "Value > 0m && Value <= 1000000000m", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<decimal>("NonNegativeDecimal", "Value >= 0m", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<decimal>("PositiveDecimal", "Value > 0m", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<string>("CurrencyCode", "Length is >= 3 and <= 3", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<string>("AccountName", "Length is >= 1 and <= 100", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<long>("UnixTimestamp", "Value >= 0", Namespace = "AccountingApp.Shared")]
-[assembly: TypeAlias<Guid>("CommandId", "Value != Guid.Empty", Namespace = "AccountingApp.Shared")]
-
 namespace AccountingApp.Shared;
+
+[TypeAlias<int>]
+public readonly partial record struct AccountId { public static bool IsValid(int value) => value >= 1; }
+
+[TypeAlias<int>]
+public readonly partial record struct JournalEntryId { public static bool IsValid(int value) => value >= 1; }
+
+[TypeAlias<decimal>]
+public readonly partial record struct PositiveAmount { public static bool IsValid(decimal value) => value > 0m && value <= 1000000000m; }
+
+[TypeAlias<decimal>]
+public readonly partial record struct NonNegativeDecimal { public static bool IsValid(decimal value) => value >= 0m; }
+
+[TypeAlias<decimal>]
+public readonly partial record struct PositiveDecimal { public static bool IsValid(decimal value) => value > 0m; }
+
+[TypeAlias<string>]
+public readonly partial record struct CurrencyCode { public static bool IsValid(string value) => value is { Length: >= 3 and <= 3 }; }
+
+[TypeAlias<string>]
+public readonly partial record struct AccountName { public static bool IsValid(string value) => value is { Length: >= 1 and <= 100 }; }
+
+[TypeAlias<long>]
+public readonly partial record struct UnixTimestamp { public static bool IsValid(long value) => value >= 0; }
+
+[TypeAlias<Guid>]
+public readonly partial record struct CommandId { public static bool IsValid(Guid value) => value != Guid.Empty; }
 
 public enum AccountType
 {
@@ -46,7 +63,6 @@ public readonly record struct JournalLine(
     PositiveAmount Amount);
 
 [Verifiable]
-[Invariant("EntryDebitTotal == EntryCreditTotal && Lines.Count >= 2")]
 public readonly record struct PostedJournalEntry(
     JournalEntryId Id,
     ImmutableList<JournalLine> Lines,
@@ -55,10 +71,13 @@ public readonly record struct PostedJournalEntry(
     string Memo,
     UnixTimestamp PostedAt,
     bool IsReversed,
-    JournalEntryId? ReversesEntryId);
+    JournalEntryId? ReversesEntryId)
+{
+    [Invariant]
+    public bool IsBalanced() => EntryDebitTotal == EntryCreditTotal && Lines.Count >= 2;
+}
 
 [Verifiable]
-[Invariant("TotalDebits == TotalCredits")]
 public readonly record struct LedgerState(
     ImmutableDictionary<AccountId, Account> Accounts,
     ImmutableList<PostedJournalEntry> Journal,
@@ -66,13 +85,25 @@ public readonly record struct LedgerState(
     NonNegativeDecimal TotalDebits,
     NonNegativeDecimal TotalCredits)
 {
-    [Ensures("result.TotalDebits == 0m && result.TotalCredits == 0m && result.NextEntryId == 1 && result.Accounts.Count == 0 && result.Journal.Count == 0")]
-    public static LedgerState CreateEmpty() => new(
-        ImmutableDictionary<AccountId, Account>.Empty,
-        ImmutableList<PostedJournalEntry>.Empty,
-        JournalEntryId.From(1),
-        NonNegativeDecimal.From(0m),
-        NonNegativeDecimal.From(0m));
+    [Invariant]
+    public bool IsBalanced() => TotalDebits == TotalCredits;
+
+    public static LedgerState CreateEmpty()
+    {
+        Spec.Ensures<LedgerState>(result =>
+            result.TotalDebits == 0m
+            && result.TotalCredits == 0m
+            && result.NextEntryId == 1
+            && result.Accounts.Count == 0
+            && result.Journal.Count == 0);
+
+        return new(
+            ImmutableDictionary<AccountId, Account>.Empty,
+            ImmutableList<PostedJournalEntry>.Empty,
+            JournalEntryId.From(1),
+            NonNegativeDecimal.From(0m),
+            NonNegativeDecimal.From(0m));
+    }
 }
 
 [Verifiable]
