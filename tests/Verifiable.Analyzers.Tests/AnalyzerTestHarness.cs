@@ -42,7 +42,7 @@ internal static class AnalyzerTestHarness
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new RefinedTypeGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
+            generators: [new TypeAliasGenerator().AsSourceGenerator(), new RefinedTypeGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
             parseOptions: parseOptions);
         driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
 

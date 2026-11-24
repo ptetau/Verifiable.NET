@@ -3,15 +3,21 @@ using System;
 namespace Verifiable.Contracts;
 
 /// <summary>
-/// Marks a type or method as a hermetically sealed Verifiable Cage enforced with compile-time errors.
+/// Marks an assembly, type, or method as a hermetically sealed Verifiable Cage enforced with compile-time errors.
 /// </summary>
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
 public sealed class VerifiableAttribute : Attribute;
 
 /// <summary>
-/// Marks a type or method as an incremental migration target; gatekeeper violations emit warnings instead of errors.
+/// Opts a specific type or method out of an enclosing assembly- or type-level <see cref="VerifiableAttribute"/> or <see cref="VerifiableCandidateAttribute"/> scope.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
+public sealed class UnverifiableAttribute : Attribute;
+
+/// <summary>
+/// Marks an assembly, type, or method as an incremental migration target; gatekeeper violations emit warnings instead of errors.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
 public sealed class VerifiableCandidateAttribute : Attribute;
 
 /// <summary>
@@ -97,7 +103,7 @@ public sealed class PureAxiomAttribute : Attribute;
 /// <summary>
 /// Enables finite bit-vector overflow checking in the SMT prover for integer arithmetic inside the annotated scope.
 /// </summary>
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
 public sealed class CheckedArithmeticAttribute : Attribute;
 
 /// <summary>
@@ -108,4 +114,24 @@ public sealed class RefinedAttribute<TUnderlying>(string predicate) : Attribute
 {
     /// <summary>Gets the refinement predicate referencing <c>Value</c>.</summary>
     public string Predicate { get; } = predicate;
+}
+
+/// <summary>
+/// Generates a zero-allocation constrained type alias backed by <typeparamref name="TUnderlying"/> with compile-time invariants,
+/// implicit widening to <typeparamref name="TUnderlying"/>, JSON serialization, and checked/unchecked constructors.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = true)]
+public sealed class TypeAliasAttribute<TUnderlying>(string name, string predicate) : Attribute
+{
+    /// <summary>Gets the generated type name.</summary>
+    public string Name { get; } = name;
+
+    /// <summary>Gets the refinement predicate referencing <c>Value</c>.</summary>
+    public string Predicate { get; } = predicate;
+
+    /// <summary>Gets or sets the target namespace when applied at the assembly level (defaults to the declaring namespace when applied on a type).</summary>
+    public string? Namespace { get; set; }
+
+    /// <summary>Gets or sets whether the generated alias type is <c>internal</c> instead of <c>public</c>.</summary>
+    public bool IsInternal { get; set; }
 }

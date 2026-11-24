@@ -1,14 +1,137 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Verifiable.Generators;
+
+internal sealed record TypeAliasSpec(
+    string Name,
+    string Namespace,
+    ITypeSymbol UnderlyingType,
+    string Predicate,
+    bool IsInternal,
+    Location DiagnosticLocation,
+    IReadOnlyList<string> UsingDirectives)
+{
+    public string FullName => string.IsNullOrEmpty(Namespace) ? Name : $"{Namespace}.{Name}";
+    public string GlobalTypeName => string.IsNullOrEmpty(Namespace) ? $"global::{Name}" : $"global::{Namespace}.{Name}";
+}
+
+internal sealed class TypeAliasLookup
+{
+    public static readonly TypeAliasLookup Empty = new([]);
+
+    private readonly Dictionary<(string Namespace, string Name), TypeAliasSpec> _byFull = new();
+    private readonly Dictionary<string, List<TypeAliasSpec>> _byName = new(StringComparer.Ordinal);
+
+    public TypeAliasLookup(IEnumerable<TypeAliasSpec> specs)
+    {
+        foreach (var spec in specs)
+        {
+            if (string.IsNullOrWhiteSpace(spec.Name)) continue;
+            var key = (spec.Namespace, spec.Name);
+            if (!_byFull.ContainsKey(key))
+            {
+                _byFull[key] = spec;
+            }
+            if (!_byName.TryGetValue(spec.Name, out var list))
+            {
+                list = new List<TypeAliasSpec>();
+                _byName[spec.Name] = list;
+            }
+            list.Add(spec);
+        }
+    }
+
+    public bool TryResolve(
+        ITypeSymbol type,
+        string contextNamespace,
+        IReadOnlyList<string> usings,
+        out TypeAliasSpec? spec,
+        out bool isNullable)
+    {
+        isNullable = false;
+        if (type is INamedTypeSymbol nullableNamed &&
+            nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
+            nullableNamed.TypeArguments.Length == 1)
+        {
+            isNullable = true;
+            type = nullableNamed.TypeArguments[0];
+        }
+
+        if (type.TypeKind != TypeKind.Error)
+        {
+            spec = null;
+            return false;
+        }
+
+        if (type.NullableAnnotation == NullableAnnotation.Annotated)
+        {
+            isNullable = true;
+        }
+
+        var name = type.Name;
+        if (string.IsNullOrEmpty(name))
+        {
+            spec = null;
+            return false;
+        }
+
+        if (type.ContainingNamespace is { IsGlobalNamespace: false } explicitNs)
+        {
+            if (_byFull.TryGetValue((explicitNs.ToDisplayString(), name), out spec))
+            {
+                return true;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(contextNamespace))
+        {
+            var cur = contextNamespace;
+            while (!string.IsNullOrEmpty(cur))
+            {
+                if (_byFull.TryGetValue((cur, name), out spec))
+                {
+                    return true;
+                }
+                var dot = cur.LastIndexOf('.');
+                cur = dot > 0 ? cur.Substring(0, dot) : string.Empty;
+            }
+        }
+
+        foreach (var u in usings)
+        {
+            if (_byFull.TryGetValue((u, name), out spec))
+            {
+                return true;
+            }
+        }
+
+        if (_byFull.TryGetValue((string.Empty, name), out spec))
+        {
+            return true;
+        }
+
+        if (_byName.TryGetValue(name, out var candidates) && candidates.Count == 1)
+        {
+            spec = candidates[0];
+            return true;
+        }
+
+        spec = null;
+        return false;
+    }
+}
 
 internal static class TypeRefHelper
 {
     public const string ContractsNamespace = "Verifiable.Contracts";
     public const string RefinedAttributeMetadataName = "Verifiable.Contracts.RefinedAttribute`1";
+    public const string TypeAliasAttributeMetadataName = "Verifiable.Contracts.TypeAliasAttribute`1";
     public const string InvariantAttributeMetadataName = "Verifiable.Contracts.InvariantAttribute";
     public const string RequiresAttributeMetadataName = "Verifiable.Contracts.RequiresAttribute";
     public const string InboundPortAttributeMetadataName = "Verifiable.Contracts.InboundPortAttribute";
@@ -174,5 +297,116 @@ internal static class TypeRefHelper
             or "System.DateOnly"
             or "System.TimeOnly"
             or "System.TimeSpan";
+    }
+
+    public static IReadOnlyList<string> CollectUsings(SyntaxTree? tree)
+    {
+        var list = new List<string>();
+        if (tree?.GetRoot() is CompilationUnitSyntax cu)
+        {
+            foreach (var u in cu.Usings)
+            {
+                if (u.Alias is null && u.StaticKeyword.IsKind(SyntaxKind.None) && u.Name is not null)
+                {
+                    var ns = u.Name.ToString();
+                    if (!string.IsNullOrWhiteSpace(ns))
+                    {
+                        list.Add(ns);
+                    }
+                }
+            }
+        }
+        return list.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    public static List<TypeAliasSpec> ExtractTypeAliases(
+        IEnumerable<AttributeData> attributes,
+        string defaultNamespace,
+        Location fallbackLocation,
+        IReadOnlyList<string>? fallbackUsings = null)
+    {
+        var result = new List<TypeAliasSpec>();
+        foreach (var attr in attributes)
+        {
+            if (attr.AttributeClass is not { IsGenericType: true } ac ||
+                ac.ConstructedFrom.ToDisplayString() != "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" ||
+                ac.TypeArguments.Length != 1)
+            {
+                continue;
+            }
+
+            if (attr.ConstructorArguments.Length < 2)
+            {
+                continue;
+            }
+
+            var name = attr.ConstructorArguments[0].Value as string ?? string.Empty;
+            var predicate = attr.ConstructorArguments[1].Value as string ?? string.Empty;
+            var targetNs = defaultNamespace;
+            var isInternal = false;
+
+            foreach (var namedArg in attr.NamedArguments)
+            {
+                if (namedArg.Key == "Namespace" && namedArg.Value.Value is string nsVal)
+                {
+                    targetNs = nsVal.Trim();
+                }
+                else if (namedArg.Key == "IsInternal" && namedArg.Value.Value is bool bVal)
+                {
+                    isInternal = bVal;
+                }
+            }
+
+            var loc = attr.ApplicationSyntaxReference?.GetSyntax().GetLocation() ?? fallbackLocation;
+            var usings = attr.ApplicationSyntaxReference?.SyntaxTree is { } st
+                ? CollectUsings(st)
+                : (fallbackUsings ?? Array.Empty<string>());
+
+            result.Add(new TypeAliasSpec(
+                name,
+                targetNs,
+                ac.TypeArguments[0],
+                predicate,
+                isInternal,
+                loc,
+                usings));
+        }
+
+        return result;
+    }
+
+    public static string FormatGlobalTypeName(
+        ITypeSymbol type,
+        string contextNamespace,
+        IReadOnlyList<string> usings,
+        TypeAliasLookup aliases)
+    {
+        if (aliases.TryResolve(type, contextNamespace, usings, out var spec, out var isNullable))
+        {
+            return isNullable ? spec!.GlobalTypeName + "?" : spec!.GlobalTypeName;
+        }
+
+        if (type is INamedTypeSymbol named)
+        {
+            if (named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
+                named.TypeArguments.Length == 1)
+            {
+                return FormatGlobalTypeName(named.TypeArguments[0], contextNamespace, usings, aliases) + "?";
+            }
+
+            if (named.IsGenericType && !named.IsUnboundGenericType)
+            {
+                var orig = ToGlobalTypeName(named.OriginalDefinition);
+                var ltIdx = orig.IndexOf('<');
+                if (ltIdx > 0)
+                {
+                    var formattedArgs = named.TypeArguments.Select(a => FormatGlobalTypeName(a, contextNamespace, usings, aliases));
+                    var suffix = named.NullableAnnotation == NullableAnnotation.Annotated && named.IsReferenceType ? "?" : string.Empty;
+                    return orig.Substring(0, ltIdx) + "<" + string.Join(", ", formattedArgs) + ">" + suffix;
+                }
+            }
+        }
+
+        return ToGlobalTypeName(type);
     }
 }

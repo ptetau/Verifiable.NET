@@ -175,7 +175,7 @@ internal sealed class ContractExpressionTranslator
             return new SmtTypedTerm(FormatDecimalLiteral(-dv), _compilation.GetSpecialType(SpecialType.System_Decimal));
         }
 
-        var operand = TranslateExpression(pre.Operand, env, expectedType);
+        var operand = UnwrapRefinedIfApplicable(TranslateExpression(pre.Operand, env, expectedType));
         return pre.Kind() switch
         {
             SyntaxKind.LogicalNotExpression => new SmtTypedTerm($"(not {operand.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean)),
@@ -266,6 +266,16 @@ internal sealed class ContractExpressionTranslator
         {
             return new SmtTypedTerm(
                 $"(ite (= {receiver.Term} str-null) 0 (str.len (str-text {receiver.Term})))",
+                _compilation.GetSpecialType(SpecialType.System_Int32));
+        }
+
+        if (memberName == "Length" &&
+            SmtTypeSystem.TryGetRefinedUnderlying(receiver.Type, out var strUnder, out _) &&
+            strUnder!.SpecialType == SpecialType.System_String)
+        {
+            var unwrapped = UnwrapRefinedIfApplicable(receiver);
+            return new SmtTypedTerm(
+                $"(ite (= {unwrapped.Term} str-null) 0 (str.len (str-text {unwrapped.Term})))",
                 _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
@@ -572,6 +582,18 @@ internal sealed class ContractExpressionTranslator
         };
     }
 
+    public SmtTypedTerm UnwrapRefinedIfApplicable(SmtTypedTerm term)
+    {
+        if (SmtTypeSystem.TryGetRefinedUnderlying(term.Type, out var underlying, out _) &&
+            _types.TryGetComposite(term.Type, out var comp) &&
+            comp!.Fields.Count == 1)
+        {
+            return new SmtTypedTerm($"({comp.Fields[0].AccessorName} {term.Term})", underlying!);
+        }
+
+        return term;
+    }
+
     public SmtTypedTerm ConvertTo(SmtTypedTerm value, ITypeSymbol targetType)
     {
         var srcSort = _types.GetSort(value.Type);
@@ -579,6 +601,25 @@ internal sealed class ContractExpressionTranslator
         if (srcSort == dstSort)
         {
             return new SmtTypedTerm(value.Term, targetType);
+        }
+
+        if (_types.TryGetNullableInfo(targetType, out _, out var optId, out var innerType))
+        {
+            if (value.Term == "str-null" || value.Term.StartsWith("opt-none-", StringComparison.Ordinal))
+            {
+                return new SmtTypedTerm($"opt-none-{optId}", targetType);
+            }
+            var inner = ConvertTo(value, innerType!);
+            return new SmtTypedTerm($"(opt-some-{optId} {inner.Term})", targetType);
+        }
+
+        if (SmtTypeSystem.TryGetRefinedUnderlying(value.Type, out _, out _))
+        {
+            var unwrapped = UnwrapRefinedIfApplicable(value);
+            if (!SymbolEqualityComparer.Default.Equals(unwrapped.Type, value.Type))
+            {
+                return ConvertTo(unwrapped, targetType);
+            }
         }
 
         if (dstSort == "Real")
@@ -612,21 +653,14 @@ internal sealed class ContractExpressionTranslator
             return new SmtTypedTerm($"((_ sign_extend 32) {value.Term})", targetType);
         }
 
-        if (_types.TryGetNullableInfo(targetType, out _, out var optId, out var innerType))
-        {
-            if (value.Term == "str-null" || value.Term.StartsWith("opt-none-", StringComparison.Ordinal))
-            {
-                return new SmtTypedTerm($"opt-none-{optId}", targetType);
-            }
-            var inner = ConvertTo(value, innerType!);
-            return new SmtTypedTerm($"(opt-some-{optId} {inner.Term})", targetType);
-        }
-
         return new SmtTypedTerm(value.Term, targetType);
     }
 
     public (string Left, string Right, ITypeSymbol UnifiedType) UnifyNumericPair(SmtTypedTerm left, SmtTypedTerm right)
     {
+        left = UnwrapRefinedIfApplicable(left);
+        right = UnwrapRefinedIfApplicable(right);
+
         var ls = _types.GetSort(left.Type);
         var rs = _types.GetSort(right.Type);
         if (ls == rs)
@@ -673,6 +707,14 @@ internal sealed class ContractExpressionTranslator
             if (left.Term == "str-null" || left.Term.StartsWith("opt-none-", StringComparison.Ordinal))
                 return ($"opt-none-{rOptId}", right.Term, right.Type);
             return (ConvertTo(left, right.Type).Term, right.Term, right.Type);
+        }
+
+        var unwrappedLeft = UnwrapRefinedIfApplicable(left);
+        var unwrappedRight = UnwrapRefinedIfApplicable(right);
+        if (!SymbolEqualityComparer.Default.Equals(unwrappedLeft.Type, left.Type) ||
+            !SymbolEqualityComparer.Default.Equals(unwrappedRight.Type, right.Type))
+        {
+            return UnifyForComparison(unwrappedLeft, unwrappedRight);
         }
 
         return UnifyNumericPair(left, right);

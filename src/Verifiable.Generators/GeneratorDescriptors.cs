@@ -21,4 +21,20 @@ internal static class GeneratorDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidTypeAliasName = new(
+        id: "VER203",
+        title: "Invalid [TypeAlias<T>] type name",
+        messageFormat: "Type alias name '{0}' in [TypeAlias<T>] is not a valid C# identifier. Fix: Provide a valid unqualified identifier such as 'TodoId'.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor DuplicateTypeAlias = new(
+        id: "VER204",
+        title: "Duplicate [TypeAlias<T>] declaration",
+        messageFormat: "Type alias '{0}' is declared more than once. Fix: Remove the duplicate [TypeAlias<T>] attribute or use distinct names/namespaces.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

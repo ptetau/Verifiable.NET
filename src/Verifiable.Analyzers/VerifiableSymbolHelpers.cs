@@ -15,6 +15,7 @@ internal enum VerificationScope
 internal static class VerifiableSymbolHelpers
 {
     public const string VerifiableAttr = "Verifiable.Contracts.VerifiableAttribute";
+    public const string UnverifiableAttr = "Verifiable.Contracts.UnverifiableAttribute";
     public const string VerifiableCandidateAttr = "Verifiable.Contracts.VerifiableCandidateAttribute";
     public const string InvariantAttr = "Verifiable.Contracts.InvariantAttribute";
     public const string RequiresAttr = "Verifiable.Contracts.RequiresAttribute";
@@ -101,12 +102,16 @@ internal static class VerifiableSymbolHelpers
 
     public static VerificationScope GetScope(ISymbol symbol)
     {
-        var foundCandidate = false;
         for (var cur = symbol; cur is not null; cur = cur.ContainingSymbol)
         {
-            if (cur is INamespaceSymbol or IAssemblySymbol or IModuleSymbol)
+            if (cur is INamespaceSymbol or IModuleSymbol)
             {
                 break;
+            }
+
+            if (HasAttribute(cur, UnverifiableAttr))
+            {
+                return VerificationScope.None;
             }
 
             if (HasAttribute(cur, VerifiableAttr))
@@ -116,11 +121,29 @@ internal static class VerifiableSymbolHelpers
 
             if (HasAttribute(cur, VerifiableCandidateAttr))
             {
-                foundCandidate = true;
+                return VerificationScope.Candidate;
+            }
+
+            if (cur is IAssemblySymbol)
+            {
+                return VerificationScope.None;
             }
         }
 
-        return foundCandidate ? VerificationScope.Candidate : VerificationScope.None;
+        if (symbol.ContainingAssembly is { } asm)
+        {
+            if (HasAttribute(asm, VerifiableAttr))
+            {
+                return VerificationScope.Verifiable;
+            }
+
+            if (HasAttribute(asm, VerifiableCandidateAttr))
+            {
+                return VerificationScope.Candidate;
+            }
+        }
+
+        return VerificationScope.None;
     }
 
     public static bool IsGeneratedByVerifiableGenerators(ISymbol symbol)
@@ -130,6 +153,7 @@ internal static class VerifiableSymbolHelpers
             if (loc.IsInSource && loc.SourceTree?.FilePath is { } path)
             {
                 if (path.EndsWith(".Refined.g.cs", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".TypeAlias.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".Gate.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".InboundPort.g.cs", StringComparison.OrdinalIgnoreCase))
                 {
@@ -197,7 +221,17 @@ internal static class VerifiableSymbolHelpers
 
     public static bool IsTrustedPureMethod(IMethodSymbol method)
     {
-        if (HasAttribute(method, VerifiableAttr) || HasAttribute(method, PureAxiomAttr))
+        if (HasAttribute(method, PureAxiomAttr))
+        {
+            return true;
+        }
+
+        if (HasAttribute(method, UnverifiableAttr))
+        {
+            return false;
+        }
+
+        if (GetScope(method) == VerificationScope.Verifiable)
         {
             return true;
         }
@@ -208,7 +242,7 @@ internal static class VerifiableSymbolHelpers
             return false;
         }
 
-        if (HasAttribute(containingType, VerifiableAttr) || IsRefinedStruct(containingType))
+        if (IsRefinedStruct(containingType))
         {
             return true;
         }

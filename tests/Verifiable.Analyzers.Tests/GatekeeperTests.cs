@@ -128,4 +128,76 @@ public class GatekeeperTests
                 && vDiags.Any(d => d.Id == id && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error && d.GetMessage().Contains("Fix:"))
                 && cDiags.Any(d => d.Id == id && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning && d.GetMessage().Contains("Fix:"));
         });
+
+    [Fact]
+    public async Task HierarchicalScopes_CascadeFromAssemblyAndClass_AndHonorUnverifiableOptOut()
+    {
+        const string source = """
+            using System;
+            using Verifiable.Contracts;
+
+            [assembly: Verifiable]
+            [assembly: TypeAlias<int>("PositiveId", "Value >= 1", Namespace = "Scoped")]
+
+            namespace Scoped;
+
+            public static class Boundary
+            {
+                [Unverifiable]
+                public static Guid NextGuid() => Guid.NewGuid();
+            }
+
+            public static class CascadedEngine
+            {
+                public static PositiveId CleanMethod(PositiveId id) => PositiveId.From(id + 1);
+
+                public static Guid BadDirectUtcNow() => DateTime.UtcNow;
+
+                public static Guid BadCallToUnverifiable() => Boundary.NextGuid();
+            }
+            """;
+
+        var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
+        Assert.DoesNotContain(diags, d => d.Id == "AD0001");
+
+        // Boundary.NextGuid opted out via [Unverifiable] -> no VER004 inside Boundary.NextGuid
+        Assert.DoesNotContain(diags, d => d.Id == "VER004" && d.Location.GetLineSpan().StartLinePosition.Line < 13);
+
+        // CascadedEngine inherits [assembly: Verifiable] without per-method [Verifiable]
+        Assert.Contains(diags, d => d.Id == "VER004" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
+        Assert.Contains(diags, d => d.Id == "VER006" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public async Task TypeLevelVerifiableCandidate_OverriddenByNestedVerifiable_HasExpectedSeverities()
+    {
+        const string source = """
+            using System;
+            using Verifiable.Contracts;
+
+            [assembly: VerifiableCandidate]
+
+            namespace MixedScopes;
+
+            public static class MigrationClass
+            {
+                public static DateTime LegacyWarning() => DateTime.UtcNow;
+            }
+
+            [Verifiable]
+            public static class PromotedClass
+            {
+                public static DateTime PromotedError() => DateTime.UtcNow;
+            }
+            """;
+
+        var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
+        Assert.DoesNotContain(diags, d => d.Id == "AD0001");
+
+        var warnings = diags.Where(d => d.Id == "VER004" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Warning).ToList();
+        var errors = diags.Where(d => d.Id == "VER004" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error).ToList();
+
+        Assert.Single(warnings);
+        Assert.Single(errors);
+    }
 }

@@ -417,4 +417,68 @@ public class SmtProverTests
             // Counterexample MUST satisfy precondition and violate postcondition!
             return ceX >= p.minBound && ceX <= p.maxBound && (ceX + p.offset) < p.target;
         });
+
+    [Fact]
+    public async Task TypeAliasesAndClassLevelVerifiable_PushConstraintsIntoTypesWithoutDotValueBoilerplate()
+    {
+        const string validSource = """
+            using Verifiable.Contracts;
+
+            [assembly: TypeAlias<int>("PositiveCount", "Value >= 1", Namespace = "AliasProofs")]
+            [assembly: TypeAlias<int>("NonNegCount", "Value >= 0", Namespace = "AliasProofs")]
+            [assembly: TypeAlias<decimal>("PositiveMoney", "Value > 0m", Namespace = "AliasProofs")]
+
+            namespace AliasProofs;
+
+            [Verifiable]
+            [Invariant("Total >= 0m")]
+            public readonly record struct Account(PositiveCount Version, NonNegCount TxCount, decimal Total);
+
+            [Verifiable]
+            public static class AliasEngine
+            {
+                [Ensures("result.Version == acc.Version + 1 && result.Total > acc.Total")]
+                public static Account Credit(Account acc, PositiveMoney deposit)
+                {
+                    var nextVer = PositiveCount.From(acc.Version + 1);
+                    var nextTx = NonNegCount.From(acc.TxCount + 1);
+                    return acc with { Version = nextVer, TxCount = nextTx, Total = acc.Total + deposit };
+                }
+
+                public static NonNegCount DecrementIfPositive(NonNegCount count)
+                {
+                    if (count <= 0)
+                    {
+                        return count;
+                    }
+                    return NonNegCount.From(count - 1);
+                }
+            }
+            """;
+
+        var validDiags = await AnalyzerTestHarness.AnalyzeAsync(validSource, new VerifiableSmtAnalyzer());
+        Assert.DoesNotContain(validDiags, d => d.Id == "AD0001");
+        Assert.DoesNotContain(validDiags, d => d.Id.StartsWith("VER1"));
+
+        const string invalidSource = """
+            using Verifiable.Contracts;
+
+            [assembly: TypeAlias<int>("NonNegCount", "Value >= 0", Namespace = "BrokenAliasProofs")]
+
+            namespace BrokenAliasProofs;
+
+            [Verifiable]
+            public static class BrokenAliasEngine
+            {
+                public static NonNegCount UnguardedDecrement(NonNegCount count) =>
+                    NonNegCount.From(count - 1);
+            }
+            """;
+
+        var invalidDiags = await AnalyzerTestHarness.AnalyzeAsync(invalidSource, new VerifiableSmtAnalyzer());
+        Assert.DoesNotContain(invalidDiags, d => d.Id == "AD0001");
+        var ver102s = invalidDiags.Where(d => d.Id == "VER102").ToList();
+        Assert.Contains(ver102s, d => d.GetMessage().Contains("Precondition") && d.GetMessage().Contains("count ="));
+        Assert.Contains(ver102s, d => d.GetMessage().Contains("TypeInvariant") && d.GetMessage().Contains("count ="));
+    }
 }

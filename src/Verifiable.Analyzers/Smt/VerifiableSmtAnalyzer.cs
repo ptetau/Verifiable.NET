@@ -160,6 +160,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.DecreasesAttr) ||
             VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
+            (method.ContainingAssembly is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             SmtTypeSystem.GetInvariants(method.ReturnType).Count > 0 ||
             IsResultWithInvariantPayload(method.ReturnType))
         {

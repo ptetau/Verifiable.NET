@@ -730,6 +730,7 @@ internal sealed class CfgSsaLowerer
                     return new SmtTypedTerm($"(not {uOp.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 if (un.OperatorKind == UnaryOperatorKind.Minus)
                 {
+                    uOp = _translator.UnwrapRefinedIfApplicable(uOp);
                     var sort = _types.GetSort(uOp.Type);
                     if (_types.UseBitVec && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
                     {
@@ -1757,7 +1758,8 @@ internal sealed class CfgSsaLowerer
             if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.CheckedArithmeticAttr))
                 return true;
         }
-        return false;
+        return method.ContainingAssembly is not null &&
+               VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr);
     }
 
     private static IReadOnlyList<string> GetAttributeStrings(ISymbol symbol, string attrName)
