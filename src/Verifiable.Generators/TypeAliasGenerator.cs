@@ -1,7 +1,4 @@
-using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
-using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -9,94 +6,139 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Verifiable.Generators;
 
 /// <summary>
-/// Generates zero-allocation constrained type aliases declared via assembly- or type-level <c>[TypeAlias&lt;T&gt;]</c> attributes.
+/// Generates zero-allocation constrained types, implicit widening, JSON converters, and checked/unchecked accessors
+/// for <c>[TypeAlias&lt;T&gt;]</c> and <c>[Refined&lt;T&gt;]</c> structs declaring <c>public static bool IsValid(T value)</c>.
 /// </summary>
 [Generator(LanguageNames.CSharp)]
 public sealed class TypeAliasGenerator : IIncrementalGenerator
 {
+    private sealed record ConstrainedTarget(
+        INamedTypeSymbol Symbol,
+        ITypeSymbol UnderlyingType,
+        Location DiagnosticLocation,
+        bool IsValidDeclaration,
+        IReadOnlyList<string> UsingDirectives,
+        string HintSuffix);
+
     /// <inheritdoc />
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var assemblyAliases = context.CompilationProvider.Select(static (comp, _) =>
-            TypeRefHelper.ExtractTypeAliases(
-                comp.Assembly.GetAttributes(),
-                defaultNamespace: string.Empty,
-                fallbackLocation: Location.None));
-
-        var typeAliases = context.SyntaxProvider.ForAttributeWithMetadataName(
+        var aliasTargets = context.SyntaxProvider.ForAttributeWithMetadataName(
             TypeRefHelper.TypeAliasAttributeMetadataName,
             predicate: static (node, _) => node is TypeDeclarationSyntax,
-            transform: static (ctx, _) => ExtractFromType(ctx))
-            .Collect();
+            transform: static (ctx, _) => Transform(ctx, ".TypeAlias.g.cs"));
 
-        var combined = assemblyAliases.Combine(typeAliases);
+        var refinedTargets = context.SyntaxProvider.ForAttributeWithMetadataName(
+            TypeRefHelper.RefinedAttributeMetadataName,
+            predicate: static (node, _) => node is TypeDeclarationSyntax,
+            transform: static (ctx, _) => Transform(ctx, ".Refined.g.cs"));
 
-        context.RegisterSourceOutput(combined, static (spc, pair) =>
+        context.RegisterSourceOutput(aliasTargets, static (spc, target) =>
         {
-            var allSpecs = new List<TypeAliasSpec>(pair.Left);
-            foreach (var list in pair.Right)
-            {
-                if (list is not null)
-                {
-                    allSpecs.AddRange(list);
-                }
-            }
+            if (target is not null) Emit(spc, target);
+        });
 
-            if (allSpecs.Count == 0)
-            {
-                return;
-            }
-
-            var seenFullNames = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var spec in allSpecs)
-            {
-                if (!SyntaxFacts.IsValidIdentifier(spec.Name))
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        GeneratorDescriptors.InvalidTypeAliasName,
-                        spec.DiagnosticLocation,
-                        spec.Name));
-                    continue;
-                }
-
-                if (!seenFullNames.Add(spec.FullName))
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        GeneratorDescriptors.DuplicateTypeAlias,
-                        spec.DiagnosticLocation,
-                        spec.FullName));
-                    continue;
-                }
-
-                RefinedStructEmitter.Emit(
-                    spc,
-                    spec.Name,
-                    spec.Namespace,
-                    spec.UnderlyingType,
-                    spec.Predicate,
-                    spec.IsInternal ? "internal " : "public ",
-                    spec.DiagnosticLocation,
-                    spec.UsingDirectives,
-                    Array.Empty<string>(),
-                    emitRefinedAttribute: true,
-                    hintSuffix: ".TypeAlias.g.cs");
-            }
+        context.RegisterSourceOutput(refinedTargets, static (spc, target) =>
+        {
+            if (target is not null) Emit(spc, target);
         });
     }
 
-    private static List<TypeAliasSpec>? ExtractFromType(GeneratorAttributeSyntaxContext context)
+    private static ConstrainedTarget? Transform(GeneratorAttributeSyntaxContext context, string hintSuffix)
     {
         if (context.TargetSymbol is not INamedTypeSymbol symbol)
         {
             return null;
         }
 
-        var defaultNs = TypeRefHelper.GetNamespace(symbol);
-        var fallbackUsings = TypeRefHelper.CollectUsings(context.TargetNode.SyntaxTree);
-        return TypeRefHelper.ExtractTypeAliases(
-            context.Attributes,
-            defaultNs,
+        if (!TypeRefHelper.TryGetConstrainedUnderlyingType(symbol, out var underlyingType) || underlyingType is null)
+        {
+            return null;
+        }
+
+        var isReadOnlyPartialRecordStruct =
+            symbol.IsRecord &&
+            symbol.IsValueType &&
+            symbol.IsReadOnly &&
+            context.TargetNode is RecordDeclarationSyntax rds &&
+            rds.ClassOrStructKeyword.IsKind(SyntaxKind.StructKeyword) &&
+            rds.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)) &&
+            rds.Modifiers.Any(m => m.IsKind(SyntaxKind.ReadOnlyKeyword));
+
+        var usings = TypeRefHelper.CollectUsings(context.TargetNode.SyntaxTree);
+        return new ConstrainedTarget(
+            symbol,
+            underlyingType,
             context.TargetNode.GetLocation(),
-            fallbackUsings);
+            isReadOnlyPartialRecordStruct,
+            usings,
+            hintSuffix);
+    }
+
+    private static void Emit(SourceProductionContext spc, ConstrainedTarget target)
+    {
+        if (!target.IsValidDeclaration)
+        {
+            spc.ReportDiagnostic(Diagnostic.Create(
+                GeneratorDescriptors.RefinedMustBeReadOnlyPartialRecordStruct,
+                target.DiagnosticLocation,
+                target.Symbol.Name));
+            return;
+        }
+
+        if (!TypeRefHelper.TryFindIsValidMethod(
+                target.Symbol,
+                target.UnderlyingType,
+                out _,
+                out var bodyExpr,
+                out var paramName,
+                out var acceptsNullableParam) ||
+            bodyExpr is null ||
+            paramName is null)
+        {
+            spc.ReportDiagnostic(Diagnostic.Create(
+                GeneratorDescriptors.MissingOrInvalidIsValidMethod,
+                target.DiagnosticLocation,
+                target.Symbol.Name,
+                target.UnderlyingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
+            return;
+        }
+
+        var accessibility = target.Symbol.DeclaredAccessibility switch
+        {
+            Accessibility.Public => "public ",
+            Accessibility.Internal => "internal ",
+            Accessibility.Private => "private ",
+            Accessibility.Protected => "protected ",
+            Accessibility.ProtectedOrInternal => "protected internal ",
+            Accessibility.ProtectedAndInternal => "private protected ",
+            _ => "public "
+        };
+
+        RefinedStructEmitter.Emit(
+            spc,
+            target.Symbol,
+            target.UnderlyingType,
+            bodyExpr,
+            paramName,
+            acceptsNullableParam,
+            accessibility,
+            target.UsingDirectives,
+            GetEnclosingPartialDeclarations(target.Symbol),
+            target.HintSuffix);
+    }
+
+    private static List<string> GetEnclosingPartialDeclarations(INamedTypeSymbol symbol)
+    {
+        var list = new List<string>();
+        for (var cur = symbol.ContainingType; cur is not null; cur = cur.ContainingType)
+        {
+            var kind = cur.IsRecord
+                ? (cur.IsValueType ? "record struct" : "record class")
+                : (cur.IsValueType ? "struct" : "class");
+            list.Add($"{kind} {cur.Name}");
+        }
+        list.Reverse();
+        return list;
     }
 }

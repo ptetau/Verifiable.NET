@@ -28,7 +28,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor UncheckedInitialization = new(
         id: "VER003",
         title: "Unchecked initialization of constrained type",
-        messageFormat: "Unchecked initialization of '{0}' bypasses its [Invariant] or [Refined<T>] contract. Fix: Construct '{0}' using '{0}.From(...)', '{0}.TryFrom(...)', or an [InboundPort] gate.",
+        messageFormat: "Unchecked initialization of '{0}' bypasses its [Invariant] or [TypeAlias<T>] contract. Fix: Construct '{0}' using '{0}.From(...)', '{0}.TryFrom(...)', or an [InboundPort] gate.",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -44,7 +44,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor DisallowedControlFlow = new(
         id: "VER005",
         title: "Prohibited control flow or exception in verifiable scope",
-        messageFormat: "Control flow construct '{0}' is prohibited inside a verifiable cage. Fix: Use bounded loops or [LoopInvariant]/[Decreases], avoid async/lock/goto, and return 'Result<T, TError>' instead of throwing exceptions.",
+        messageFormat: "Control flow construct '{0}' is prohibited inside a verifiable cage. Fix: Use bounded loops or Spec.LoopInvariant/Spec.Decreases, avoid async/lock/goto, and return 'Result<T, TError>' instead of throwing exceptions.",
         category: GatekeeperCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -84,7 +84,7 @@ internal static class VerifiableDescriptors
     public static readonly DiagnosticDescriptor SmtSolverUnknown = new(
         id: "VER103",
         title: "SMT solver returned unknown or timed out",
-        messageFormat: "Z3 returned 'unknown' for '{0}' on '{1}' ({2}). Fix: Simplify the contract, add [LoopInvariant] or [Decreases] annotations, or factor complex steps into helper lemmas.",
+        messageFormat: "Z3 returned 'unknown' for '{0}' on '{1}' ({2}). Fix: Simplify the contract, add Spec.LoopInvariant or Spec.Decreases annotations, or factor complex steps into helper lemmas.",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);

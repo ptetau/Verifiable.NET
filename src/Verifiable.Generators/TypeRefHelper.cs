@@ -8,132 +8,12 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Verifiable.Generators;
 
-internal sealed record TypeAliasSpec(
-    string Name,
-    string Namespace,
-    ITypeSymbol UnderlyingType,
-    string Predicate,
-    bool IsInternal,
-    Location DiagnosticLocation,
-    IReadOnlyList<string> UsingDirectives)
-{
-    public string FullName => string.IsNullOrEmpty(Namespace) ? Name : $"{Namespace}.{Name}";
-    public string GlobalTypeName => string.IsNullOrEmpty(Namespace) ? $"global::{Name}" : $"global::{Namespace}.{Name}";
-}
-
-internal sealed class TypeAliasLookup
-{
-    public static readonly TypeAliasLookup Empty = new([]);
-
-    private readonly Dictionary<(string Namespace, string Name), TypeAliasSpec> _byFull = new();
-    private readonly Dictionary<string, List<TypeAliasSpec>> _byName = new(StringComparer.Ordinal);
-
-    public TypeAliasLookup(IEnumerable<TypeAliasSpec> specs)
-    {
-        foreach (var spec in specs)
-        {
-            if (string.IsNullOrWhiteSpace(spec.Name)) continue;
-            var key = (spec.Namespace, spec.Name);
-            if (!_byFull.ContainsKey(key))
-            {
-                _byFull[key] = spec;
-            }
-            if (!_byName.TryGetValue(spec.Name, out var list))
-            {
-                list = new List<TypeAliasSpec>();
-                _byName[spec.Name] = list;
-            }
-            list.Add(spec);
-        }
-    }
-
-    public bool TryResolve(
-        ITypeSymbol type,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        out TypeAliasSpec? spec,
-        out bool isNullable)
-    {
-        isNullable = false;
-        if (type is INamedTypeSymbol nullableNamed &&
-            nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
-            nullableNamed.TypeArguments.Length == 1)
-        {
-            isNullable = true;
-            type = nullableNamed.TypeArguments[0];
-        }
-
-        if (type.TypeKind != TypeKind.Error)
-        {
-            spec = null;
-            return false;
-        }
-
-        if (type.NullableAnnotation == NullableAnnotation.Annotated)
-        {
-            isNullable = true;
-        }
-
-        var name = type.Name;
-        if (string.IsNullOrEmpty(name))
-        {
-            spec = null;
-            return false;
-        }
-
-        if (type.ContainingNamespace is { IsGlobalNamespace: false } explicitNs)
-        {
-            if (_byFull.TryGetValue((explicitNs.ToDisplayString(), name), out spec))
-            {
-                return true;
-            }
-        }
-
-        if (!string.IsNullOrEmpty(contextNamespace))
-        {
-            var cur = contextNamespace;
-            while (!string.IsNullOrEmpty(cur))
-            {
-                if (_byFull.TryGetValue((cur, name), out spec))
-                {
-                    return true;
-                }
-                var dot = cur.LastIndexOf('.');
-                cur = dot > 0 ? cur.Substring(0, dot) : string.Empty;
-            }
-        }
-
-        foreach (var u in usings)
-        {
-            if (_byFull.TryGetValue((u, name), out spec))
-            {
-                return true;
-            }
-        }
-
-        if (_byFull.TryGetValue((string.Empty, name), out spec))
-        {
-            return true;
-        }
-
-        if (_byName.TryGetValue(name, out var candidates) && candidates.Count == 1)
-        {
-            spec = candidates[0];
-            return true;
-        }
-
-        spec = null;
-        return false;
-    }
-}
-
 internal static class TypeRefHelper
 {
     public const string ContractsNamespace = "Verifiable.Contracts";
-    public const string RefinedAttributeMetadataName = "Verifiable.Contracts.RefinedAttribute`1";
     public const string TypeAliasAttributeMetadataName = "Verifiable.Contracts.TypeAliasAttribute`1";
+    public const string RefinedAttributeMetadataName = "Verifiable.Contracts.RefinedAttribute`1";
     public const string InvariantAttributeMetadataName = "Verifiable.Contracts.InvariantAttribute";
-    public const string RequiresAttributeMetadataName = "Verifiable.Contracts.RequiresAttribute";
     public const string InboundPortAttributeMetadataName = "Verifiable.Contracts.InboundPortAttribute";
     public const string GhostAttributeMetadataName = "Verifiable.Contracts.GhostAttribute";
 
@@ -176,33 +56,85 @@ internal static class TypeRefHelper
         return sb.ToString();
     }
 
-    public static bool TryGetRefinedUnderlyingType(ITypeSymbol type, out ITypeSymbol? underlyingType, out string? predicate)
+    public static bool TryGetConstrainedUnderlyingType(ITypeSymbol type, out ITypeSymbol? underlyingType)
     {
         if (type is INamedTypeSymbol named)
         {
             foreach (var attr in named.GetAttributes())
             {
-                if (attr.AttributeClass is { IsGenericType: true } attrClass &&
-                    attrClass.ConstructedFrom.ToDisplayString() == "Verifiable.Contracts.RefinedAttribute<TUnderlying>" &&
-                    attrClass.TypeArguments.Length == 1 &&
-                    attr.ConstructorArguments.Length == 1 &&
-                    attr.ConstructorArguments[0].Value is string pred)
+                if (attr.AttributeClass is { IsGenericType: true, TypeArguments.Length: 1 } attrClass)
                 {
-                    underlyingType = attrClass.TypeArguments[0];
-                    predicate = pred;
-                    return true;
+                    var defName = attrClass.ConstructedFrom.ToDisplayString();
+                    if (defName is "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" or "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
+                    {
+                        underlyingType = attrClass.TypeArguments[0];
+                        return true;
+                    }
                 }
             }
         }
 
         underlyingType = null;
-        predicate = null;
         return false;
     }
 
-    public static IReadOnlyList<string> GetInvariants(INamedTypeSymbol type)
+    public static bool TryFindIsValidMethod(
+        INamedTypeSymbol type,
+        ITypeSymbol underlyingType,
+        out IMethodSymbol? method,
+        out ExpressionSyntax? bodyExpression,
+        out string? parameterName,
+        out bool acceptsNullableParam)
     {
-        var result = new List<string>();
+        foreach (var m in type.GetMembers("IsValid").OfType<IMethodSymbol>())
+        {
+            if (m.IsStatic &&
+                m.DeclaredAccessibility == Accessibility.Public &&
+                m.ReturnType.SpecialType == SpecialType.System_Boolean &&
+                m.Parameters.Length == 1 &&
+                SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, underlyingType))
+            {
+                method = m;
+                parameterName = m.Parameters[0].Name;
+                acceptsNullableParam = m.Parameters[0].NullableAnnotation == NullableAnnotation.Annotated;
+                bodyExpression = TryExtractMethodBodyExpression(m);
+                return bodyExpression is not null;
+            }
+        }
+
+        method = null;
+        bodyExpression = null;
+        parameterName = null;
+        acceptsNullableParam = false;
+        return false;
+    }
+
+    private static ExpressionSyntax? TryExtractMethodBodyExpression(IMethodSymbol method)
+    {
+        foreach (var synRef in method.DeclaringSyntaxReferences)
+        {
+            if (synRef.GetSyntax() is MethodDeclarationSyntax md)
+            {
+                if (md.ExpressionBody is not null)
+                {
+                    return md.ExpressionBody.Expression;
+                }
+
+                if (md.Body is { Statements.Count: 1 } body &&
+                    body.Statements[0] is ReturnStatementSyntax ret &&
+                    ret.Expression is not null)
+                {
+                    return ret.Expression;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public static IReadOnlyList<(string Name, bool IsMethod)> GetInvariantMembers(INamedTypeSymbol type)
+    {
+        var result = new List<(string Name, bool IsMethod)>();
         var stack = new Stack<INamedTypeSymbol>();
         for (var cur = type; cur is not null && cur.SpecialType != SpecialType.System_Object && cur.SpecialType != SpecialType.System_ValueType; cur = cur.BaseType)
         {
@@ -212,14 +144,26 @@ internal static class TypeRefHelper
         while (stack.Count > 0)
         {
             var t = stack.Pop();
-            foreach (var attr in t.GetAttributes())
+            foreach (var m in t.GetMembers().OfType<IMethodSymbol>())
             {
-                if (attr.AttributeClass?.ToDisplayString() == InvariantAttributeMetadataName &&
-                    attr.ConstructorArguments.Length == 1 &&
-                    attr.ConstructorArguments[0].Value is string expr &&
-                    !string.IsNullOrWhiteSpace(expr))
+                if (!m.IsStatic &&
+                    m.MethodKind == MethodKind.Ordinary &&
+                    m.Parameters.Length == 0 &&
+                    m.ReturnType.SpecialType == SpecialType.System_Boolean &&
+                    HasInvariantAttribute(m))
                 {
-                    result.Add(expr);
+                    result.Add((m.Name, true));
+                }
+            }
+
+            foreach (var p in t.GetMembers().OfType<IPropertySymbol>())
+            {
+                if (!p.IsStatic &&
+                    !p.IsIndexer &&
+                    p.Type.SpecialType == SpecialType.System_Boolean &&
+                    HasInvariantAttribute(p))
+                {
+                    result.Add((p.Name, false));
                 }
             }
         }
@@ -227,21 +171,52 @@ internal static class TypeRefHelper
         return result;
     }
 
-    public static IReadOnlyList<string> GetRequires(IMethodSymbol method)
+    public static IReadOnlyList<ExpressionSyntax> GetLeadingSpecRequiresExpressions(IMethodSymbol method)
     {
-        var result = new List<string>();
-        foreach (var attr in method.GetAttributes())
+        var result = new List<ExpressionSyntax>();
+        foreach (var synRef in method.DeclaringSyntaxReferences)
         {
-            if (attr.AttributeClass?.ToDisplayString() == RequiresAttributeMetadataName &&
-                attr.ConstructorArguments.Length == 1 &&
-                attr.ConstructorArguments[0].Value is string expr &&
-                !string.IsNullOrWhiteSpace(expr))
+            if (synRef.GetSyntax() is MethodDeclarationSyntax md && md.Body is { } body)
             {
-                result.Add(expr);
+                foreach (var stmt in body.Statements)
+                {
+                    if (stmt is not ExpressionStatementSyntax exprStmt ||
+                        exprStmt.Expression is not InvocationExpressionSyntax inv ||
+                        !TryMatchSpecMethodName(inv.Expression, out var specMethodName))
+                    {
+                        break;
+                    }
+
+                    if (specMethodName == "Requires" && inv.ArgumentList.Arguments.Count == 1)
+                    {
+                        result.Add(inv.ArgumentList.Arguments[0].Expression);
+                    }
+                }
             }
         }
+
         return result;
     }
+
+    private static bool TryMatchSpecMethodName(ExpressionSyntax expr, out string methodName)
+    {
+        methodName = string.Empty;
+        if (expr is MemberAccessExpressionSyntax ma)
+        {
+            var rawName = ma.Name.Identifier.ValueText;
+            var isSpecReceiver = ma.Expression is IdentifierNameSyntax { Identifier.ValueText: "Spec" }
+                || (ma.Expression is MemberAccessExpressionSyntax recMa && recMa.Name.Identifier.ValueText == "Spec");
+            if (isSpecReceiver)
+            {
+                methodName = rawName;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static bool HasInvariantAttribute(ISymbol symbol) =>
+        symbol.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == InvariantAttributeMetadataName);
 
     public static bool HasGhostAttribute(ISymbol symbol) =>
         symbol.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == GhostAttributeMetadataName);
@@ -317,96 +292,5 @@ internal static class TypeRefHelper
             }
         }
         return list.Distinct(StringComparer.Ordinal).ToList();
-    }
-
-    public static List<TypeAliasSpec> ExtractTypeAliases(
-        IEnumerable<AttributeData> attributes,
-        string defaultNamespace,
-        Location fallbackLocation,
-        IReadOnlyList<string>? fallbackUsings = null)
-    {
-        var result = new List<TypeAliasSpec>();
-        foreach (var attr in attributes)
-        {
-            if (attr.AttributeClass is not { IsGenericType: true } ac ||
-                ac.ConstructedFrom.ToDisplayString() != "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" ||
-                ac.TypeArguments.Length != 1)
-            {
-                continue;
-            }
-
-            if (attr.ConstructorArguments.Length < 2)
-            {
-                continue;
-            }
-
-            var name = attr.ConstructorArguments[0].Value as string ?? string.Empty;
-            var predicate = attr.ConstructorArguments[1].Value as string ?? string.Empty;
-            var targetNs = defaultNamespace;
-            var isInternal = false;
-
-            foreach (var namedArg in attr.NamedArguments)
-            {
-                if (namedArg.Key == "Namespace" && namedArg.Value.Value is string nsVal)
-                {
-                    targetNs = nsVal.Trim();
-                }
-                else if (namedArg.Key == "IsInternal" && namedArg.Value.Value is bool bVal)
-                {
-                    isInternal = bVal;
-                }
-            }
-
-            var loc = attr.ApplicationSyntaxReference?.GetSyntax().GetLocation() ?? fallbackLocation;
-            var usings = attr.ApplicationSyntaxReference?.SyntaxTree is { } st
-                ? CollectUsings(st)
-                : (fallbackUsings ?? Array.Empty<string>());
-
-            result.Add(new TypeAliasSpec(
-                name,
-                targetNs,
-                ac.TypeArguments[0],
-                predicate,
-                isInternal,
-                loc,
-                usings));
-        }
-
-        return result;
-    }
-
-    public static string FormatGlobalTypeName(
-        ITypeSymbol type,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases)
-    {
-        if (aliases.TryResolve(type, contextNamespace, usings, out var spec, out var isNullable))
-        {
-            return isNullable ? spec!.GlobalTypeName + "?" : spec!.GlobalTypeName;
-        }
-
-        if (type is INamedTypeSymbol named)
-        {
-            if (named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
-                named.TypeArguments.Length == 1)
-            {
-                return FormatGlobalTypeName(named.TypeArguments[0], contextNamespace, usings, aliases) + "?";
-            }
-
-            if (named.IsGenericType && !named.IsUnboundGenericType)
-            {
-                var orig = ToGlobalTypeName(named.OriginalDefinition);
-                var ltIdx = orig.IndexOf('<');
-                if (ltIdx > 0)
-                {
-                    var formattedArgs = named.TypeArguments.Select(a => FormatGlobalTypeName(a, contextNamespace, usings, aliases));
-                    var suffix = named.NullableAnnotation == NullableAnnotation.Annotated && named.IsReferenceType ? "?" : string.Empty;
-                    return orig.Substring(0, ltIdx) + "<" + string.Join(", ", formattedArgs) + ">" + suffix;
-                }
-            }
-        }
-
-        return ToGlobalTypeName(type);
     }
 }

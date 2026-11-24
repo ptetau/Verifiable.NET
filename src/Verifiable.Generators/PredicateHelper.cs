@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -9,80 +8,13 @@ namespace Verifiable.Generators;
 
 internal static class PredicateHelper
 {
-    public sealed record RewrittenPredicate(
-        bool IsValid,
-        string? ErrorMessage,
-        string ValueExpression,
-        string NormalizedOriginalExpression,
-        int? UpperBoundExclusiveForZeroBasedInt);
-
-    public static RewrittenPredicate RewriteRefinementPredicate(string? predicate, ITypeSymbol underlyingType)
-    {
-        if (string.IsNullOrWhiteSpace(predicate))
-        {
-            return new RewrittenPredicate(false, "Predicate cannot be empty.", string.Empty, string.Empty, null);
-        }
-
-        var expr = SyntaxFactory.ParseExpression(predicate!);
-        var firstError = expr.GetDiagnostics().FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error);
-        if (firstError is not null || expr.FullSpan.Length != predicate!.Length)
-        {
-            var errMsg = firstError?.GetMessage() ?? "Unexpected trailing tokens in predicate.";
-            return new RewrittenPredicate(false, errMsg, string.Empty, string.Empty, null);
-        }
-
-        var hasNullLiteral = expr.DescendantNodesAndSelf().Any(n => n.IsKind(SyntaxKind.NullLiteralExpression));
-        var valueRewriter = new ValuePredicateRewriter("value");
-        var rewrittenToValue = valueRewriter.Visit(expr)!.ToFullString().Trim();
-
-        var originalRewriter = new ValuePredicateRewriter("Value");
-        var rewrittenOriginal = originalRewriter.Visit(expr)!.ToFullString().Trim();
-
-        if (underlyingType.IsReferenceType && !hasNullLiteral)
-        {
-            rewrittenToValue = $"value != null && ({rewrittenToValue})";
-            rewrittenOriginal = $"Value != null && ({rewrittenOriginal})";
-        }
-
-        int? upperBound = null;
-        if (underlyingType.SpecialType == SpecialType.System_Int32)
-        {
-            upperBound = TryExtractZeroBasedUpperBound(expr);
-        }
-
-        return new RewrittenPredicate(true, null, rewrittenToValue, rewrittenOriginal, upperBound);
-    }
-
-    public static bool TryValidateExpression(string expression, out ExpressionSyntax? parsed, out string? error)
-    {
-        if (string.IsNullOrWhiteSpace(expression))
-        {
-            parsed = null;
-            error = "Expression cannot be empty.";
-            return false;
-        }
-
-        var syntax = SyntaxFactory.ParseExpression(expression);
-        var diag = syntax.GetDiagnostics().FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error);
-        if (diag is not null || syntax.FullSpan.Length != expression.Length)
-        {
-            parsed = null;
-            error = diag?.GetMessage() ?? "Syntax error in expression.";
-            return false;
-        }
-
-        parsed = syntax;
-        error = null;
-        return true;
-    }
-
     public static string QualifyMembers(ExpressionSyntax expr, string targetVariable, ISet<string> memberNames)
     {
         var rewriter = new MemberQualifierRewriter(targetVariable, memberNames);
         return rewriter.Visit(expr)!.ToFullString().Trim();
     }
 
-    private static int? TryExtractZeroBasedUpperBound(ExpressionSyntax expr)
+    public static int? TryExtractZeroBasedUpperBound(ExpressionSyntax expr, string parameterName)
     {
         int? minInclusive = null;
         int? maxExclusive = null;
@@ -99,7 +31,7 @@ internal static class PredicateHelper
                     return;
                 }
 
-                if (TryGetIdentifierBound(bin.Left, bin.Right, bin.Kind(), out var isLower, out var inclusiveVal, out var exclusiveVal))
+                if (TryGetIdentifierBound(bin.Left, bin.Right, bin.Kind(), parameterName, out var isLower, out var inclusiveVal, out var exclusiveVal))
                 {
                     if (isLower)
                     {
@@ -113,7 +45,7 @@ internal static class PredicateHelper
             }
             else if (node is IsPatternExpressionSyntax isPat &&
                      UnwrapParens(isPat.Expression) is IdentifierNameSyntax id &&
-                     id.Identifier.ValueText == "Value")
+                     id.Identifier.ValueText == parameterName)
             {
                 InspectPattern(isPat.Pattern, ref minInclusive, ref maxExclusive);
             }
@@ -163,6 +95,7 @@ internal static class PredicateHelper
         ExpressionSyntax left,
         ExpressionSyntax right,
         SyntaxKind kind,
+        string parameterName,
         out bool isLower,
         out int inclusiveLower,
         out int exclusiveUpper)
@@ -174,7 +107,7 @@ internal static class PredicateHelper
         left = UnwrapParens(left);
         right = UnwrapParens(right);
 
-        if (left is IdentifierNameSyntax idLeft && idLeft.Identifier.ValueText == "Value" && TryEvalIntLiteral(right, out var rVal))
+        if (left is IdentifierNameSyntax idLeft && idLeft.Identifier.ValueText == parameterName && TryEvalIntLiteral(right, out var rVal))
         {
             switch (kind)
             {
@@ -188,7 +121,7 @@ internal static class PredicateHelper
                     isLower = false; exclusiveUpper = rVal + 1; return true;
             }
         }
-        else if (right is IdentifierNameSyntax idRight && idRight.Identifier.ValueText == "Value" && TryEvalIntLiteral(left, out var lVal))
+        else if (right is IdentifierNameSyntax idRight && idRight.Identifier.ValueText == parameterName && TryEvalIntLiteral(left, out var lVal))
         {
             switch (kind)
             {
@@ -233,30 +166,6 @@ internal static class PredicateHelper
 
         value = 0;
         return false;
-    }
-
-    private sealed class ValuePredicateRewriter(string valueName) : CSharpSyntaxRewriter
-    {
-        public override SyntaxNode? VisitIdentifierName(IdentifierNameSyntax node)
-        {
-            if (IsDetachedIdentifier(node))
-            {
-                if (node.Identifier.ValueText == "Value")
-                {
-                    return SyntaxFactory.IdentifierName(valueName).WithTriviaFrom(node);
-                }
-
-                if (node.Identifier.ValueText == "Length")
-                {
-                    return SyntaxFactory.MemberAccessExpression(
-                        SyntaxKind.SimpleMemberAccessExpression,
-                        SyntaxFactory.IdentifierName(valueName),
-                        SyntaxFactory.IdentifierName("Length")).WithTriviaFrom(node);
-                }
-            }
-
-            return base.VisitIdentifierName(node);
-        }
     }
 
     private sealed class MemberQualifierRewriter(string targetVariable, ISet<string> memberNames) : CSharpSyntaxRewriter

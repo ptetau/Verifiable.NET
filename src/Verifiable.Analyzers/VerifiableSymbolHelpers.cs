@@ -18,21 +18,21 @@ internal static class VerifiableSymbolHelpers
     public const string UnverifiableAttr = "Verifiable.Contracts.UnverifiableAttribute";
     public const string VerifiableCandidateAttr = "Verifiable.Contracts.VerifiableCandidateAttribute";
     public const string InvariantAttr = "Verifiable.Contracts.InvariantAttribute";
-    public const string RequiresAttr = "Verifiable.Contracts.RequiresAttribute";
-    public const string EnsuresAttr = "Verifiable.Contracts.EnsuresAttribute";
-    public const string LoopInvariantAttr = "Verifiable.Contracts.LoopInvariantAttribute";
-    public const string DecreasesAttr = "Verifiable.Contracts.DecreasesAttribute";
     public const string MustConsumeAttr = "Verifiable.Contracts.MustConsumeAttribute";
     public const string ConsumesObligationAttr = "Verifiable.Contracts.ConsumesObligationAttribute";
     public const string InboundPortAttr = "Verifiable.Contracts.InboundPortAttribute";
     public const string GhostAttr = "Verifiable.Contracts.GhostAttribute";
     public const string PureAxiomAttr = "Verifiable.Contracts.PureAxiomAttribute";
     public const string CheckedArithmeticAttr = "Verifiable.Contracts.CheckedArithmeticAttribute";
+    public const string SpecTypeName = "Verifiable.Contracts.Spec";
 
     public static bool HasAttribute(ISymbol symbol, string metadataFullName) =>
         symbol.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == metadataFullName);
 
-    public static bool IsRefinedStruct(ITypeSymbol type)
+    public static bool IsSpecCall(IMethodSymbol method, string specMethodName) =>
+        method.ContainingType?.ToDisplayString() == SpecTypeName && method.Name == specMethodName;
+
+    public static bool IsConstrainedStruct(ITypeSymbol type)
     {
         if (type is not INamedTypeSymbol named)
         {
@@ -41,10 +41,13 @@ internal static class VerifiableSymbolHelpers
 
         foreach (var attr in named.GetAttributes())
         {
-            if (attr.AttributeClass is { IsGenericType: true } ac &&
-                ac.ConstructedFrom.ToDisplayString() == "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
+            if (attr.AttributeClass is { IsGenericType: true } ac)
             {
-                return true;
+                var defName = ac.ConstructedFrom.ToDisplayString();
+                if (defName is "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" or "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
+                {
+                    return true;
+                }
             }
         }
         return false;
@@ -52,7 +55,7 @@ internal static class VerifiableSymbolHelpers
 
     public static bool HasInvariantOrRefinedContract(ITypeSymbol type)
     {
-        if (IsRefinedStruct(type))
+        if (IsConstrainedStruct(type))
         {
             return true;
         }
@@ -62,6 +65,14 @@ internal static class VerifiableSymbolHelpers
             if (HasAttribute(cur, InvariantAttr))
             {
                 return true;
+            }
+
+            foreach (var member in cur.GetMembers())
+            {
+                if (member is IMethodSymbol or IPropertySymbol && HasAttribute(member, InvariantAttr))
+                {
+                    return true;
+                }
             }
         }
         return false;
@@ -242,12 +253,11 @@ internal static class VerifiableSymbolHelpers
             return false;
         }
 
-        if (IsRefinedStruct(containingType))
+        if (IsConstrainedStruct(containingType))
         {
             return true;
         }
 
-        // Built-in operators and record synthesized methods
         if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.UserDefinedOperator or MethodKind.Conversion)
         {
             return true;
@@ -284,7 +294,6 @@ internal static class VerifiableSymbolHelpers
             "System.IComparable<T>" or
             "System.IEquatable<T>")
         {
-            // Ban side-effecting / nondeterministic members on allowed types
             if (typeFull == "System.Guid" && method.Name == "NewGuid")
             {
                 return false;
@@ -298,7 +307,6 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
-        // Allow .Equals/.CompareTo/.ToString on tuples and value types
         if (containingType.IsTupleType || containingType.TypeKind == TypeKind.Enum)
         {
             return true;

@@ -14,8 +14,8 @@ namespace Verifiable.Analyzers.Smt;
 #pragma warning disable RS1035
 
 /// <summary>
-/// Verifies <c>[Requires]</c>, <c>[Ensures]</c>, <c>[Invariant]</c>, <c>[LoopInvariant]</c>, <c>[Decreases]</c>,
-/// and <c>[CheckedArithmetic]</c> contracts inside <c>[Verifiable]</c> methods using CFG-to-SSA lowering and out-of-process Z3.
+/// Verifies <c>Spec.Requires</c>, <c>Spec.Ensures</c>, <c>[Invariant]</c>, <c>Spec.LoopInvariant</c>, <c>Spec.Decreases</c>,
+/// <c>[TypeAlias&lt;T&gt;]</c>, and <c>[CheckedArithmetic]</c> contracts inside <c>[Verifiable]</c> methods using CFG-to-SSA lowering and out-of-process Z3.
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
@@ -69,7 +69,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
-                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method, sourceTree);
+                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method);
 
                 var allObligations = new List<ProofObligation>();
                 var allErrors = new List<(string Contract, Location Location, string Error)>();
@@ -79,7 +79,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
                     {
                         var cfg = opCtx.GetControlFlowGraph(block);
-                        var outcome = lowerer.Lower(cfg);
+                        var outcome = lowerer.Lower(cfg, opCtx.OperationBlocks);
                         allObligations.AddRange(outcome.Obligations);
                         allErrors.AddRange(outcome.Errors);
                     }
@@ -155,13 +155,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
     private static bool MethodNeedsSmtCheck(IMethodSymbol method, ImmutableArray<IOperation> blocks)
     {
-        if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.EnsuresAttr) ||
-            VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.LoopInvariantAttr) ||
-            VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.DecreasesAttr) ||
-            VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
+        if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             (method.ContainingAssembly is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
-            SmtTypeSystem.GetInvariants(method.ReturnType).Count > 0 ||
+            SmtTypeSystem.HasAnyInvariants(method.ReturnType) ||
             IsResultWithInvariantPayload(method.ReturnType))
         {
             return true;
@@ -171,11 +168,30 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         {
             foreach (var op in b.DescendantsAndSelf())
             {
-                if (op is IInvocationOperation inv &&
-                    (VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.RequiresAttr) ||
-                     (inv.TargetMethod.Name == "Add" && inv.TargetMethod.ContainingType?.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>")))
+                if (op is IInvocationOperation inv)
                 {
-                    return true;
+                    if (inv.TargetMethod.ContainingType?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+                    {
+                        return true;
+                    }
+
+                    if (inv.TargetMethod.Name == "From" &&
+                        inv.TargetMethod.ContainingType is { } ct &&
+                        SmtTypeSystem.TryGetConstrainedUnderlying(ct, out _))
+                    {
+                        return true;
+                    }
+
+                    if (CfgSsaLowerer.MethodHasSpecRequires(inv.TargetMethod))
+                    {
+                        return true;
+                    }
+
+                    if (inv.TargetMethod.Name == "Add" &&
+                        inv.TargetMethod.ContainingType?.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>")
+                    {
+                        return true;
+                    }
                 }
 
                 if (op is IPropertyReferenceOperation pr && pr.Property.IsIndexer)
@@ -193,7 +209,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         if (type is INamedTypeSymbol named &&
             named.OriginalDefinition.ToDisplayString() == "Verifiable.Contracts.Result<T, TError>")
         {
-            return SmtTypeSystem.GetInvariants(named.TypeArguments[0]).Count > 0;
+            return SmtTypeSystem.HasAnyInvariants(named.TypeArguments[0]);
         }
         return false;
     }
@@ -224,14 +240,14 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
     private static string GetFixHint(string obligationKind) => obligationKind switch
     {
-        "Precondition" => "Fix: Add a [Requires] precondition or an 'if' guard proving the callee precondition holds along this path.",
-        "Postcondition" => "Fix: Strengthen [Requires] preconditions or correct the return value to satisfy [Ensures].",
-        "TypeInvariant" => "Fix: Ensure all fields and invariants of the returned/constructed type hold under all input paths.",
-        "Overflow" => "Fix: Add integer bounds via [Requires] or [Refined<int>] so arithmetic cannot overflow 32/64-bit bounds.",
-        "CollectionBounds" => "Fix: Guard collection access with ContainsKey / index bounds check or strengthen [Invariant] / [Requires].",
-        "LoopInvariantEntry" => "Fix: Ensure the [LoopInvariant] holds immediately before entering the loop.",
-        "LoopInvariantStep" => "Fix: Strengthen [LoopInvariant] or update the loop body so the invariant is preserved on every iteration.",
-        "LoopDecreasesEntry" or "LoopDecreasesStep" => "Fix: Ensure [Decreases] stays non-negative and strictly decreases on every iteration.",
+        "Precondition" => "Fix: Add a Spec.Requires(...) precondition or an 'if' guard proving the callee precondition holds along this path.",
+        "Postcondition" => "Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...).",
+        "TypeInvariant" => "Fix: Ensure all fields and [Invariant] / IsValid checks of the returned/constructed type hold under all input paths.",
+        "Overflow" => "Fix: Add integer bounds via Spec.Requires(...) or [TypeAlias<int>] so arithmetic cannot overflow 32/64-bit bounds.",
+        "CollectionBounds" => "Fix: Guard collection access with ContainsKey / index bounds check or strengthen [Invariant] / Spec.Requires.",
+        "LoopInvariantEntry" => "Fix: Ensure Spec.LoopInvariant(...) holds immediately before entering the loop.",
+        "LoopInvariantStep" => "Fix: Strengthen Spec.LoopInvariant(...) or update the loop body so the invariant is preserved on every iteration.",
+        "LoopDecreasesEntry" or "LoopDecreasesStep" => "Fix: Ensure Spec.Decreases(...) stays non-negative and strictly decreases on every iteration.",
         _ => "Fix: Strengthen preconditions or fix the implementation so the contract holds on all paths."
     };
 

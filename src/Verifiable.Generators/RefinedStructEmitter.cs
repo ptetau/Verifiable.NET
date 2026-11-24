@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Verifiable.Generators;
 
@@ -10,33 +11,19 @@ internal static class RefinedStructEmitter
 {
     public static void Emit(
         SourceProductionContext spc,
-        string typeName,
-        string targetNamespace,
+        INamedTypeSymbol symbol,
         ITypeSymbol underlyingType,
-        string predicate,
+        ExpressionSyntax isValidBodyExpr,
+        string isValidParamName,
+        bool acceptsNullableParam,
         string accessibilityModifier,
-        Location diagnosticLocation,
         IReadOnlyList<string> usingDirectives,
         IReadOnlyList<string> enclosingPartialDeclarations,
-        bool emitRefinedAttribute,
         string hintSuffix)
     {
-        var rewritten = PredicateHelper.RewriteRefinementPredicate(predicate, underlyingType);
-        if (!rewritten.IsValid)
-        {
-            spc.ReportDiagnostic(Diagnostic.Create(
-                GeneratorDescriptors.InvalidRefinementPredicate,
-                diagnosticLocation,
-                predicate,
-                typeName,
-                rewritten.ErrorMessage ?? "Invalid expression"));
-            return;
-        }
-
+        var typeName = symbol.Name;
+        var targetNamespace = TypeRefHelper.GetNamespace(symbol);
         var underlyingGlobal = TypeRefHelper.ToGlobalTypeName(underlyingType);
-        var origPredRawLiteral = TypeRefHelper.EscapeStringLiteral(predicate);
-        var predicateEsc = TypeRefHelper.EscapeStringLiteral(rewritten.NormalizedOriginalExpression);
-        var valuePredEsc = TypeRefHelper.EscapeStringLiteral(rewritten.ValueExpression);
 
         var usings = new HashSet<string>(usingDirectives, StringComparer.Ordinal)
         {
@@ -71,12 +58,6 @@ internal static class RefinedStructEmitter
         }
 
         sb.Append(indent).AppendLine("[global::Verifiable.Contracts.Verifiable]");
-        if (emitRefinedAttribute)
-        {
-            sb.Append(indent).Append("[global::Verifiable.Contracts.Refined<").Append(underlyingGlobal).Append(">(")
-                .Append(origPredRawLiteral).AppendLine(")]");
-        }
-        sb.Append(indent).Append("[global::Verifiable.Contracts.Invariant(").Append(predicateEsc).AppendLine(")]");
         sb.Append(indent).Append("[global::System.Text.Json.Serialization.JsonConverter(typeof(").Append(typeName).AppendLine("JsonConverter))]");
         sb.Append(indent).Append(accessibilityModifier).Append("readonly partial record struct ").Append(typeName)
             .Append('(').Append(underlyingGlobal).Append(" Value) : global::System.IComparable<").Append(typeName).AppendLine(">");
@@ -131,21 +112,20 @@ internal static class RefinedStructEmitter
 
         sb.AppendLine();
 
-        // IsValid
-        sb.Append(memberIndent).Append("public static bool IsValid(").Append(underlyingGlobal).Append(" value) => ")
-            .Append(rewritten.ValueExpression).AppendLine(";");
-        sb.AppendLine();
+        var validCheckExpr = underlyingType.IsReferenceType && !acceptsNullableParam
+            ? "value is not null && IsValid(value)"
+            : "IsValid(value)";
 
         // From
         sb.Append(memberIndent).AppendLine("[global::Verifiable.Contracts.PureAxiom]");
-        sb.Append(memberIndent).Append("[global::Verifiable.Contracts.Requires(").Append(valuePredEsc).AppendLine(")]");
-        sb.Append(memberIndent).AppendLine("[global::Verifiable.Contracts.Ensures(\"result.Value == value\")]");
         sb.Append(memberIndent).Append("public static ").Append(typeName).Append(" From(").Append(underlyingGlobal).AppendLine(" value)");
         sb.Append(memberIndent).AppendLine("{");
-        sb.Append(memberIndent).AppendLine("    if (!IsValid(value))");
+        sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Requires(").Append(validCheckExpr).AppendLine(");");
+        sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Ensures<").Append(typeName).AppendLine(">(result => result.Value == value);");
+        sb.Append(memberIndent).Append("    if (!(").Append(validCheckExpr).AppendLine("))");
         sb.Append(memberIndent).AppendLine("    {");
         sb.Append(memberIndent).Append("        throw new global::System.ArgumentOutOfRangeException(nameof(value), value, ")
-            .Append(TypeRefHelper.EscapeStringLiteral($"Invalid {typeName}: value violates '{rewritten.NormalizedOriginalExpression}'. Fix: Pass a value satisfying '{rewritten.NormalizedOriginalExpression}'."))
+            .Append(TypeRefHelper.EscapeStringLiteral($"Invalid {typeName}: value violates {typeName}.IsValid. Fix: Pass a value satisfying {typeName}.IsValid."))
             .AppendLine(");");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).Append("    return new ").Append(typeName).AppendLine("(value);");
@@ -155,7 +135,7 @@ internal static class RefinedStructEmitter
         // TryFrom (out bool)
         sb.Append(memberIndent).Append("public static bool TryFrom(").Append(underlyingGlobal).Append(" value, out ").Append(typeName).AppendLine(" result)");
         sb.Append(memberIndent).AppendLine("{");
-        sb.Append(memberIndent).AppendLine("    if (IsValid(value))");
+        sb.Append(memberIndent).Append("    if (").Append(validCheckExpr).AppendLine(")");
         sb.Append(memberIndent).AppendLine("    {");
         sb.Append(memberIndent).Append("        result = new ").Append(typeName).AppendLine("(value);");
         sb.Append(memberIndent).AppendLine("        return true;");
@@ -173,35 +153,39 @@ internal static class RefinedStructEmitter
         sb.AppendLine();
 
         // TryMarshal
+        var isValidPredicateName = TypeRefHelper.EscapeStringLiteral($"{typeName}.IsValid");
         sb.Append(memberIndent).Append("public static global::Verifiable.Contracts.MarshalResult<").Append(typeName).Append("> TryMarshal(")
             .Append(underlyingGlobal).AppendLine(" value, string fieldName = \"value\")");
         sb.Append(memberIndent).AppendLine("{");
-        sb.Append(memberIndent).AppendLine("    if (IsValid(value))");
+        sb.Append(memberIndent).Append("    if (").Append(validCheckExpr).AppendLine(")");
         sb.Append(memberIndent).AppendLine("    {");
         sb.Append(memberIndent).Append("        return global::Verifiable.Contracts.MarshalResult<").Append(typeName).Append(">.Ok(new ").Append(typeName).AppendLine("(value));");
         sb.Append(memberIndent).AppendLine("    }");
         sb.Append(memberIndent).Append("    return global::Verifiable.Contracts.MarshalResult<").Append(typeName).AppendLine(">.Fail(");
-        sb.Append(memberIndent).Append("        new global::Verifiable.Contracts.ContractViolation(fieldName, ").Append(predicateEsc).Append(", ")
-            .Append("$\"Value '{value}' violates invariant '").Append(EscapeInterpolated(rewritten.NormalizedOriginalExpression)).Append("' for ").Append(typeName).AppendLine(".\"));");
+        sb.Append(memberIndent).Append("        new global::Verifiable.Contracts.ContractViolation(fieldName, ").Append(isValidPredicateName).Append(", ")
+            .Append("$\"Value '{value}' failed ").Append(typeName).AppendLine(".IsValid.\"));");
         sb.Append(memberIndent).AppendLine("}");
 
         // Bounded unchecked accessor
-        if (rewritten.UpperBoundExclusiveForZeroBasedInt is { } upperBound)
+        if (underlyingType.SpecialType == SpecialType.System_Int32 &&
+            PredicateHelper.TryExtractZeroBasedUpperBound(isValidBodyExpr, isValidParamName) is { } upperBound)
         {
             sb.AppendLine();
             sb.Append(memberIndent).Append("public const int UpperBoundExclusive = ").Append(upperBound).AppendLine(";");
             sb.AppendLine();
             sb.Append(memberIndent).AppendLine("[global::Verifiable.Contracts.PureAxiom]");
-            sb.Append(memberIndent).Append("[global::Verifiable.Contracts.Requires(\"buffer.Length >= ").Append(upperBound).AppendLine("\")]");
-            sb.Append(memberIndent).AppendLine("public T ReadUnchecked<T>(global::System.ReadOnlySpan<T> buffer) =>");
-            sb.Append(memberIndent).AppendLine("    global::System.Runtime.CompilerServices.Unsafe.Add(");
+            sb.Append(memberIndent).AppendLine("public T ReadUnchecked<T>(global::System.ReadOnlySpan<T> buffer)");
+            sb.Append(memberIndent).AppendLine("{");
+            sb.Append(memberIndent).Append("    global::Verifiable.Contracts.Spec.Requires(buffer.Length >= ").Append(upperBound).AppendLine(");");
+            sb.Append(memberIndent).AppendLine("    return global::System.Runtime.CompilerServices.Unsafe.Add(");
             sb.Append(memberIndent).AppendLine("        ref global::System.Runtime.InteropServices.MemoryMarshal.GetReference(buffer),");
             sb.Append(memberIndent).AppendLine("        Value);");
+            sb.Append(memberIndent).AppendLine("}");
         }
 
         // JsonConverter
         sb.AppendLine();
-        EmitJsonConverter(sb, memberIndent, typeName, underlyingType, underlyingGlobal, rewritten.NormalizedOriginalExpression);
+        EmitJsonConverter(sb, memberIndent, typeName, underlyingType, underlyingGlobal);
 
         sb.Append(indent).AppendLine("}");
 
@@ -256,10 +240,8 @@ internal static class RefinedStructEmitter
         string indent,
         string typeName,
         ITypeSymbol underlyingType,
-        string underlyingGlobal,
-        string predicate)
+        string underlyingGlobal)
     {
-        var interpPred = EscapeInterpolated(predicate);
         sb.Append(indent).Append("public sealed class ").Append(typeName).Append("JsonConverter : global::System.Text.Json.Serialization.JsonConverter<").Append(typeName).AppendLine(">");
         sb.Append(indent).AppendLine("{");
         var m = indent + "    ";
@@ -269,8 +251,8 @@ internal static class RefinedStructEmitter
         sb.Append(m).Append("    var raw = global::System.Text.Json.JsonSerializer.Deserialize<").Append(underlyingGlobal).AppendLine(">(ref reader, options);");
         sb.Append(m).Append("    if (!").Append(typeName).AppendLine(".TryFrom(raw!, out var result))");
         sb.Append(m).AppendLine("    {");
-        sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON value '{raw}' for ").Append(typeName)
-            .Append(" violates '").Append(interpPred).Append("'. Fix: Provide a valid ").Append(typeName).AppendLine(".\");");
+        sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON value '{raw}' failed ").Append(typeName)
+            .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(".\");");
         sb.Append(m).AppendLine("    }");
         sb.Append(m).AppendLine("    return result;");
         sb.Append(m).AppendLine("}");
@@ -289,8 +271,8 @@ internal static class RefinedStructEmitter
             sb.Append(m).AppendLine("    var keyText = reader.GetString() ?? throw new global::System.Text.Json.JsonException(\"Null property name.\");");
             sb.Append(m).Append("    if (!(").Append(propParseExpr).Append(") || !").Append(typeName).AppendLine(".TryFrom(parsed, out var result))");
             sb.Append(m).AppendLine("    {");
-            sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON property key '{keyText}' for ").Append(typeName)
-                .Append(" violates '").Append(interpPred).Append("'. Fix: Provide a valid ").Append(typeName).AppendLine(" key.\");");
+            sb.Append(m).Append("        throw new global::System.Text.Json.JsonException($\"JSON property key '{keyText}' failed ").Append(typeName)
+                .Append(".IsValid. Fix: Provide a valid ").Append(typeName).AppendLine(" key.\");");
             sb.Append(m).AppendLine("    }");
             sb.Append(m).AppendLine("    return result;");
             sb.Append(m).AppendLine("}");
@@ -332,7 +314,4 @@ internal static class RefinedStructEmitter
             _ => "value.Value?.ToString() ?? string.Empty"
         };
     }
-
-    private static string EscapeInterpolated(string text) =>
-        text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("{", "{{").Replace("}", "}}");
 }

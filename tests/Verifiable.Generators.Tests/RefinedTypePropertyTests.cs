@@ -9,20 +9,35 @@ using Xunit;
 
 namespace Verifiable.Generators.Tests;
 
-[Refined<int>("Value >= 1")]
-public readonly partial record struct SampleTodoId;
+[Refined<int>]
+public readonly partial record struct SampleTodoId
+{
+    public static bool IsValid(int value) => value >= 1;
+}
 
-[Refined<decimal>("Value > 0m && Value <= 1000000m")]
-public readonly partial record struct SamplePositiveAmount;
+[Refined<decimal>]
+public readonly partial record struct SamplePositiveAmount
+{
+    public static bool IsValid(decimal value) => value > 0m && value <= 1000000m;
+}
 
-[Refined<string>("Length is >= 1 and <= 20")]
-public readonly partial record struct SampleCode;
+[Refined<string>]
+public readonly partial record struct SampleCode
+{
+    public static bool IsValid(string value) => value is { Length: >= 1 and <= 20 };
+}
 
-[Refined<Guid>("Value != Guid.Empty")]
-public readonly partial record struct SampleCommandId;
+[Refined<Guid>]
+public readonly partial record struct SampleCommandId
+{
+    public static bool IsValid(Guid value) => value != Guid.Empty;
+}
 
-[Refined<int>("Value >= 0 && Value < 16")]
-public readonly partial record struct SampleSlot;
+[Refined<int>]
+public readonly partial record struct SampleSlot
+{
+    public static bool IsValid(int value) => value >= 0 && value < 16;
+}
 
 public class RefinedTypePropertyTests
 {

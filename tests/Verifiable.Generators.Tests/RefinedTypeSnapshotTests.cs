@@ -32,7 +32,7 @@ public class RefinedTypeSnapshotTests
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new TypeAliasGenerator().AsSourceGenerator(), new RefinedTypeGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
+            generators: [new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
             parseOptions: new CSharpParseOptions(LanguageVersion.Preview));
 
         driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
@@ -45,15 +45,18 @@ public class RefinedTypeSnapshotTests
     }
 
     [Fact]
-    public void RefinedInt_GeneratesFullContractSurface_AndCompilesCleanly()
+    public void TypeAliasInt_GeneratesFullContractSurface_AndCompilesCleanly()
     {
         const string code = """
             using Verifiable.Contracts;
 
             namespace SampleDomain;
 
-            [Refined<int>("Value >= 1")]
-            public readonly partial record struct TodoId;
+            [TypeAlias<int>]
+            public readonly partial record struct TodoId
+            {
+                public static bool IsValid(int value) => value >= 1;
+            }
             """;
 
         var (output, genDiags, sources) = RunGenerators(code);
@@ -62,27 +65,29 @@ public class RefinedTypeSnapshotTests
         var compileErrors = output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
         Assert.Empty(compileErrors);
 
-        Assert.True(sources.TryGetValue("SampleDomain.TodoId.Refined.g.cs", out var generated));
+        Assert.True(sources.TryGetValue("SampleDomain.TodoId.TypeAlias.g.cs", out var generated));
         Assert.Contains("[global::Verifiable.Contracts.Verifiable]", generated);
-        Assert.Contains("[global::Verifiable.Contracts.Invariant(\"Value >= 1\")]", generated);
         Assert.Contains("IComparable<TodoId>", generated);
-        Assert.Contains("[global::Verifiable.Contracts.Requires(\"value >= 1\")]", generated);
-        Assert.Contains("[global::Verifiable.Contracts.Ensures(\"result.Value == value\")]", generated);
+        Assert.Contains("global::Verifiable.Contracts.Spec.Requires(IsValid(value));", generated);
+        Assert.Contains("global::Verifiable.Contracts.Spec.Ensures<TodoId>(result => result.Value == value);", generated);
         Assert.Contains("TodoIdJsonConverter", generated);
         Assert.Contains("ReadAsPropertyName", generated);
         Assert.Contains("WriteAsPropertyName", generated);
     }
 
     [Fact]
-    public void RefinedZeroBasedBoundedInt_GeneratesPureAxiomReadUnchecked()
+    public void ZeroBasedBoundedInt_GeneratesPureAxiomReadUnchecked()
     {
         const string code = """
             using Verifiable.Contracts;
 
             namespace SampleDomain;
 
-            [Refined<int>("Value >= 0 && Value < 64")]
-            public readonly partial record struct BufferIndex;
+            [Refined<int>]
+            public readonly partial record struct BufferIndex
+            {
+                public static bool IsValid(int idx) => idx is >= 0 and < 64;
+            }
             """;
 
         var (output, genDiags, sources) = RunGenerators(code);
@@ -93,21 +98,22 @@ public class RefinedTypeSnapshotTests
         var generated = sources["SampleDomain.BufferIndex.Refined.g.cs"];
         Assert.Contains("public const int UpperBoundExclusive = 64;", generated);
         Assert.Contains("[global::Verifiable.Contracts.PureAxiom]", generated);
+        Assert.Contains("global::Verifiable.Contracts.Spec.Requires(buffer.Length >= 64);", generated);
         Assert.Contains("ReadUnchecked<T>(global::System.ReadOnlySpan<T> buffer)", generated);
     }
 
     [Fact]
-    public void RefinedOnNonPartialClass_ReportsVER201WithFixLine()
+    public void TypeAliasOnNonPartialClass_ReportsVER201WithFixLine()
     {
         const string code = """
             using Verifiable.Contracts;
 
             namespace SampleDomain;
 
-            [Refined<int>("Value >= 1")]
+            [TypeAlias<int>]
             public class BadTodoId
             {
-                public int Value { get; set; }
+                public static bool IsValid(int value) => value >= 1;
             }
             """;
 
@@ -119,14 +125,14 @@ public class RefinedTypeSnapshotTests
     }
 
     [Fact]
-    public void RefinedWithInvalidPredicate_ReportsVER202WithFixLine()
+    public void TypeAliasWithoutIsValid_ReportsVER202WithFixLine()
     {
         const string code = """
             using Verifiable.Contracts;
 
             namespace SampleDomain;
 
-            [Refined<int>("Value >=")]
+            [TypeAlias<int>]
             public readonly partial record struct BrokenId;
             """;
 
@@ -146,25 +152,35 @@ public class RefinedTypeSnapshotTests
 
             namespace SampleDomain;
 
-            [Refined<int>("Value >= 1")]
-            public readonly partial record struct ItemId;
+            [TypeAlias<int>]
+            public readonly partial record struct ItemId
+            {
+                public static bool IsValid(int value) => value >= 1;
+            }
 
-            [Refined<string>("Length is >= 1 and <= 50")]
-            public readonly partial record struct ItemTitle;
+            [TypeAlias<string>]
+            public readonly partial record struct ItemTitle
+            {
+                public static bool IsValid(string value) => value is { Length: >= 1 and <= 50 };
+            }
 
             [Verifiable]
-            [Invariant("Items.Count == NextId.Value - 1")]
             public readonly record struct Board(
                 ItemId NextId,
-                ImmutableDictionary<ItemId, ItemTitle> Items);
+                ImmutableDictionary<ItemId, ItemTitle> Items)
+            {
+                [Invariant]
+                public bool IsConsistent() => Items.Count == NextId - 1;
+            }
 
+            [Verifiable]
             public static class Engine
             {
-                [Verifiable, InboundPort]
-                [Requires("board.NextId.Value >= 1")]
+                [InboundPort]
                 public static Board Add(Board board, ItemTitle title)
                 {
-                    var next = ItemId.From(board.NextId.Value + 1);
+                    Spec.Requires(board.NextId >= 1);
+                    var next = ItemId.From(board.NextId + 1);
                     return board with { NextId = next, Items = board.Items.Add(board.NextId, title) };
                 }
             }
@@ -178,5 +194,9 @@ public class RefinedTypeSnapshotTests
 
         Assert.True(sources.ContainsKey("SampleDomain.Board.Gate.g.cs"));
         Assert.True(sources.ContainsKey("SampleDomain.EnginePort.InboundPort.g.cs"));
+        var gateSrc = sources["SampleDomain.Board.Gate.g.cs"];
+        Assert.Contains("candidate.IsConsistent()", gateSrc);
+        var portSrc = sources["SampleDomain.EnginePort.InboundPort.g.cs"];
+        Assert.Contains("board.NextId >= 1", portSrc);
     }
 }

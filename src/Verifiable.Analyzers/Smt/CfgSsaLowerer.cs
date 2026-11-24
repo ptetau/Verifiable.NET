@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -39,15 +40,40 @@ internal sealed class CfgSsaLowerer
 
     private int _ssaCounter;
 
+    private sealed record EnsuresSpec(
+        IParameterSymbol? LambdaParam,
+        IOperation BodyExpr,
+        Location Location,
+        string DisplayText);
+
+    private sealed record LoopSpecGroup(
+        ILoopOperation Loop,
+        List<(IOperation Condition, Location Location, string DisplayText)> LoopInvariants,
+        List<(IOperation Measure, Location Location, string DisplayText)> Decreases);
+
+    private sealed class MethodSpecs
+    {
+        public List<(IOperation Condition, Location Location, string DisplayText)> Requires { get; } = new();
+        public List<EnsuresSpec> Ensures { get; } = new();
+        public List<LoopSpecGroup> Loops { get; } = new();
+        public List<(string Contract, Location Location, string Error)> Errors { get; } = new();
+    }
+
     private sealed class BlockEnv
     {
         public Dictionary<ISymbol, SmtTypedTerm> Vars { get; } = new(SymbolEqualityComparer.Default);
         public Dictionary<CaptureId, SmtTypedTerm> Captures { get; } = new();
         public Dictionary<CaptureId, ISymbol> CaptureAliases { get; } = new();
+        public SmtTypedTerm? ThisOverride { get; set; }
+        public SmtTypedTerm? SpecResult { get; set; }
 
         public BlockEnv Clone()
         {
-            var copy = new BlockEnv();
+            var copy = new BlockEnv
+            {
+                ThisOverride = ThisOverride,
+                SpecResult = SpecResult
+            };
             foreach (var kv in Vars) copy.Vars[kv.Key] = kv.Value;
             foreach (var kv in Captures) copy.Captures[kv.Key] = kv.Value;
             foreach (var kv in CaptureAliases) copy.CaptureAliases[kv.Key] = kv.Value;
@@ -57,20 +83,25 @@ internal sealed class CfgSsaLowerer
 
     private sealed record IncomingEdge(BasicBlock From, string ReachCond, BlockEnv Env);
 
-    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, SyntaxTree? contextTree)
+    private MethodSpecs _currentSpecs = new();
+    private readonly Dictionary<ISymbol, SmtTypedTerm> _entryParamVars = new(SymbolEqualityComparer.Default);
+    private SmtTypedTerm? _entryThis;
+
+    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method)
     {
         _compilation = compilation;
         _method = method;
         var useBitVec = HasCheckedArithmetic(method);
         _types = new SmtTypeSystem(useBitVec);
-        _translator = new ContractExpressionTranslator(compilation, _types, method.ContainingType, contextTree);
+        _translator = new ContractExpressionTranslator(compilation, _types);
     }
 
-    public LoweringOutcome Lower(ControlFlowGraph cfg)
+    public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
         var methodLoc = _method.Locations.FirstOrDefault() ?? Location.None;
         var entryEnv = new BlockEnv();
-        var paramTranslatorEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal);
+        _entryParamVars.Clear();
+        _entryThis = null;
 
         if (!_method.IsStatic && _method.ContainingType is { } recvType)
         {
@@ -79,7 +110,8 @@ internal sealed class CfgSsaLowerer
             _decls.Add($"(declare-const {thisSmt} {sort})");
             _trackedParams.Add(("this", thisSmt));
             var thisTerm = new SmtTypedTerm(thisSmt, recvType);
-            paramTranslatorEnv["this"] = thisTerm;
+            _entryThis = thisTerm;
+            entryEnv.ThisOverride = thisTerm;
             EmitTypeAssumptions(thisTerm, methodLoc);
         }
 
@@ -91,21 +123,27 @@ internal sealed class CfgSsaLowerer
             _trackedParams.Add((p.Name, smtName));
             var pTerm = new SmtTypedTerm(smtName, p.Type);
             entryEnv.Vars[p] = pTerm;
-            paramTranslatorEnv[p.Name] = pTerm;
+            _entryParamVars[p] = pTerm;
             EmitTypeAssumptions(pTerm, p.Locations.FirstOrDefault() ?? methodLoc);
         }
 
-        // Method [Requires] entry assumptions
-        foreach (var req in GetAttributeStrings(_method, VerifiableSymbolHelpers.RequiresAttr))
+        _currentSpecs = ExtractMethodSpecs(_compilation, _method, rawOperationBlocks);
+        foreach (var err in _currentSpecs.Errors)
+        {
+            _errors.Add(err);
+        }
+
+        // Method Spec.Requires entry assumptions
+        foreach (var req in _currentSpecs.Requires)
         {
             try
             {
-                var reqTerm = _translator.TranslateContractString(req, paramTranslatorEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
+                var reqTerm = LowerExpression(req.Condition, "true", entryEnv, emitObligations: false);
                 _assertions.Add($"(assert {reqTerm.Term})");
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((req, methodLoc, ex.Message));
+                _errors.Add((req.DisplayText, req.Location, ex.Message));
             }
         }
 
@@ -114,7 +152,6 @@ internal sealed class CfgSsaLowerer
             return new LoweringOutcome(_obligations, _errors);
         }
 
-        // Analyze loops vs acyclic CFG
         var backEdges = FindBackEdges(cfg);
         var loopHeaders = new Dictionary<BasicBlock, List<BasicBlock>>();
         foreach (var (src, dst) in backEdges)
@@ -146,9 +183,6 @@ internal sealed class CfgSsaLowerer
         var incoming = new Dictionary<BasicBlock, List<IncomingEdge>>();
         foreach (var b in cfg.Blocks) incoming[b] = new List<IncomingEdge>();
 
-        var blockGammas = new Dictionary<BasicBlock, string>();
-        var blockPostEnvs = new Dictionary<BasicBlock, BlockEnv>();
-
         incoming[cfg.Blocks[0]].Add(new IncomingEdge(cfg.Blocks[0], "true", entryEnv));
 
         foreach (var block in rpo)
@@ -166,65 +200,262 @@ internal sealed class CfgSsaLowerer
 
             if (loopBlocksByHeader.TryGetValue(block, out var loopBody))
             {
-                LowerNaturalLoop(block, loopBody, edges, cfg, backEdges, incoming, blockGammas, blockPostEnvs, paramTranslatorEnv);
+                LowerNaturalLoop(block, loopBody, edges, backEdges, incoming);
                 continue;
             }
 
             var (gamma, env) = MergeIncomingEdges(edges);
-            blockGammas[block] = gamma;
-
-            LowerBasicBlock(block, gamma, env, paramTranslatorEnv, incoming);
-            blockPostEnvs[block] = env;
+            LowerBasicBlock(block, gamma, env, incoming);
         }
 
         return new LoweringOutcome(_obligations, _errors);
+    }
+
+    public static bool MethodHasSpecRequires(IMethodSymbol method)
+    {
+        foreach (var synRef in method.DeclaringSyntaxReferences)
+        {
+            if (synRef.GetSyntax() is MethodDeclarationSyntax md)
+            {
+                foreach (var inv in md.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    if (inv.Expression is MemberAccessExpressionSyntax ma &&
+                        ma.Name.Identifier.ValueText == "Requires" &&
+                        (ma.Expression is IdentifierNameSyntax { Identifier.ValueText: "Spec" } ||
+                         (ma.Expression is MemberAccessExpressionSyntax recMa && recMa.Name.Identifier.ValueText == "Spec")))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static MethodSpecs ExtractMethodSpecs(
+        Compilation compilation,
+        IMethodSymbol method,
+        ImmutableArray<IOperation> existingBlocks)
+    {
+        var specs = new MethodSpecs();
+        var roots = new List<IOperation>();
+
+        if (!existingBlocks.IsDefaultOrEmpty)
+        {
+            roots.AddRange(existingBlocks);
+        }
+        else
+        {
+            foreach (var synRef in method.DeclaringSyntaxReferences)
+            {
+                var syn = synRef.GetSyntax();
+                if (!compilation.SyntaxTrees.Contains(syn.SyntaxTree))
+                {
+                    continue;
+                }
+
+                var model = compilation.GetSemanticModel(syn.SyntaxTree);
+                if (model.GetOperation(syn) is { } bodyOp)
+                {
+                    roots.Add(bodyOp);
+                }
+            }
+        }
+
+        var loopGroups = new Dictionary<ILoopOperation, LoopSpecGroup>();
+
+        void Walk(IOperation op, ILoopOperation? enclosingLoop)
+        {
+            if (op is ILocalFunctionOperation or IAnonymousFunctionOperation)
+            {
+                return;
+            }
+
+            if (op is ILoopOperation loopOp)
+            {
+                if (!loopGroups.ContainsKey(loopOp))
+                {
+                    var grp = new LoopSpecGroup(loopOp, new(), new());
+                    loopGroups[loopOp] = grp;
+                    specs.Loops.Add(grp);
+                }
+
+                foreach (var child in op.ChildOperations)
+                {
+                    Walk(child, loopOp);
+                }
+                return;
+            }
+
+            if (op is IInvocationOperation inv &&
+                inv.TargetMethod.ContainingType?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+            {
+                var loc = inv.Syntax.GetLocation();
+                var text = inv.Syntax.ToString();
+
+                switch (inv.TargetMethod.Name)
+                {
+                    case "Requires" when inv.Arguments.Length == 1:
+                        specs.Requires.Add((inv.Arguments[0].Value, loc, text));
+                        return;
+
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length == 1:
+                    {
+                        var declaredType = inv.TargetMethod.TypeArguments[0];
+                        if (!SymbolEqualityComparer.Default.Equals(declaredType, method.ReturnType))
+                        {
+                            specs.Errors.Add((text, loc,
+                                $"Spec.Ensures<{declaredType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}> type argument does not match method return type '{method.ReturnType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}'."));
+                            return;
+                        }
+
+                        if (!TryExtractLambdaPredicate(inv.Arguments[0].Value, out var lambdaParam, out var bodyExpr, out var lambdaError))
+                        {
+                            specs.Errors.Add((text, loc, lambdaError!));
+                            return;
+                        }
+
+                        specs.Ensures.Add(new EnsuresSpec(lambdaParam, bodyExpr!, loc, text));
+                        return;
+                    }
+
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length == 1:
+                        specs.Ensures.Add(new EnsuresSpec(null, inv.Arguments[0].Value, loc, text));
+                        return;
+
+                    case "LoopInvariant" when inv.Arguments.Length == 1:
+                        if (enclosingLoop is null)
+                        {
+                            specs.Errors.Add((text, loc, "Spec.LoopInvariant(...) must be called inside a loop body."));
+                            return;
+                        }
+                        loopGroups[enclosingLoop].LoopInvariants.Add((inv.Arguments[0].Value, loc, text));
+                        return;
+
+                    case "Decreases" when inv.Arguments.Length == 1:
+                        if (enclosingLoop is null)
+                        {
+                            specs.Errors.Add((text, loc, "Spec.Decreases(...) must be called inside a loop body."));
+                            return;
+                        }
+                        loopGroups[enclosingLoop].Decreases.Add((inv.Arguments[0].Value, loc, text));
+                        return;
+                }
+            }
+
+            foreach (var child in op.ChildOperations)
+            {
+                Walk(child, enclosingLoop);
+            }
+        }
+
+        foreach (var root in roots)
+        {
+            Walk(root, enclosingLoop: null);
+        }
+
+        return specs;
+    }
+
+    private static bool TryExtractLambdaPredicate(
+        IOperation argOp,
+        out IParameterSymbol? param,
+        out IOperation? bodyExpr,
+        out string? error)
+    {
+        var cur = argOp;
+        while (cur is IConversionOperation conv)
+        {
+            cur = conv.Operand;
+        }
+
+        if (cur is IDelegateCreationOperation del)
+        {
+            cur = del.Target;
+        }
+
+        if (cur is IAnonymousFunctionOperation anon &&
+            anon.Symbol.Parameters.Length == 1 &&
+            anon.Body is { Operations.Length: 1 } block &&
+            block.Operations[0] is IReturnOperation { ReturnedValue: { } retExpr })
+        {
+            param = anon.Symbol.Parameters[0];
+            bodyExpr = retExpr;
+            error = null;
+            return true;
+        }
+
+        param = null;
+        bodyExpr = null;
+        error = "Spec.Ensures<TResult> requires a single-expression lambda predicate such as 'result => ...'.";
+        return false;
+    }
+
+    private LoopSpecGroup? FindLoopSpecGroup(BasicBlock header, HashSet<BasicBlock> loopBody)
+    {
+        var anchorSpan = header.BranchValue?.Syntax.Span
+            ?? loopBody.SelectMany(b => b.Operations).FirstOrDefault()?.Syntax.Span;
+
+        if (anchorSpan is null)
+        {
+            return null;
+        }
+
+        LoopSpecGroup? best = null;
+        foreach (var grp in _currentSpecs.Loops)
+        {
+            var loopSpan = grp.Loop.Syntax.Span;
+            if (loopSpan.Contains(anchorSpan.Value))
+            {
+                if (best is null || loopSpan.Length < best.Loop.Syntax.Span.Length)
+                {
+                    best = grp;
+                }
+            }
+        }
+        return best;
     }
 
     private void LowerNaturalLoop(
         BasicBlock header,
         HashSet<BasicBlock> loopBody,
         List<IncomingEdge> preEdges,
-        ControlFlowGraph cfg,
         HashSet<(BasicBlock Src, BasicBlock Dst)> backEdges,
-        Dictionary<BasicBlock, List<IncomingEdge>> incoming,
-        Dictionary<BasicBlock, string> blockGammas,
-        Dictionary<BasicBlock, BlockEnv> blockPostEnvs,
-        IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+        Dictionary<BasicBlock, List<IncomingEdge>> incoming)
     {
         var (preGamma, preEnv) = MergeIncomingEdges(preEdges);
         var headerLoc = header.BranchValue?.Syntax.GetLocation() ?? _method.Locations.FirstOrDefault() ?? Location.None;
 
-        var loopInvs = GetAttributeStrings(_method, VerifiableSymbolHelpers.LoopInvariantAttr);
-        var decreasesExprs = GetAttributeStrings(_method, VerifiableSymbolHelpers.DecreasesAttr);
+        var loopSpecs = FindLoopSpecGroup(header, loopBody);
+        var loopInvs = loopSpecs?.LoopInvariants ?? new List<(IOperation Condition, Location Location, string DisplayText)>();
+        var decreasesExprs = loopSpecs?.Decreases ?? new List<(IOperation Measure, Location Location, string DisplayText)>();
 
         // 1. Check LoopInvariant entry and Decreases >= 0 at pre-loop state
-        foreach (var inv in loopInvs)
+        foreach (var (condOp, loc, display) in loopInvs)
         {
             try
             {
-                var tEnv = BuildTranslatorEnv(preEnv, paramEnv);
-                var invTerm = _translator.TranslateContractString(inv, tEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                AddObligation("LoopInvariantEntry", $"[LoopInvariant(\"{inv}\")] on entry", headerLoc, preGamma, invTerm.Term);
+                var invTerm = LowerExpression(condOp, preGamma, preEnv, emitObligations: false);
+                AddObligation("LoopInvariantEntry", $"{display} on entry", loc, preGamma, invTerm.Term);
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((inv, headerLoc, ex.Message));
+                _errors.Add((display, loc, ex.Message));
             }
         }
 
-        foreach (var dec in decreasesExprs)
+        foreach (var (decOp, loc, display) in decreasesExprs)
         {
             try
             {
-                var tEnv = BuildTranslatorEnv(preEnv, paramEnv);
-                var decTerm = _translator.TranslateContractString(dec, tEnv, _compilation.GetSpecialType(SpecialType.System_Int32));
-                var zero = _translator.FormatIntLiteral(0, 32);
+                var decTerm = LowerExpression(decOp, preGamma, preEnv, emitObligations: false);
+                var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
-                AddObligation("LoopDecreasesEntry", $"[Decreases(\"{dec}\")] >= 0 on entry", headerLoc, preGamma, $"({geOp} {decTerm.Term} {zero})");
+                AddObligation("LoopDecreasesEntry", $"{display} >= 0 on entry", loc, preGamma, $"({geOp} {decTerm.Term} {zero})");
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((dec, headerLoc, ex.Message));
+                _errors.Add((display, loc, ex.Message));
             }
         }
 
@@ -239,36 +470,34 @@ internal sealed class CfgSsaLowerer
             EmitTypeAssumptions(smtVar, headerLoc);
         }
 
-        // Build invariant assumption in havoced state
         var invAssumptions = new List<string>();
-        var loopTransEnv = BuildTranslatorEnv(loopEnv, paramEnv);
-        foreach (var inv in loopInvs)
+        foreach (var (condOp, loc, display) in loopInvs)
         {
             try
             {
-                var invTerm = _translator.TranslateContractString(inv, loopTransEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
+                var invTerm = LowerExpression(condOp, preGamma, loopEnv, emitObligations: false);
                 invAssumptions.Add(invTerm.Term);
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((inv, headerLoc, ex.Message));
+                _errors.Add((display, loc, ex.Message));
             }
         }
 
-        var decBeforeTerms = new List<(string Expr, SmtTypedTerm Term)>();
-        foreach (var dec in decreasesExprs)
+        var decBeforeTerms = new List<(IOperation MeasureOp, Location Loc, string Display, SmtTypedTerm Term)>();
+        foreach (var (decOp, loc, display) in decreasesExprs)
         {
             try
             {
-                var decTerm = _translator.TranslateContractString(dec, loopTransEnv, _compilation.GetSpecialType(SpecialType.System_Int32));
-                var zero = _translator.FormatIntLiteral(0, 32);
+                var decTerm = LowerExpression(decOp, preGamma, loopEnv, emitObligations: false);
+                var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
                 invAssumptions.Add($"({geOp} {decTerm.Term} {zero})");
-                decBeforeTerms.Add((dec, decTerm));
+                decBeforeTerms.Add((decOp, loc, display, decTerm));
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((dec, headerLoc, ex.Message));
+                _errors.Add((display, loc, ex.Message));
             }
         }
 
@@ -282,7 +511,7 @@ internal sealed class CfgSsaLowerer
         var headerWorkEnv = loopEnv.Clone();
         foreach (var op in header.Operations)
         {
-            LowerOperation(op, loopGamma, headerWorkEnv, paramEnv);
+            LowerOperation(op, loopGamma, headerWorkEnv);
         }
 
         var condDest = header.ConditionalSuccessor?.Destination;
@@ -292,7 +521,7 @@ internal sealed class CfgSsaLowerer
 
         if (header.BranchValue is { } bv && header.ConditionalSuccessor is not null)
         {
-            var condVal = LowerExpression(bv, loopGamma, headerWorkEnv, paramEnv);
+            var condVal = LowerExpression(bv, loopGamma, headerWorkEnv);
             if (header.ConditionKind == ControlFlowConditionKind.WhenTrue)
             {
                 condBranchCond = condVal.Term;
@@ -305,7 +534,6 @@ internal sealed class CfgSsaLowerer
             }
         }
 
-        // Route exit edges outside loopBody and body edges inside loopBody
         var bodyIncoming = new Dictionary<BasicBlock, List<IncomingEdge>>();
         foreach (var b in loopBody) bodyIncoming[b] = new List<IncomingEdge>();
 
@@ -327,7 +555,6 @@ internal sealed class CfgSsaLowerer
                 incoming[fallDest].Add(new IncomingEdge(header, edgeGamma, headerWorkEnv.Clone()));
         }
 
-        // Simulate loop body blocks in topological order (excluding header back-edge)
         var bodyOrder = ComputeSubgraphRpo(header, loopBody, backEdges);
         foreach (var b in bodyOrder)
         {
@@ -336,17 +563,15 @@ internal sealed class CfgSsaLowerer
             if (bEdges.Count == 0) continue;
 
             var (bGamma, bEnv) = MergeIncomingEdges(bEdges);
-            blockGammas[b] = bGamma;
 
-            // Route internal vs back-edge vs external exit
             foreach (var op in b.Operations)
             {
-                LowerOperation(op, bGamma, bEnv, paramEnv);
+                LowerOperation(op, bGamma, bEnv);
             }
 
             if (b.ConditionalSuccessor?.Destination is { } bCondDest)
             {
-                var bvTerm = b.BranchValue is not null ? LowerExpression(b.BranchValue, bGamma, bEnv, paramEnv) : null;
+                var bvTerm = b.BranchValue is not null ? LowerExpression(b.BranchValue, bGamma, bEnv) : null;
                 string cTerm = "true", fTerm = "true";
                 if (bvTerm is not null)
                 {
@@ -362,19 +587,19 @@ internal sealed class CfgSsaLowerer
                     }
                 }
 
-                DispatchLoopBodyEdge(b, bCondDest, CombineAnd(bGamma, cTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms, paramEnv, headerLoc);
+                DispatchLoopBodyEdge(b, bCondDest, CombineAnd(bGamma, cTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
                 if (b.FallThroughSuccessor?.Destination is { } bFallDest)
                 {
-                    DispatchLoopBodyEdge(b, bFallDest, CombineAnd(bGamma, fTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms, paramEnv, headerLoc);
+                    DispatchLoopBodyEdge(b, bFallDest, CombineAnd(bGamma, fTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
                 }
             }
             else if (b.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Return)
             {
-                HandleReturnBranch(b, bGamma, bEnv, paramEnv);
+                HandleReturnBranch(b, bGamma, bEnv);
             }
             else if (b.FallThroughSuccessor?.Destination is { } bFallOnly && b.FallThroughSuccessor.Semantics == ControlFlowBranchSemantics.Regular)
             {
-                DispatchLoopBodyEdge(b, bFallOnly, bGamma, bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms, paramEnv, headerLoc);
+                DispatchLoopBodyEdge(b, bFallOnly, bGamma, bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
             }
         }
     }
@@ -388,43 +613,39 @@ internal sealed class CfgSsaLowerer
         HashSet<BasicBlock> loopBody,
         Dictionary<BasicBlock, List<IncomingEdge>> bodyIncoming,
         Dictionary<BasicBlock, List<IncomingEdge>> outerIncoming,
-        IReadOnlyList<string> loopInvs,
-        IReadOnlyList<(string Expr, SmtTypedTerm Term)> decBeforeTerms,
-        IReadOnlyDictionary<string, SmtTypedTerm> paramEnv,
-        Location headerLoc)
+        List<(IOperation Condition, Location Location, string DisplayText)> loopInvs,
+        List<(IOperation MeasureOp, Location Loc, string Display, SmtTypedTerm Term)> decBeforeTerms)
     {
         if (ReferenceEquals(dst, header))
         {
-            // Back-edge reached: assert inductive step & decreases
-            var postTransEnv = BuildTranslatorEnv(env, paramEnv);
-            foreach (var inv in loopInvs)
+            foreach (var (condOp, loc, display) in loopInvs)
             {
                 try
                 {
-                    var invTerm = _translator.TranslateContractString(inv, postTransEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                    AddObligation("LoopInvariantStep", $"[LoopInvariant(\"{inv}\")] preservation", headerLoc, edgeGamma, invTerm.Term);
+                    var invTerm = LowerExpression(condOp, edgeGamma, env, emitObligations: false);
+                    AddObligation("LoopInvariantStep", $"{display} preservation", loc, edgeGamma, invTerm.Term);
                 }
                 catch (ContractLoweringException ex)
                 {
-                    _errors.Add((inv, headerLoc, ex.Message));
+                    _errors.Add((display, loc, ex.Message));
                 }
             }
 
-            foreach (var (decExpr, beforeTerm) in decBeforeTerms)
+            foreach (var (decOp, loc, display, beforeTerm) in decBeforeTerms)
             {
                 try
                 {
-                    var afterTerm = _translator.TranslateContractString(decExpr, postTransEnv, _compilation.GetSpecialType(SpecialType.System_Int32));
-                    var zero = _translator.FormatIntLiteral(0, 32);
+                    var afterTerm = LowerExpression(decOp, edgeGamma, env, emitObligations: false);
+                    var zero = _translator.FormatIntLiteral(0, _types.GetSort(afterTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                     var isBv = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(afterTerm.Type));
                     var geOp = isBv ? "bvsge" : ">=";
                     var ltOp = isBv ? "bvslt" : "<";
-                    AddObligation("LoopDecreasesStep", $"[Decreases(\"{decExpr}\")] decreases", headerLoc, edgeGamma,
+                    AddObligation("LoopDecreasesStep", $"{display} decreases", loc, edgeGamma,
                         $"(and ({geOp} {afterTerm.Term} {zero}) ({ltOp} {afterTerm.Term} {beforeTerm.Term}))");
                 }
                 catch (ContractLoweringException ex)
                 {
-                    _errors.Add((decExpr, headerLoc, ex.Message));
+                    _errors.Add((display, loc, ex.Message));
                 }
             }
         }
@@ -442,12 +663,11 @@ internal sealed class CfgSsaLowerer
         BasicBlock block,
         string gamma,
         BlockEnv env,
-        IReadOnlyDictionary<string, SmtTypedTerm> paramEnv,
         Dictionary<BasicBlock, List<IncomingEdge>> incoming)
     {
         foreach (var op in block.Operations)
         {
-            LowerOperation(op, gamma, env, paramEnv);
+            LowerOperation(op, gamma, env);
         }
 
         if (block.ConditionalSuccessor?.Destination is { } condDest)
@@ -455,7 +675,7 @@ internal sealed class CfgSsaLowerer
             string condTerm = "true", fallTerm = "true";
             if (block.BranchValue is { } bv)
             {
-                var c = LowerExpression(bv, gamma, env, paramEnv);
+                var c = LowerExpression(bv, gamma, env);
                 if (block.ConditionKind == ControlFlowConditionKind.WhenTrue)
                 {
                     condTerm = c.Term;
@@ -483,7 +703,7 @@ internal sealed class CfgSsaLowerer
 
         if (block.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Return)
         {
-            HandleReturnBranch(block, gamma, env, paramEnv);
+            HandleReturnBranch(block, gamma, env);
             return;
         }
 
@@ -494,36 +714,48 @@ internal sealed class CfgSsaLowerer
         }
     }
 
-    private void HandleReturnBranch(
-        BasicBlock block,
-        string gamma,
-        BlockEnv env,
-        IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private void HandleReturnBranch(BasicBlock block, string gamma, BlockEnv env)
     {
         if (block.BranchValue is null)
         {
             return;
         }
 
-        var retTerm = LowerExpression(block.BranchValue, gamma, env, paramEnv);
+        var retTerm = LowerExpression(block.BranchValue, gamma, env);
         var retLoc = block.BranchValue.Syntax.GetLocation();
-        var retTransEnv = BuildTranslatorEnv(env, paramEnv);
-        retTransEnv["result"] = retTerm;
+        VerifyReturnSpecsAndInvariants(retTerm, gamma, retLoc, env);
+    }
 
-        foreach (var ens in GetAttributeStrings(_method, VerifiableSymbolHelpers.EnsuresAttr))
+    private void VerifyReturnSpecsAndInvariants(SmtTypedTerm retTerm, string gamma, Location retLoc, BlockEnv postEnv)
+    {
+        foreach (var ens in _currentSpecs.Ensures)
         {
             try
             {
-                var goal = _translator.TranslateContractString(ens, retTransEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                AddObligation("Postcondition", $"[Ensures(\"{ens}\")]", retLoc, gamma, goal.Term);
+                var ensEnv = postEnv.Clone();
+                foreach (var kv in _entryParamVars)
+                {
+                    ensEnv.Vars[kv.Key] = kv.Value;
+                }
+                if (_entryThis is not null)
+                {
+                    ensEnv.ThisOverride = _entryThis;
+                }
+                if (ens.LambdaParam is not null)
+                {
+                    ensEnv.Vars[ens.LambdaParam] = retTerm;
+                }
+                ensEnv.SpecResult = retTerm;
+
+                var goal = LowerExpression(ens.BodyExpr, gamma, ensEnv, emitObligations: false);
+                AddObligation("Postcondition", ens.DisplayText, retLoc, gamma, goal.Term);
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((ens, retLoc, ex.Message));
+                _errors.Add((ens.DisplayText, ens.Location, ex.Message));
             }
         }
 
-        // Check return type [Invariant]s (guarding Result<T, E> by IsSuccess)
         EmitReturnInvariantObligations(retTerm, gamma, retLoc);
     }
 
@@ -546,25 +778,50 @@ internal sealed class CfgSsaLowerer
 
     private void EmitValueInvariantObligations(SmtTypedTerm value, string gamma, Location loc)
     {
-        foreach (var inv in SmtTypeSystem.GetInvariants(value.Type))
+        if (SmtTypeSystem.TryGetIsValidMethod(value.Type, out var isValidMethod) &&
+            SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
             try
             {
-                var env = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal) { ["this"] = value };
-                var goal = _translator.TranslateContractString(inv, env, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                AddObligation("TypeInvariant", $"[Invariant(\"{inv}\")] on {value.Type.Name}", loc, gamma, goal.Term);
+                var unwrapped = _translator.UnwrapRefinedIfApplicable(value);
+                var valEnv = new BlockEnv();
+                if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
+                var goal = LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false);
+                AddObligation("TypeInvariant", $"{value.Type.Name}.IsValid", loc, gamma, goal.Term);
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((inv, loc, ex.Message));
+                _errors.Add(($"{value.Type.Name}.IsValid", loc, ex.Message));
+            }
+            return;
+        }
+
+        foreach (var invMember in SmtTypeSystem.GetInvariantMembers(value.Type))
+        {
+            if (!SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, invMember, out _, out var invBody))
+            {
+                _errors.Add(($"{value.Type.Name}.{invMember.Name}", loc,
+                    $"[Invariant] member '{invMember.Name}' must be a single-expression method or property."));
+                continue;
+            }
+
+            try
+            {
+                var invEnv = new BlockEnv { ThisOverride = value };
+                var goal = LowerExpression(invBody!, gamma, invEnv, emitObligations: false);
+                AddObligation("TypeInvariant", $"[Invariant] {value.Type.Name}.{invMember.Name}", loc, gamma, goal.Term);
+            }
+            catch (ContractLoweringException ex)
+            {
+                _errors.Add(($"{value.Type.Name}.{invMember.Name}", loc, ex.Message));
             }
         }
 
-        if (_types.TryGetComposite(value.Type, out var comp) && !SmtTypeSystem.TryGetRefinedUnderlying(value.Type, out _, out _))
+        if (_types.TryGetComposite(value.Type, out var comp) && !SmtTypeSystem.TryGetConstrainedUnderlying(value.Type, out _))
         {
             foreach (var f in comp!.Fields)
             {
-                if (SmtTypeSystem.GetInvariants(f.Type).Count > 0)
+                if (SmtTypeSystem.HasAnyInvariants(f.Type))
                 {
                     EmitValueInvariantObligations(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), gamma, loc);
                 }
@@ -572,12 +829,12 @@ internal sealed class CfgSsaLowerer
         }
     }
 
-    private void LowerOperation(IOperation op, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private void LowerOperation(IOperation op, string gamma, BlockEnv env)
     {
         switch (op)
         {
             case IExpressionStatementOperation es:
-                _ = LowerExpression(es.Operation, gamma, env, paramEnv);
+                _ = LowerExpression(es.Operation, gamma, env);
                 break;
 
             case IVariableDeclarationGroupOperation dg:
@@ -585,7 +842,7 @@ internal sealed class CfgSsaLowerer
                 {
                     foreach (var d in decl.Declarators)
                     {
-                        LowerVariableDeclarator(d, gamma, env, paramEnv);
+                        LowerVariableDeclarator(d, gamma, env);
                     }
                 }
                 break;
@@ -593,44 +850,30 @@ internal sealed class CfgSsaLowerer
             case IVariableDeclarationOperation sd:
                 foreach (var d in sd.Declarators)
                 {
-                    LowerVariableDeclarator(d, gamma, env, paramEnv);
+                    LowerVariableDeclarator(d, gamma, env);
                 }
                 break;
 
             case IVariableDeclaratorOperation vd:
-                LowerVariableDeclarator(vd, gamma, env, paramEnv);
+                LowerVariableDeclarator(vd, gamma, env);
                 break;
 
             case IReturnOperation ret when ret.ReturnedValue is not null:
-                var retVal = LowerExpression(ret.ReturnedValue, gamma, env, paramEnv);
-                var retEnv = BuildTranslatorEnv(env, paramEnv);
-                retEnv["result"] = retVal;
-                foreach (var ens in GetAttributeStrings(_method, VerifiableSymbolHelpers.EnsuresAttr))
-                {
-                    try
-                    {
-                        var goal = _translator.TranslateContractString(ens, retEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                        AddObligation("Postcondition", $"[Ensures(\"{ens}\")]", ret.Syntax.GetLocation(), gamma, goal.Term);
-                    }
-                    catch (ContractLoweringException ex)
-                    {
-                        _errors.Add((ens, ret.Syntax.GetLocation(), ex.Message));
-                    }
-                }
-                EmitReturnInvariantObligations(retVal, gamma, ret.Syntax.GetLocation());
+                var retVal = LowerExpression(ret.ReturnedValue, gamma, env);
+                VerifyReturnSpecsAndInvariants(retVal, gamma, ret.Syntax.GetLocation(), env);
                 break;
 
             default:
-                _ = LowerExpression(op, gamma, env, paramEnv);
+                _ = LowerExpression(op, gamma, env);
                 break;
         }
     }
 
-    private void LowerVariableDeclarator(IVariableDeclaratorOperation vd, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private void LowerVariableDeclarator(IVariableDeclaratorOperation vd, string gamma, BlockEnv env)
     {
         if (vd.Initializer is not null)
         {
-            var rhs = LowerExpression(vd.Initializer.Value, gamma, env, paramEnv);
+            var rhs = LowerExpression(vd.Initializer.Value, gamma, env);
             var converted = _translator.ConvertTo(rhs, vd.Symbol.Type);
             var ssa = BindSsaValue(vd.Symbol.Name, converted);
             env.Vars[vd.Symbol] = ssa;
@@ -641,7 +884,12 @@ internal sealed class CfgSsaLowerer
         }
     }
 
-    private SmtTypedTerm LowerExpression(IOperation op, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerExpression(
+        IOperation op,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations = true,
+        int inlineDepth = 0)
     {
         switch (op)
         {
@@ -657,11 +905,11 @@ internal sealed class CfgSsaLowerer
                         return new SmtTypedTerm(_types.GetDefaultTerm(conv.Type), conv.Type);
                     }
                 }
-                var inner = LowerExpression(conv.Operand, gamma, env, paramEnv);
+                var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
                 return conv.Type is not null ? _translator.ConvertTo(inner, conv.Type) : inner;
 
             case IParenthesizedOperation paren:
-                return LowerExpression(paren.Operand, gamma, env, paramEnv);
+                return LowerExpression(paren.Operand, gamma, env, emitObligations, inlineDepth);
 
             case ILocalReferenceOperation lr:
                 if (env.Vars.TryGetValue(lr.Local, out var lVal)) return lVal;
@@ -672,11 +920,12 @@ internal sealed class CfgSsaLowerer
                 return new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type);
 
             case IInstanceReferenceOperation inst when inst.ReferenceKind == InstanceReferenceKind.ContainingTypeInstance:
-                if (paramEnv.TryGetValue("this", out var thisVal)) return thisVal;
+                if (env.ThisOverride is not null) return env.ThisOverride;
+                if (_entryThis is not null) return _entryThis;
                 return new SmtTypedTerm(_types.GetDefaultTerm(op.Type!), op.Type!);
 
             case IFlowCaptureOperation cap:
-                var capVal = LowerExpression(cap.Value, gamma, env, paramEnv);
+                var capVal = LowerExpression(cap.Value, gamma, env, emitObligations, inlineDepth);
                 var capSsa = BindSsaValue("cap", capVal);
                 env.Captures[cap.Id] = capSsa;
                 if (cap.Value is ILocalReferenceOperation capLoc)
@@ -698,34 +947,34 @@ internal sealed class CfgSsaLowerer
                 return new SmtTypedTerm(_types.GetDefaultTerm(def.Type!), def.Type!);
 
             case ISimpleAssignmentOperation sa:
-                var saRhs = LowerExpression(sa.Value, gamma, env, paramEnv);
+                var saRhs = LowerExpression(sa.Value, gamma, env, emitObligations, inlineDepth);
                 AssignTarget(sa.Target, saRhs, env);
                 return saRhs;
 
             case IDeconstructionAssignmentOperation da:
-                var daRhs = LowerExpression(da.Value, gamma, env, paramEnv);
+                var daRhs = LowerExpression(da.Value, gamma, env, emitObligations, inlineDepth);
                 AssignDeconstruction(da.Target, daRhs, env);
                 return daRhs;
 
             case ICompoundAssignmentOperation ca:
-                var curTarget = LowerExpression(ca.Target, gamma, env, paramEnv);
-                var rhsVal = LowerExpression(ca.Value, gamma, env, paramEnv);
-                var combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation());
+                var curTarget = LowerExpression(ca.Target, gamma, env, emitObligations, inlineDepth);
+                var rhsVal = LowerExpression(ca.Value, gamma, env, emitObligations, inlineDepth);
+                var combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation(), emitObligations);
                 var combinedSsa = BindSsaValue("assign", combined);
                 AssignTarget(ca.Target, combinedSsa, env);
                 return combinedSsa;
 
             case IIncrementOrDecrementOperation inc:
-                var prev = LowerExpression(inc.Target, gamma, env, paramEnv);
+                var prev = LowerExpression(inc.Target, gamma, env, emitObligations, inlineDepth);
                 var one = new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
                 var binKind = inc.Kind == OperationKind.Increment ? BinaryOperatorKind.Add : BinaryOperatorKind.Subtract;
-                var next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation());
+                var next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations);
                 var nextSsa = BindSsaValue("inc", next);
                 AssignTarget(inc.Target, nextSsa, env);
                 return inc.IsPostfix ? prev : nextSsa;
 
             case IUnaryOperation un:
-                var uOp = LowerExpression(un.Operand, gamma, env, paramEnv);
+                var uOp = LowerExpression(un.Operand, gamma, env, emitObligations, inlineDepth);
                 if (un.OperatorKind == UnaryOperatorKind.Not)
                     return new SmtTypedTerm($"(not {uOp.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 if (un.OperatorKind == UnaryOperatorKind.Minus)
@@ -734,64 +983,75 @@ internal sealed class CfgSsaLowerer
                     var sort = _types.GetSort(uOp.Type);
                     if (_types.UseBitVec && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
                     {
-                        var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
-                        AddObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
+                        if (emitObligations)
+                        {
+                            var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
+                            AddObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
+                        }
                         return new SmtTypedTerm($"(bvneg {uOp.Term})", uOp.Type);
                     }
                     return new SmtTypedTerm($"(- {uOp.Term})", uOp.Type);
                 }
+                if (un.OperatorKind == UnaryOperatorKind.Plus)
+                    return uOp;
+                if (!emitObligations)
+                    throw new ContractLoweringException($"Unsupported unary operator '{un.OperatorKind}' in specification.");
                 return uOp;
 
             case IBinaryOperation bin:
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalAnd)
                 {
-                    var lAnd = LowerExpression(bin.LeftOperand, gamma, env, paramEnv);
-                    var rAnd = LowerExpression(bin.RightOperand, CombineAnd(gamma, lAnd.Term), env, paramEnv);
+                    var lAnd = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+                    var rAnd = LowerExpression(bin.RightOperand, CombineAnd(gamma, lAnd.Term), env, emitObligations, inlineDepth);
                     return new SmtTypedTerm($"(and {lAnd.Term} {rAnd.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 }
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalOr)
                 {
-                    var lOr = LowerExpression(bin.LeftOperand, gamma, env, paramEnv);
-                    var rOr = LowerExpression(bin.RightOperand, CombineAnd(gamma, $"(not {lOr.Term})"), env, paramEnv);
+                    var lOr = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+                    var rOr = LowerExpression(bin.RightOperand, CombineAnd(gamma, $"(not {lOr.Term})"), env, emitObligations, inlineDepth);
                     return new SmtTypedTerm($"(or {lOr.Term} {rOr.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 }
-                var lhs = LowerExpression(bin.LeftOperand, gamma, env, paramEnv);
-                var rhs = LowerExpression(bin.RightOperand, gamma, env, paramEnv);
-                return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation());
+                var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+                var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+                return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
 
             case IConditionalOperation cond:
-                var cTerm = LowerExpression(cond.Condition, gamma, env, paramEnv);
-                var tTerm = LowerExpression(cond.WhenTrue, CombineAnd(gamma, cTerm.Term), env, paramEnv);
-                var fTerm = LowerExpression(cond.WhenFalse!, CombineAnd(gamma, $"(not {cTerm.Term})"), env, paramEnv);
+                var cTerm = LowerExpression(cond.Condition, gamma, env, emitObligations, inlineDepth);
+                var tTerm = LowerExpression(cond.WhenTrue, CombineAnd(gamma, cTerm.Term), env, emitObligations, inlineDepth);
+                var fTerm = LowerExpression(cond.WhenFalse!, CombineAnd(gamma, $"(not {cTerm.Term})"), env, emitObligations, inlineDepth);
                 var (pt, pf, uType) = _translator.UnifyForComparison(tTerm, fTerm);
                 return new SmtTypedTerm($"(ite {cTerm.Term} {pt} {pf})", uType);
 
             case IIsPatternOperation isPat:
-                var subj = LowerExpression(isPat.Value, gamma, env, paramEnv);
-                return LowerPatternOp(subj, isPat.Pattern, gamma, env, paramEnv);
+                var subj = LowerExpression(isPat.Value, gamma, env, emitObligations, inlineDepth);
+                return LowerPatternOp(subj, isPat.Pattern, gamma, env, emitObligations, inlineDepth);
 
             case IPropertyReferenceOperation propRef:
-                return LowerPropertyReference(propRef, gamma, env, paramEnv);
+                return LowerPropertyReference(propRef, gamma, env, emitObligations, inlineDepth);
 
             case IFieldReferenceOperation fieldRef:
-                return LowerFieldReference(fieldRef, gamma, env, paramEnv);
+                return LowerFieldReference(fieldRef, gamma, env, emitObligations, inlineDepth);
 
             case IWithOperation withOp:
-                return LowerWithOperation(withOp, gamma, env, paramEnv);
+                return LowerWithOperation(withOp, gamma, env, emitObligations, inlineDepth);
 
             case IObjectCreationOperation objCreate:
-                return LowerObjectCreation(objCreate, gamma, env, paramEnv);
+                return LowerObjectCreation(objCreate, gamma, env, emitObligations, inlineDepth);
 
             case ITupleOperation tuple:
-                return LowerTuple(tuple, gamma, env, paramEnv);
+                return LowerTuple(tuple, gamma, env, emitObligations, inlineDepth);
 
             case IInvocationOperation inv:
-                return LowerInvocation(inv, gamma, env, paramEnv);
+                return LowerInvocation(inv, gamma, env, emitObligations, inlineDepth);
 
             case ICollectionExpressionOperation colExpr:
-                return LowerCollectionExpression(colExpr, gamma, env, paramEnv);
+                return LowerCollectionExpression(colExpr, gamma, env, emitObligations, inlineDepth);
 
             default:
+                if (!emitObligations)
+                {
+                    throw new ContractLoweringException($"Unsupported C# syntax '{op.Kind}' ('{op.Syntax}') in specification.");
+                }
                 if (op.Type is not null)
                 {
                     return BindSsaValue("unk", new SmtTypedTerm(_types.GetDefaultTerm(op.Type), op.Type), isFreshFreeSymbol: true);
@@ -838,7 +1098,8 @@ internal sealed class CfgSsaLowerer
         SmtTypedTerm right,
         ITypeSymbol resultType,
         string gamma,
-        Location loc)
+        Location loc,
+        bool emitObligations = true)
     {
         if (kind == BinaryOperatorKind.Add &&
             (resultType.SpecialType == SpecialType.System_String ||
@@ -863,16 +1124,16 @@ internal sealed class CfgSsaLowerer
         var isBv = ContractExpressionTranslator.IsBitVecSort(sort);
         var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
 
-        if (isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
+        if (emitObligations && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
         {
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
         }
 
-        if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && !isBv && sort != "Real")
+        if (emitObligations && kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && !isBv && sort != "Real")
         {
             AddObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
         }
-        else if (kind == BinaryOperatorKind.Divide && sort == "Real")
+        else if (emitObligations && kind == BinaryOperatorKind.Divide && sort == "Real")
         {
             AddObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0.0))");
         }
@@ -890,6 +1151,7 @@ internal sealed class CfgSsaLowerer
             BinaryOperatorKind.Remainder => new SmtTypedTerm($"({(isBv ? "bvsrem" : "mod")} {lTerm} {rTerm})", resultType),
             BinaryOperatorKind.And => new SmtTypedTerm($"(and {lTerm} {rTerm})", boolType),
             BinaryOperatorKind.Or => new SmtTypedTerm($"(or {lTerm} {rTerm})", boolType),
+            _ when !emitObligations => throw new ContractLoweringException($"Unsupported binary operator '{kind}' in specification."),
             _ => BindSsaValue("bin", new SmtTypedTerm(_types.GetDefaultTerm(resultType), resultType), isFreshFreeSymbol: true)
         };
     }
@@ -923,29 +1185,35 @@ internal sealed class CfgSsaLowerer
         AddObligation("Overflow", $"Checked arithmetic overflow check ({kind})", loc, gamma, goal);
     }
 
-    private SmtTypedTerm LowerPatternOp(SmtTypedTerm subject, IPatternOperation pattern, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerPatternOp(
+        SmtTypedTerm subject,
+        IPatternOperation pattern,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations = true,
+        int inlineDepth = 0)
     {
         var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
         switch (pattern)
         {
             case IConstantPatternOperation cp:
-                var val = LowerExpression(cp.Value, gamma, env, paramEnv);
+                var val = LowerExpression(cp.Value, gamma, env, emitObligations, inlineDepth);
                 var (l, r, _) = _translator.UnifyForComparison(subject, val);
                 return new SmtTypedTerm($"(= {l} {r})", boolType);
 
             case INegatedPatternOperation np:
-                var innerNeg = LowerPatternOp(subject, np.Pattern, gamma, env, paramEnv);
+                var innerNeg = LowerPatternOp(subject, np.Pattern, gamma, env, emitObligations, inlineDepth);
                 return new SmtTypedTerm($"(not {innerNeg.Term})", boolType);
 
             case IBinaryPatternOperation bp:
-                var left = LowerPatternOp(subject, bp.LeftPattern, gamma, env, paramEnv);
-                var right = LowerPatternOp(subject, bp.RightPattern, gamma, env, paramEnv);
+                var left = LowerPatternOp(subject, bp.LeftPattern, gamma, env, emitObligations, inlineDepth);
+                var right = LowerPatternOp(subject, bp.RightPattern, gamma, env, emitObligations, inlineDepth);
                 var op = bp.OperatorKind == BinaryOperatorKind.And ? "and" : "or";
                 return new SmtTypedTerm($"({op} {left.Term} {right.Term})", boolType);
 
             case IRelationalPatternOperation rp:
-                var rVal = LowerExpression(rp.Value, gamma, env, paramEnv);
-                return LowerBinaryOperator(rp.OperatorKind, subject, rVal, boolType, gamma, pattern.Syntax.GetLocation());
+                var rVal = LowerExpression(rp.Value, gamma, env, emitObligations, inlineDepth);
+                return LowerBinaryOperator(rp.OperatorKind, subject, rVal, boolType, gamma, pattern.Syntax.GetLocation(), emitObligations);
 
             case IDeclarationPatternOperation dp:
                 var notNull = subject.Type.SpecialType == SpecialType.System_String
@@ -962,28 +1230,95 @@ internal sealed class CfgSsaLowerer
                 }
                 return new SmtTypedTerm(notNull, boolType);
 
+            case IRecursivePatternOperation recPat:
+                return LowerRecursivePattern(subject, recPat, gamma, env, emitObligations, inlineDepth);
+
             case IDiscardPatternOperation:
                 return new SmtTypedTerm("true", boolType);
 
             default:
+                if (!emitObligations)
+                    throw new ContractLoweringException($"Unsupported pattern '{pattern.Kind}' in specification.");
                 return new SmtTypedTerm("true", boolType);
         }
     }
 
-    private SmtTypedTerm LowerPropertyReference(IPropertyReferenceOperation propRef, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerRecursivePattern(
+        SmtTypedTerm subject,
+        IRecursivePatternOperation recPat,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
+    {
+        var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
+        var clauses = new List<string>();
+        var target = subject;
+
+        if (subject.Type.SpecialType == SpecialType.System_String)
+        {
+            clauses.Add($"(not (= {subject.Term} str-null))");
+        }
+        else if (_types.TryGetNullableInfo(subject.Type, out _, out var optId, out var innerType))
+        {
+            clauses.Add($"(not (= {subject.Term} opt-none-{optId}))");
+            target = new SmtTypedTerm($"(opt-val-{optId} {subject.Term})", innerType!);
+        }
+
+        if (recPat.DeclaredSymbol is ILocalSymbol locSym)
+        {
+            env.Vars[locSym] = target;
+        }
+
+        foreach (var sub in recPat.PropertySubpatterns)
+        {
+            var memberName = sub.Member switch
+            {
+                IPropertyReferenceOperation pr => pr.Property.Name,
+                IFieldReferenceOperation fr => fr.Field.Name,
+                _ => null
+            };
+
+            if (memberName is null)
+            {
+                throw new ContractLoweringException($"Unsupported property subpattern member '{sub.Member.Kind}' in specification.");
+            }
+
+            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth);
+            var subPat = LowerPatternOp(memberTerm, sub.Pattern, gamma, env, emitObligations, inlineDepth);
+            clauses.Add(subPat.Term);
+        }
+
+        var combined = clauses.Count switch
+        {
+            0 => "true",
+            1 => clauses[0],
+            _ => $"(and {string.Join(" ", clauses)})"
+        };
+        return new SmtTypedTerm(combined, boolType);
+    }
+
+    private SmtTypedTerm LowerPropertyReference(
+        IPropertyReferenceOperation propRef,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
     {
         var prop = propRef.Property;
 
-        // Indexer access: dict[k] or list[i]
         if (prop.IsIndexer && propRef.Instance is not null && propRef.Arguments.Length == 1)
         {
-            var recv = LowerExpression(propRef.Instance, gamma, env, paramEnv);
-            var arg = LowerExpression(propRef.Arguments[0].Value, gamma, env, paramEnv);
+            var recv = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
+            var arg = LowerExpression(propRef.Arguments[0].Value, gamma, env, emitObligations, inlineDepth);
             if (_types.TryGetDictionaryInfo(recv.Type, out _, out var dictId, out var kType, out var vType))
             {
                 var kConv = _translator.ConvertTo(arg, kType!);
-                AddObligation("CollectionBounds", $"Dictionary key exists for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma,
-                    $"(select (map_has_{dictId} {recv.Term}) {kConv.Term})");
+                if (emitObligations)
+                {
+                    AddObligation("CollectionBounds", $"Dictionary key exists for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma,
+                        $"(select (map_has_{dictId} {recv.Term}) {kConv.Term})");
+                }
                 var valTerm = new SmtTypedTerm($"(select (map_data_{dictId} {recv.Term}) {kConv.Term})", vType!);
                 EmitOnDemandElementAssumptions($"(select (map_has_{dictId} {recv.Term}) {kConv.Term})", valTerm, propRef.Syntax.GetLocation());
                 return valTerm;
@@ -992,14 +1327,16 @@ internal sealed class CfgSsaLowerer
             {
                 var idxTerm = _translator.IntTermForIndex(arg);
                 var boundsCond = $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recv.Term})))";
-                AddObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma, boundsCond);
+                if (emitObligations)
+                {
+                    AddObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma, boundsCond);
+                }
                 var elemVal = new SmtTypedTerm($"(select (seq_elems_{seqId} {recv.Term}) {idxTerm})", eType!);
                 EmitOnDemandElementAssumptions(boundsCond, elemVal, propRef.Syntax.GetLocation());
                 return elemVal;
             }
         }
 
-        // Static well-known properties
         if (propRef.Instance is null)
         {
             var containing = prop.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
@@ -1018,14 +1355,21 @@ internal sealed class CfgSsaLowerer
         }
         else
         {
-            var recv = LowerExpression(propRef.Instance, gamma, env, paramEnv);
-            return _translator.TranslateMemberOnReceiver(recv, prop.Name);
+            var recv = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
+            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth);
         }
 
+        if (!emitObligations)
+            throw new ContractLoweringException($"Unsupported property reference '{prop.Name}' in specification.");
         return BindSsaValue("prop", new SmtTypedTerm(_types.GetDefaultTerm(prop.Type), prop.Type), isFreshFreeSymbol: true);
     }
 
-    private SmtTypedTerm LowerFieldReference(IFieldReferenceOperation fieldRef, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerFieldReference(
+        IFieldReferenceOperation fieldRef,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
     {
         var field = fieldRef.Field;
         if (fieldRef.Instance is null)
@@ -1054,16 +1398,36 @@ internal sealed class CfgSsaLowerer
             {
                 return new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type);
             }
+            if (!emitObligations)
+                throw new ContractLoweringException($"Unsupported static field '{field.Name}' in specification.");
             return BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
         }
 
-        var recv = LowerExpression(fieldRef.Instance, gamma, env, paramEnv);
-        return _translator.TranslateMemberOnReceiver(recv, field.Name);
+        var recv = LowerExpression(fieldRef.Instance, gamma, env, emitObligations, inlineDepth);
+        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth);
     }
 
-    private SmtTypedTerm LowerWithOperation(IWithOperation withOp, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth)
     {
-        var baseVal = LowerExpression(withOp.Operand, gamma, env, paramEnv);
+        if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
+        {
+            return direct;
+        }
+
+        var prop = receiver.Type.GetMembers(memberName).OfType<IPropertySymbol>().FirstOrDefault();
+        if (prop is not null && inlineDepth < 8 &&
+            SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, prop, out _, out var bodyOp))
+        {
+            var propEnv = new BlockEnv { ThisOverride = receiver };
+            return LowerExpression(bodyOp!, "true", propEnv, emitObligations: false, inlineDepth + 1);
+        }
+
+        throw new ContractLoweringException($"Member '{memberName}' not found or unsupported on '{receiver.Type.Name}'.");
+    }
+
+    private SmtTypedTerm LowerWithOperation(IWithOperation withOp, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
+    {
+        var baseVal = LowerExpression(withOp.Operand, gamma, env, emitObligations, inlineDepth);
         if (!_types.TryGetComposite(withOp.Type!, out var comp))
         {
             return baseVal;
@@ -1076,7 +1440,7 @@ internal sealed class CfgSsaLowerer
             {
                 if (init is ISimpleAssignmentOperation sa && sa.Target is IMemberReferenceOperation mr)
                 {
-                    var val = LowerExpression(sa.Value, gamma, env, paramEnv);
+                    var val = LowerExpression(sa.Value, gamma, env, emitObligations, inlineDepth);
                     overrides[mr.Member.Name] = _translator.ConvertTo(val, mr.Member is IPropertySymbol p ? p.Type : ((IFieldSymbol)mr.Member).Type);
                 }
             }
@@ -1104,7 +1468,7 @@ internal sealed class CfgSsaLowerer
         return BindSsaValue("with", constructed);
     }
 
-    private SmtTypedTerm LowerObjectCreation(IObjectCreationOperation objCreate, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerObjectCreation(IObjectCreationOperation objCreate, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
         var targetType = objCreate.Type!;
         if (!_types.TryGetComposite(targetType, out var comp))
@@ -1117,7 +1481,7 @@ internal sealed class CfgSsaLowerer
         {
             if (arg.Parameter is not null)
             {
-                var v = LowerExpression(arg.Value, gamma, env, paramEnv);
+                var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
                 argMap[arg.Parameter.Name] = _translator.ConvertTo(v, arg.Parameter.Type);
             }
         }
@@ -1128,7 +1492,7 @@ internal sealed class CfgSsaLowerer
             {
                 if (init is ISimpleAssignmentOperation sa && sa.Target is IMemberReferenceOperation mr)
                 {
-                    var v = LowerExpression(sa.Value, gamma, env, paramEnv);
+                    var v = LowerExpression(sa.Value, gamma, env, emitObligations, inlineDepth);
                     argMap[mr.Member.Name] = v;
                 }
             }
@@ -1146,7 +1510,7 @@ internal sealed class CfgSsaLowerer
         return BindSsaValue("new_" + SmtTypeSystem.SanitizeName(targetType.Name), constructed);
     }
 
-    private SmtTypedTerm LowerTuple(ITupleOperation tuple, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerTuple(ITupleOperation tuple, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
         var tupleType = tuple.Type!;
         if (!_types.TryGetComposite(tupleType, out var comp) || comp!.Fields.Count == 0)
@@ -1157,14 +1521,14 @@ internal sealed class CfgSsaLowerer
         var elems = new List<string>(tuple.Elements.Length);
         for (var i = 0; i < tuple.Elements.Length && i < comp.Fields.Count; i++)
         {
-            var e = LowerExpression(tuple.Elements[i], gamma, env, paramEnv);
+            var e = LowerExpression(tuple.Elements[i], gamma, env, emitObligations, inlineDepth);
             elems.Add(_translator.ConvertTo(e, comp.Fields[i].Type).Term);
         }
 
         return BindSsaValue("tup", new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", elems)})", tupleType));
     }
 
-    private SmtTypedTerm LowerCollectionExpression(ICollectionExpressionOperation colExpr, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerCollectionExpression(ICollectionExpressionOperation colExpr, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
         var t = colExpr.Type!;
         if (_types.TryGetSequenceInfo(t, out var seqSort, out var seqId, out var elemType))
@@ -1173,7 +1537,7 @@ internal sealed class CfgSsaLowerer
             var i = 0;
             foreach (var elemOp in colExpr.Elements)
             {
-                var ev = _translator.ConvertTo(LowerExpression(elemOp, gamma, env, paramEnv), elemType!);
+                var ev = _translator.ConvertTo(LowerExpression(elemOp, gamma, env, emitObligations, inlineDepth), elemType!);
                 cur = new SmtTypedTerm(
                     $"(mk-{seqSort} (store (seq_elems_{seqId} {cur.Term}) {i} {ev.Term}) {i + 1})",
                     t);
@@ -1185,47 +1549,66 @@ internal sealed class CfgSsaLowerer
         return new SmtTypedTerm(_types.GetDefaultTerm(t), t);
     }
 
-    private SmtTypedTerm LowerInvocation(IInvocationOperation inv, string gamma, BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
+    private SmtTypedTerm LowerInvocation(
+        IInvocationOperation inv,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
     {
         var method = inv.TargetMethod;
         var containing = method.ContainingType;
         var loc = inv.Syntax.GetLocation();
 
+        // 0. Spec.* intrinsics
+        if (containing?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+        {
+            if (method.Name == "Result")
+            {
+                if (env.SpecResult is null)
+                {
+                    throw new ContractLoweringException("Spec.Result<TResult>() can only be used inside Spec.Ensures(...).");
+                }
+                if (method.TypeArguments.Length == 1 &&
+                    !SymbolEqualityComparer.Default.Equals(method.TypeArguments[0], _method.ReturnType))
+                {
+                    throw new ContractLoweringException($"Spec.Result<{method.TypeArguments[0].Name}>() does not match method return type '{_method.ReturnType.Name}'.");
+                }
+                return env.SpecResult;
+            }
+
+            // Requires / Ensures / LoopInvariant / Decreases are compile-time annotations processed outside statement simulation
+            return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
+        }
+
         var argValues = new List<SmtTypedTerm>(inv.Arguments.Length);
         foreach (var arg in inv.Arguments)
         {
-            var v = LowerExpression(arg.Value, gamma, env, paramEnv);
+            var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
             argValues.Add(_translator.ConvertTo(v, arg.Parameter?.Type ?? v.Type));
         }
 
-        var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, paramEnv) : null;
+        var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
 
-        // 1. Refined<T>.From(value) and IsValid(value)
-        if (containing is not null && SmtTypeSystem.TryGetRefinedUnderlying(containing, out var underlying, out var pred))
+        // 1. Constrained [TypeAlias<T>] / [Refined<T>]: From(value) and IsValid(value)
+        if (containing is not null && SmtTypeSystem.TryGetConstrainedUnderlying(containing, out var underlying))
         {
             if (method.Name == "From" && argValues.Count == 1 && _types.TryGetComposite(containing, out var refComp))
             {
                 var arg = _translator.ConvertTo(argValues[0], underlying!);
-                CheckMethodRequires(method, recvTerm, new[] { arg }, gamma, loc);
+                if (emitObligations)
+                {
+                    CheckMethodRequires(method, recvTerm, new[] { arg }, gamma, loc);
+                }
                 return BindSsaValue("ref_" + SmtTypeSystem.SanitizeName(containing.Name),
                     new SmtTypedTerm($"({refComp!.ConstructorName} {arg.Term})", containing));
             }
-            if (method.Name == "IsValid" && argValues.Count == 1 && pred is not null)
+            if (method.Name == "IsValid" && argValues.Count == 1 && inlineDepth < 8 &&
+                SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out var isValidParam, out var isValidBody))
             {
-                var valEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal)
-                {
-                    ["Value"] = argValues[0],
-                    ["value"] = argValues[0]
-                };
-                try
-                {
-                    var normalized = pred.Replace("Length", "Value.Length"); // safe simple check if already normalized
-                    return _translator.TranslateContractString(pred, valEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                }
-                catch
-                {
-                    // Fallback to symbolic boolean
-                }
+                var valEnv = new BlockEnv();
+                if (isValidParam is not null) valEnv.Vars[isValidParam] = _translator.ConvertTo(argValues[0], underlying!);
+                return LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false, inlineDepth + 1);
             }
         }
 
@@ -1267,8 +1650,11 @@ internal sealed class CfgSsaLowerer
             {
                 var k = _translator.ConvertTo(argValues[0], kType!);
                 var v = _translator.ConvertTo(argValues[1], vType!);
-                AddObligation("CollectionBounds", $"Key not already present before ImmutableDictionary.Add", loc, gamma,
-                    $"(not (select (map_has_{dictId} {recvTerm.Term}) {k.Term}))");
+                if (emitObligations)
+                {
+                    AddObligation("CollectionBounds", "Key not already present before ImmutableDictionary.Add", loc, gamma,
+                        $"(not (select (map_has_{dictId} {recvTerm.Term}) {k.Term}))");
+                }
                 var updated = new SmtTypedTerm(
                     $"(mk-{mapSort} (store (map_data_{dictId} {recvTerm.Term}) {k.Term} {v.Term}) (store (map_has_{dictId} {recvTerm.Term}) {k.Term} true) (ite (select (map_has_{dictId} {recvTerm.Term}) {k.Term}) (map_count_{dictId} {recvTerm.Term}) (+ (map_count_{dictId} {recvTerm.Term}) 1)))",
                     recvTerm.Type);
@@ -1308,8 +1694,11 @@ internal sealed class CfgSsaLowerer
             {
                 var idxTerm = _translator.IntTermForIndex(argValues[0]);
                 var v = _translator.ConvertTo(argValues[1], seqElemType!);
-                AddObligation("CollectionBounds", "Sequence index within bounds for SetItem", loc, gamma,
-                    $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recvTerm.Term})))");
+                if (emitObligations)
+                {
+                    AddObligation("CollectionBounds", "Sequence index within bounds for SetItem", loc, gamma,
+                        $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recvTerm.Term})))");
+                }
                 var updated = new SmtTypedTerm(
                     $"(mk-{seqSort} (store (seq_elems_{seqId} {recvTerm.Term}) {idxTerm} {v.Term}) (seq_count_{seqId} {recvTerm.Term}))",
                     recvTerm.Type);
@@ -1359,7 +1748,7 @@ internal sealed class CfgSsaLowerer
         {
             if (method.Name == "Abs" && argValues.Count == 1)
             {
-                var a = argValues[0];
+                var a = _translator.UnwrapRefinedIfApplicable(argValues[0]);
                 var sort = _types.GetSort(a.Type);
                 var zero = sort == "Real" ? "0.0" : _translator.FormatIntLiteral(0, 32);
                 var lt = ContractExpressionTranslator.IsBitVecSort(sort) ? "bvslt" : "<";
@@ -1382,8 +1771,9 @@ internal sealed class CfgSsaLowerer
 
         if (containing?.SpecialType == SpecialType.System_String && method.Name == "IsNullOrEmpty" && argValues.Count == 1)
         {
+            var s = _translator.UnwrapRefinedIfApplicable(argValues[0]);
             return new SmtTypedTerm(
-                $"(or (= {argValues[0].Term} str-null) (= (str.len (str-text {argValues[0].Term})) 0))",
+                $"(or (= {s.Term} str-null) (= (str.len (str-text {s.Term})) 0))",
                 _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
@@ -1393,7 +1783,24 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
-        // 8. General [Verifiable] / [PureAxiom] modular call: check callee [Requires], assume callee [Ensures] + return invariants
+        // Inline pure single-expression helper methods when inside a specification expression
+        if (!emitObligations)
+        {
+            if (inlineDepth < 8 &&
+                SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var helperBody))
+            {
+                var helperEnv = new BlockEnv { ThisOverride = recvTerm };
+                for (var i = 0; i < method.Parameters.Length && i < argValues.Count; i++)
+                {
+                    helperEnv.Vars[method.Parameters[i]] = argValues[i];
+                }
+                return LowerExpression(helperBody!, gamma, helperEnv, emitObligations: false, inlineDepth + 1);
+            }
+
+            throw new ContractLoweringException($"Unsupported method call '{method.ContainingType?.Name}.{method.Name}' inside specification.");
+        }
+
+        // 8. General [Verifiable] / [PureAxiom] modular call: check callee Spec.Requires, assume callee Spec.Ensures + return invariants
         CheckMethodRequires(method, recvTerm, argValues, gamma, loc);
 
         if (method.ReturnsVoid)
@@ -1407,32 +1814,39 @@ internal sealed class CfgSsaLowerer
 
         EmitTypeAssumptions(retTerm, loc);
 
-        var calleeEnsures = GetAttributeStrings(method, VerifiableSymbolHelpers.EnsuresAttr);
-        if (calleeEnsures.Count > 0)
+        var calleeSpecs = ExtractMethodSpecs(_compilation, method, default);
+        foreach (var err in calleeSpecs.Errors)
         {
-            var calleeEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal) { ["result"] = retTerm };
-            if (recvTerm is not null) calleeEnv["this"] = recvTerm;
+            _errors.Add(err);
+        }
+
+        if (calleeSpecs.Ensures.Count > 0)
+        {
+            var calleeEnv = new BlockEnv
+            {
+                ThisOverride = recvTerm,
+                SpecResult = retTerm
+            };
             for (var i = 0; i < method.Parameters.Length && i < argValues.Count; i++)
             {
-                calleeEnv[method.Parameters[i].Name] = argValues[i];
+                calleeEnv.Vars[method.Parameters[i]] = argValues[i];
             }
 
-            var calleeTranslator = new ContractExpressionTranslator(
-                _compilation,
-                _types,
-                method.ContainingType,
-                method.Locations.FirstOrDefault(l => l.IsInSource)?.SourceTree);
-
-            foreach (var ens in calleeEnsures)
+            foreach (var ens in calleeSpecs.Ensures)
             {
+                if (ens.LambdaParam is not null)
+                {
+                    calleeEnv.Vars[ens.LambdaParam] = retTerm;
+                }
+
                 try
                 {
-                    var ensTerm = calleeTranslator.TranslateContractString(ens, calleeEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
+                    var ensTerm = LowerExpression(ens.BodyExpr, "true", calleeEnv, emitObligations: false);
                     _assertions.Add($"(assert {ensTerm.Term})");
                 }
                 catch (ContractLoweringException ex)
                 {
-                    _errors.Add((ens, loc, ex.Message));
+                    _errors.Add((ens.DisplayText, loc, ex.Message));
                 }
             }
         }
@@ -1447,32 +1861,30 @@ internal sealed class CfgSsaLowerer
         string gamma,
         Location callLoc)
     {
-        var reqs = GetAttributeStrings(callee, VerifiableSymbolHelpers.RequiresAttr);
-        if (reqs.Count == 0) return;
-
-        var calleeEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal);
-        if (recvTerm is not null) calleeEnv["this"] = recvTerm;
-        for (var i = 0; i < callee.Parameters.Length && i < args.Count; i++)
+        var calleeSpecs = ExtractMethodSpecs(_compilation, callee, default);
+        foreach (var err in calleeSpecs.Errors)
         {
-            calleeEnv[callee.Parameters[i].Name] = args[i];
+            _errors.Add(err);
         }
 
-        var calleeTranslator = new ContractExpressionTranslator(
-            _compilation,
-            _types,
-            callee.ContainingType,
-            callee.Locations.FirstOrDefault(l => l.IsInSource)?.SourceTree);
+        if (calleeSpecs.Requires.Count == 0) return;
 
-        foreach (var req in reqs)
+        var calleeEnv = new BlockEnv { ThisOverride = recvTerm };
+        for (var i = 0; i < callee.Parameters.Length && i < args.Count; i++)
+        {
+            calleeEnv.Vars[callee.Parameters[i]] = args[i];
+        }
+
+        foreach (var req in calleeSpecs.Requires)
         {
             try
             {
-                var reqTerm = calleeTranslator.TranslateContractString(req, calleeEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
-                AddObligation("Precondition", $"[Requires(\"{req}\")] on {callee.ContainingType?.Name}.{callee.Name}", callLoc, gamma, reqTerm.Term);
+                var reqTerm = LowerExpression(req.Condition, gamma, calleeEnv, emitObligations: false);
+                AddObligation("Precondition", $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}", callLoc, gamma, reqTerm.Term);
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((req, callLoc, ex.Message));
+                _errors.Add((req.DisplayText, callLoc, ex.Message));
             }
         }
     }
@@ -1496,7 +1908,6 @@ internal sealed class CfgSsaLowerer
             _assertions.Add($"(assert (= (= (set_count_{setId} {value.Term}) 0) (= (set_has_{setId} {value.Term}) ((as const (Array {eSort} Bool)) false))))");
         }
 
-        // Guard payload assumptions for Result<T, E> by IsSuccess
         if (value.Type is INamedTypeSymbol resNamed &&
             resNamed.OriginalDefinition.ToDisplayString() == "Verifiable.Contracts.Result<T, TError>" &&
             _types.TryGetComposite(resNamed, out var resComp))
@@ -1507,22 +1918,47 @@ internal sealed class CfgSsaLowerer
             return;
         }
 
-        foreach (var inv in SmtTypeSystem.GetInvariants(value.Type))
+        if (SmtTypeSystem.TryGetIsValidMethod(value.Type, out var isValidMethod) &&
+            SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
             try
             {
-                var tEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal) { ["this"] = value };
-                var invTerm = _translator.TranslateContractString(inv, tEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
+                var unwrapped = _translator.UnwrapRefinedIfApplicable(value);
+                var valEnv = new BlockEnv();
+                if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
+                var invTerm = LowerExpression(isValidBody!, "true", valEnv, emitObligations: false);
                 _assertions.Add($"(assert {invTerm.Term})");
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((inv, loc, ex.Message));
+                _errors.Add(($"{value.Type.Name}.IsValid", loc, ex.Message));
+            }
+            return;
+        }
+
+        foreach (var invMember in SmtTypeSystem.GetInvariantMembers(value.Type))
+        {
+            if (!SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, invMember, out _, out var invBody))
+            {
+                _errors.Add(($"{value.Type.Name}.{invMember.Name}", loc,
+                    $"[Invariant] member '{invMember.Name}' must be a single-expression method or property."));
+                continue;
+            }
+
+            try
+            {
+                var invEnv = new BlockEnv { ThisOverride = value };
+                var invTerm = LowerExpression(invBody!, "true", invEnv, emitObligations: false);
+                _assertions.Add($"(assert {invTerm.Term})");
+            }
+            catch (ContractLoweringException ex)
+            {
+                _errors.Add(($"{value.Type.Name}.{invMember.Name}", loc, ex.Message));
             }
         }
 
         if (_types.TryGetComposite(value.Type, out var comp) &&
-            !SmtTypeSystem.TryGetRefinedUnderlying(value.Type, out _, out _))
+            !SmtTypeSystem.TryGetConstrainedUnderlying(value.Type, out _))
         {
             foreach (var f in comp!.Fields)
             {
@@ -1536,22 +1972,47 @@ internal sealed class CfgSsaLowerer
         var key = guardCond + "|" + element.Term;
         if (!_emittedOnDemandKeys.Add(key)) return;
 
-        foreach (var inv in SmtTypeSystem.GetInvariants(element.Type))
+        if (SmtTypeSystem.TryGetIsValidMethod(element.Type, out var isValidMethod) &&
+            SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
             try
             {
-                var tEnv = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal) { ["this"] = element };
-                var invTerm = _translator.TranslateContractString(inv, tEnv, _compilation.GetSpecialType(SpecialType.System_Boolean));
+                var unwrapped = _translator.UnwrapRefinedIfApplicable(element);
+                var valEnv = new BlockEnv();
+                if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
+                var invTerm = LowerExpression(isValidBody!, "true", valEnv, emitObligations: false);
                 _assertions.Add($"(assert (=> {guardCond} {invTerm.Term}))");
             }
             catch (ContractLoweringException ex)
             {
-                _errors.Add((inv, loc, ex.Message));
+                _errors.Add(($"{element.Type.Name}.IsValid", loc, ex.Message));
+            }
+            return;
+        }
+
+        foreach (var invMember in SmtTypeSystem.GetInvariantMembers(element.Type))
+        {
+            if (!SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, invMember, out _, out var invBody))
+            {
+                _errors.Add(($"{element.Type.Name}.{invMember.Name}", loc,
+                    $"[Invariant] member '{invMember.Name}' must be a single-expression method or property."));
+                continue;
+            }
+
+            try
+            {
+                var invEnv = new BlockEnv { ThisOverride = element };
+                var invTerm = LowerExpression(invBody!, "true", invEnv, emitObligations: false);
+                _assertions.Add($"(assert (=> {guardCond} {invTerm.Term}))");
+            }
+            catch (ContractLoweringException ex)
+            {
+                _errors.Add(($"{element.Type.Name}.{invMember.Name}", loc, ex.Message));
             }
         }
 
         if (_types.TryGetComposite(element.Type, out var comp) &&
-            !SmtTypeSystem.TryGetRefinedUnderlying(element.Type, out _, out _))
+            !SmtTypeSystem.TryGetConstrainedUnderlying(element.Type, out _))
         {
             foreach (var f in comp!.Fields)
             {
@@ -1571,7 +2032,11 @@ internal sealed class CfgSsaLowerer
             ? "true"
             : "(or " + string.Join(" ", edges.Select(e => e.ReachCond)) + ")";
 
-        var mergedEnv = new BlockEnv();
+        var mergedEnv = new BlockEnv
+        {
+            ThisOverride = edges[0].Env.ThisOverride,
+            SpecResult = edges[0].Env.SpecResult
+        };
         foreach (var e in edges)
         {
             foreach (var kv in e.Env.CaptureAliases) mergedEnv.CaptureAliases[kv.Key] = kv.Value;
@@ -1674,7 +2139,6 @@ internal sealed class CfgSsaLowerer
                     }
                     var updated = BindSsaValue("upd_" + SmtTypeSystem.SanitizeName(mr.Member.Name),
                         new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", fieldTerms)})", recv.Type));
-                    // Member assignment on a FlowCaptureReference is a 'with' clone; do not mutate the captured source variable.
                     AssignTarget(mr.Instance, updated, env, updateCaptureAlias: false);
                 }
                 break;
@@ -1728,20 +2192,6 @@ internal sealed class CfgSsaLowerer
         _obligations.Add(new ProofObligation(kind, description, location, gamma, goalTerm, preamble, _trackedParams.ToList()));
     }
 
-    private static Dictionary<string, SmtTypedTerm> BuildTranslatorEnv(BlockEnv env, IReadOnlyDictionary<string, SmtTypedTerm> paramEnv)
-    {
-        var dict = new Dictionary<string, SmtTypedTerm>(StringComparer.Ordinal);
-        foreach (var kv in paramEnv)
-        {
-            dict[kv.Key] = kv.Value;
-        }
-        foreach (var kv in env.Vars)
-        {
-            dict[kv.Key.Name] = kv.Value;
-        }
-        return dict;
-    }
-
     private static string CombineAnd(string a, string b)
     {
         if (a == "true") return b;
@@ -1760,21 +2210,6 @@ internal sealed class CfgSsaLowerer
         }
         return method.ContainingAssembly is not null &&
                VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr);
-    }
-
-    private static IReadOnlyList<string> GetAttributeStrings(ISymbol symbol, string attrName)
-    {
-        var list = new List<string>();
-        foreach (var attr in symbol.GetAttributes())
-        {
-            if (attr.AttributeClass?.ToDisplayString() == attrName &&
-                attr.ConstructorArguments.Length == 1 &&
-                attr.ConstructorArguments[0].Value is string s)
-            {
-                list.Add(s);
-            }
-        }
-        return list;
     }
 
     private static HashSet<(BasicBlock Src, BasicBlock Dst)> FindBackEdges(ControlFlowGraph cfg)
@@ -1814,7 +2249,6 @@ internal sealed class CfgSsaLowerer
             if (body.Add(t)) stack.Push(t);
         }
 
-        // Build reverse edges
         var preds = new Dictionary<BasicBlock, List<BasicBlock>>();
         foreach (var b in cfg.Blocks) preds[b] = new List<BasicBlock>();
         foreach (var b in cfg.Blocks)

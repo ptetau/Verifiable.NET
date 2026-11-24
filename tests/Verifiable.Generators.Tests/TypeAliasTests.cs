@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
@@ -10,23 +9,33 @@ using Microsoft.CodeAnalysis.CSharp;
 using Verifiable.Contracts;
 using Xunit;
 
-[assembly: TypeAlias<int>("AliasOrderId", "Value >= 1", Namespace = "Verifiable.Generators.Tests")]
-[assembly: TypeAlias<int>("AliasNonNegCount", "Value >= 0", Namespace = "Verifiable.Generators.Tests")]
-[assembly: TypeAlias<decimal>("AliasPositiveMoney", "Value > 0m && Value <= 1000000m", Namespace = "Verifiable.Generators.Tests")]
-[assembly: TypeAlias<string>("AliasLabel", "Length is >= 1 and <= 40", Namespace = "Verifiable.Generators.Tests")]
-
 namespace Verifiable.Generators.Tests;
 
+[TypeAlias<int>]
+public readonly partial record struct AliasOrderId { public static bool IsValid(int v) => v >= 1; }
+
+[TypeAlias<int>]
+public readonly partial record struct AliasNonNegCount { public static bool IsValid(int v) => v >= 0; }
+
+[TypeAlias<decimal>]
+public readonly partial record struct AliasPositiveMoney { public static bool IsValid(decimal v) => v > 0m && v <= 1000000m; }
+
+[TypeAlias<string>]
+public readonly partial record struct AliasLabel { public static bool IsValid(string v) => v is { Length: >= 1 and <= 40 }; }
+
 [Verifiable]
-[Invariant("Items.Count == Count")]
 public readonly record struct AliasLedger(
     AliasNonNegCount Count,
-    ImmutableDictionary<AliasOrderId, AliasPositiveMoney> Items);
+    ImmutableDictionary<AliasOrderId, AliasPositiveMoney> Items)
+{
+    [Invariant]
+    public bool CountMatchesItems() => Items.Count == Count;
+}
 
+[Verifiable]
 public static class AliasPortEngine
 {
-    [Verifiable, InboundPort]
-    [Requires("amount > 0m")]
+    [InboundPort]
     public static AliasLedger RecordOrder(
         AliasLedger ledger,
         AliasOrderId orderId,
@@ -34,6 +43,7 @@ public static class AliasPortEngine
         AliasPositiveMoney amount,
         AliasOrderId? relatedOrderId)
     {
+        Spec.Requires(amount > 0m);
         _ = label.Length;
         _ = relatedOrderId;
         if (ledger.Items.ContainsKey(orderId))
@@ -51,112 +61,6 @@ public static class AliasPortEngine
 
 public class TypeAliasTests
 {
-    private static (Compilation OutputCompilation, ImmutableArray<Diagnostic> GeneratorDiagnostics, IReadOnlyDictionary<string, string> Sources)
-        RunGenerators(string source)
-    {
-        var syntaxTree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview));
-        var refs = AppDomain.CurrentDomain.GetAssemblies()
-            .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
-            .Select(a => MetadataReference.CreateFromFile(a.Location))
-            .ToList<MetadataReference>();
-
-        refs.Add(MetadataReference.CreateFromFile(typeof(VerifiableAttribute).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(ImmutableDictionary).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(JsonSerializer).Assembly.Location));
-
-        var compilation = CSharpCompilation.Create(
-            "TypeAliasTestAssembly",
-            [syntaxTree],
-            refs,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
-
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new TypeAliasGenerator().AsSourceGenerator(), new RefinedTypeGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
-            parseOptions: new CSharpParseOptions(LanguageVersion.Preview));
-
-        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out var diagnostics);
-        var result = driver.GetRunResult();
-        var sources = result.Results
-            .SelectMany(r => r.GeneratedSources)
-            .ToDictionary(s => s.HintName, s => s.SourceText.ToString(), StringComparer.Ordinal);
-
-        return (outputCompilation, diagnostics, sources);
-    }
-
-    [Fact]
-    public void AssemblyAndTypeLevelTypeAliases_GenerateFullSurfaceAndCompileWithInboundPort()
-    {
-        const string code = """
-            using System.Collections.Immutable;
-            using Verifiable.Contracts;
-
-            [assembly: TypeAlias<int>("PositiveId", "Value >= 1", Namespace = "AliasDomain")]
-            [assembly: TypeAlias<string>("TitleText", "Length is >= 1 and <= 80", Namespace = "AliasDomain")]
-
-            namespace AliasDomain
-            {
-                [TypeAlias<decimal>("Money", "Value >= 0m")]
-                public static class DomainAliases;
-
-                [Verifiable]
-                [Invariant("Balance >= 0m")]
-                public readonly record struct Wallet(PositiveId Id, TitleText Name, Money Balance, PositiveId? ParentId);
-
-                [Verifiable]
-                public static class WalletOps
-                {
-                    [InboundPort]
-                    public static Wallet Rename(Wallet wallet, TitleText newName, Money deposit, PositiveId? parentId)
-                    {
-                        decimal total = wallet.Balance + deposit;
-                        int nameLen = newName.Length;
-                        _ = nameLen;
-                        return wallet with { Name = newName, Balance = Money.From(total), ParentId = parentId };
-                    }
-                }
-            }
-            """;
-
-        var (output, genDiags, sources) = RunGenerators(code);
-
-        Assert.Empty(genDiags);
-        var errors = output.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
-        Assert.Empty(errors);
-
-        Assert.True(sources.TryGetValue("AliasDomain.PositiveId.TypeAlias.g.cs", out var idSrc));
-        Assert.Contains("[global::Verifiable.Contracts.Refined<int>(\"Value >= 1\")]", idSrc);
-        Assert.Contains("implicit operator int(PositiveId alias) => alias.Value;", idSrc);
-        Assert.Contains("operator <(PositiveId left, PositiveId right)", idSrc);
-
-        Assert.True(sources.ContainsKey("AliasDomain.TitleText.TypeAlias.g.cs"));
-        Assert.True(sources.ContainsKey("AliasDomain.Money.TypeAlias.g.cs"));
-        Assert.True(sources.ContainsKey("AliasDomain.Wallet.Gate.g.cs"));
-        Assert.True(sources.ContainsKey("AliasDomain.WalletOpsPort.InboundPort.g.cs"));
-    }
-
-    [Fact]
-    public void InvalidAliasNameAndDuplicateAlias_ReportVER203AndVER204WithFix()
-    {
-        const string badNameCode = """
-            using Verifiable.Contracts;
-            [assembly: TypeAlias<int>("123Bad", "Value >= 0", Namespace = "Ns")]
-            """;
-
-        var (_, badDiags, _) = RunGenerators(badNameCode);
-        var d203 = Assert.Single(badDiags, d => d.Id == "VER203");
-        Assert.Contains("Fix:", d203.GetMessage());
-
-        const string dupCode = """
-            using Verifiable.Contracts;
-            [assembly: TypeAlias<int>("ItemId", "Value >= 1", Namespace = "Ns")]
-            [assembly: TypeAlias<int>("ItemId", "Value >= 2", Namespace = "Ns")]
-            """;
-
-        var (_, dupDiags, _) = RunGenerators(dupCode);
-        var d204 = Assert.Single(dupDiags, d => d.Id == "VER204");
-        Assert.Contains("Fix:", d204.GetMessage());
-    }
-
     [Fact]
     public void CompiledTypeAliases_SupportImplicitWideningOrderingFormattingAndJsonDictionaryKeys()
     {
@@ -184,6 +88,15 @@ public class TypeAliasTests
         var roundTrip = JsonSerializer.Deserialize<AliasLedger>(json);
         Assert.Equal(1, (int)roundTrip.Count);
         Assert.Equal(42.5m, (decimal)roundTrip.Items[a]);
+    }
+
+    [Fact]
+    public void InvariantMethodAndSpecRequires_GenerateCheckedPortAndGate()
+    {
+        var raw = new RawAliasLedger { Count = 2, Items = new Dictionary<int, decimal>() };
+        var mismatch = AliasPortEnginePort.RecordOrder(raw, 1, "OK", 10m, null);
+        Assert.False(mismatch.IsValid);
+        Assert.Contains(mismatch.Violations, v => v.Predicate == "CountMatchesItems");
     }
 
     [Property]

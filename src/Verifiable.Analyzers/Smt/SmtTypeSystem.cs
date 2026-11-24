@@ -73,7 +73,6 @@ internal sealed class SmtTypeSystem
         if (type.ToDisplayString() == "System.Guid")
             return Cache(type, "Int");
 
-        // Nullable<T>
         if (type is INamedTypeSymbol nullableNamed &&
             nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
             nullableNamed.TypeArguments.Length == 1)
@@ -88,7 +87,6 @@ internal sealed class SmtTypeSystem
             return optSort;
         }
 
-        // Immutable collections
         if (type is INamedTypeSymbol colNamed && colNamed.IsGenericType)
         {
             var orig = colNamed.OriginalDefinition.ToDisplayString();
@@ -131,12 +129,10 @@ internal sealed class SmtTypeSystem
             }
         }
 
-        // Composite records / structs / tuples / refined structs
         if (type is INamedTypeSymbol composite)
         {
             if (_inProgress.Contains(composite))
             {
-                // Fallback for unexpected recursive types
                 return Cache(type, "Int");
             }
 
@@ -310,53 +306,189 @@ internal sealed class SmtTypeSystem
         return "0";
     }
 
-    public static bool TryGetRefinedUnderlying(ITypeSymbol type, out ITypeSymbol? underlying, out string? predicate)
+    public static bool TryGetConstrainedUnderlying(ITypeSymbol type, out ITypeSymbol? underlying)
     {
         if (type is INamedTypeSymbol named)
         {
             foreach (var attr in named.GetAttributes())
             {
-                if (attr.AttributeClass is { IsGenericType: true } ac &&
-                    ac.ConstructedFrom.ToDisplayString() == "Verifiable.Contracts.RefinedAttribute<TUnderlying>" &&
-                    ac.TypeArguments.Length == 1)
+                if (attr.AttributeClass is { IsGenericType: true, TypeArguments.Length: 1 } ac)
                 {
-                    underlying = ac.TypeArguments[0];
-                    predicate = attr.ConstructorArguments.Length == 1 && attr.ConstructorArguments[0].Value is string s
-                        ? s
-                        : null;
-                    return true;
+                    var defName = ac.ConstructedFrom.ToDisplayString();
+                    if (defName is "Verifiable.Contracts.TypeAliasAttribute<TUnderlying>" or "Verifiable.Contracts.RefinedAttribute<TUnderlying>")
+                    {
+                        underlying = ac.TypeArguments[0];
+                        return true;
+                    }
                 }
             }
         }
 
         underlying = null;
-        predicate = null;
         return false;
     }
 
-    public static IReadOnlyList<string> GetInvariants(ITypeSymbol type)
+    public static bool TryGetIsValidMethod(ITypeSymbol type, out IMethodSymbol? method)
     {
-        var list = new List<string>();
+        if (TryGetConstrainedUnderlying(type, out var underlying) && type is INamedTypeSymbol named)
+        {
+            foreach (var m in named.GetMembers("IsValid").OfType<IMethodSymbol>())
+            {
+                if (m.IsStatic &&
+                    m.ReturnType.SpecialType == SpecialType.System_Boolean &&
+                    m.Parameters.Length == 1 &&
+                    SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, underlying))
+                {
+                    method = m;
+                    return true;
+                }
+            }
+        }
+
+        method = null;
+        return false;
+    }
+
+    public static IReadOnlyList<ISymbol> GetInvariantMembers(ITypeSymbol type)
+    {
+        var list = new List<ISymbol>();
         if (type is not INamedTypeSymbol named)
         {
             return list;
         }
 
+        var stack = new Stack<INamedTypeSymbol>();
         for (var cur = named; cur is not null && cur.SpecialType != SpecialType.System_Object && cur.SpecialType != SpecialType.System_ValueType; cur = cur.BaseType)
         {
-            foreach (var attr in cur.GetAttributes())
+            stack.Push(cur);
+        }
+
+        while (stack.Count > 0)
+        {
+            var cur = stack.Pop();
+            foreach (var m in cur.GetMembers().OfType<IMethodSymbol>())
             {
-                if (attr.AttributeClass?.ToDisplayString() == VerifiableSymbolHelpers.InvariantAttr &&
-                    attr.ConstructorArguments.Length == 1 &&
-                    attr.ConstructorArguments[0].Value is string expr &&
-                    !string.IsNullOrWhiteSpace(expr))
+                if (!m.IsStatic &&
+                    m.MethodKind == MethodKind.Ordinary &&
+                    m.Parameters.Length == 0 &&
+                    m.ReturnType.SpecialType == SpecialType.System_Boolean &&
+                    VerifiableSymbolHelpers.HasAttribute(m, VerifiableSymbolHelpers.InvariantAttr))
                 {
-                    list.Add(expr);
+                    list.Add(m);
+                }
+            }
+
+            foreach (var p in cur.GetMembers().OfType<IPropertySymbol>())
+            {
+                if (!p.IsStatic &&
+                    !p.IsIndexer &&
+                    p.Type.SpecialType == SpecialType.System_Boolean &&
+                    VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.InvariantAttr))
+                {
+                    list.Add(p);
                 }
             }
         }
 
         return list;
+    }
+
+    public static bool HasAnyInvariants(ITypeSymbol type, HashSet<ITypeSymbol>? visited = null)
+    {
+        visited ??= new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        if (!visited.Add(type))
+        {
+            return false;
+        }
+
+        if (TryGetConstrainedUnderlying(type, out _))
+        {
+            return true;
+        }
+
+        if (GetInvariantMembers(type).Count > 0)
+        {
+            return true;
+        }
+
+        if (type is INamedTypeSymbol named && !named.IsGenericType)
+        {
+            foreach (var prop in named.GetMembers().OfType<IPropertySymbol>())
+            {
+                if (!prop.IsStatic && !prop.IsIndexer && prop.Name != "EqualityContract" &&
+                    HasAnyInvariants(prop.Type, visited))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public static bool TryExtractSingleReturnOperation(
+        Compilation compilation,
+        ISymbol member,
+        out IParameterSymbol? parameterSymbol,
+        out IOperation? returnOp)
+    {
+        parameterSymbol = member is IMethodSymbol ms && ms.Parameters.Length == 1 ? ms.Parameters[0] : null;
+
+        foreach (var synRef in member.DeclaringSyntaxReferences)
+        {
+            var syn = synRef.GetSyntax();
+            if (!compilation.SyntaxTrees.Contains(syn.SyntaxTree))
+            {
+                continue;
+            }
+
+            var model = compilation.GetSemanticModel(syn.SyntaxTree);
+            if (syn is MethodDeclarationSyntax md)
+            {
+                if (md.ExpressionBody?.Expression is { } arrowExpr)
+                {
+                    returnOp = model.GetOperation(arrowExpr);
+                    if (returnOp is not null) return true;
+                }
+
+                if (md.Body is { Statements.Count: 1 } body &&
+                    body.Statements[0] is ReturnStatementSyntax ret &&
+                    ret.Expression is { } retExpr)
+                {
+                    returnOp = model.GetOperation(retExpr);
+                    if (returnOp is not null) return true;
+                }
+            }
+            else if (syn is PropertyDeclarationSyntax pd)
+            {
+                if (pd.ExpressionBody?.Expression is { } propArrow)
+                {
+                    returnOp = model.GetOperation(propArrow);
+                    if (returnOp is not null) return true;
+                }
+
+                if (pd.AccessorList is not null)
+                {
+                    var getter = pd.AccessorList.Accessors.FirstOrDefault(a => a.Keyword.Text == "get");
+                    if (getter?.ExpressionBody?.Expression is { } gArrow)
+                    {
+                        returnOp = model.GetOperation(gArrow);
+                        if (returnOp is not null) return true;
+                    }
+
+                    if (getter?.Body is { Statements.Count: 1 } gBody &&
+                        gBody.Statements[0] is ReturnStatementSyntax gRet &&
+                        gRet.Expression is { } gExpr)
+                    {
+                        returnOp = model.GetOperation(gExpr);
+                        if (returnOp is not null) return true;
+                    }
+                }
+            }
+        }
+
+        returnOp = null;
+        return false;
     }
 
     private List<SmtFieldInfo> ExtractStoredFields(INamedTypeSymbol symbol, string dtSort)
@@ -373,7 +505,7 @@ internal sealed class SmtTypeSystem
             return fields;
         }
 
-        if (TryGetRefinedUnderlying(symbol, out var underlying, out _))
+        if (TryGetConstrainedUnderlying(symbol, out var underlying))
         {
             fields.Add(new SmtFieldInfo("Value", underlying!, $"f_{dtSort}_Value"));
             return fields;
@@ -402,7 +534,8 @@ internal sealed class SmtTypeSystem
             .Where(p => !p.IsStatic &&
                         !p.IsIndexer &&
                         p.Name != "EqualityContract" &&
-                        !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.GhostAttr))
+                        !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.GhostAttr) &&
+                        !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.InvariantAttr))
             .ToList();
 
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -470,34 +603,6 @@ internal sealed class SmtTypeSystem
             }
         }
 
-        return false;
-    }
-
-    public static bool TryGetComputedPropertyExpression(IPropertySymbol prop, out ExpressionSyntax? expr)
-    {
-        foreach (var synRef in prop.DeclaringSyntaxReferences)
-        {
-            if (synRef.GetSyntax() is PropertyDeclarationSyntax pd)
-            {
-                if (pd.ExpressionBody is not null)
-                {
-                    expr = pd.ExpressionBody.Expression;
-                    return true;
-                }
-
-                if (pd.AccessorList is not null)
-                {
-                    var getter = pd.AccessorList.Accessors.FirstOrDefault(a => a.Keyword.Text == "get");
-                    if (getter?.ExpressionBody is not null)
-                    {
-                        expr = getter.ExpressionBody.Expression;
-                        return true;
-                    }
-                }
-            }
-        }
-
-        expr = null;
         return false;
     }
 

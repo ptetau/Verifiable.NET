@@ -11,34 +11,35 @@ namespace Verifiable.Analyzers.Tests;
 public class GatekeeperTests
 {
     [Fact]
-    public async Task CleanVerifiableCage_WithRefinedAndImmutableTypes_ProducesZeroDiagnostics()
+    public async Task CleanVerifiableCage_WithTypeAliasAndImmutableTypes_ProducesZeroDiagnostics()
     {
         const string source = """
             using System.Collections.Immutable;
             using Verifiable.Contracts;
 
+            [assembly: Verifiable]
+
             namespace CleanDomain;
 
-            [Refined<int>("Value >= 1")]
-            public readonly partial record struct ItemId;
+            [TypeAlias<int>]
+            public readonly partial record struct ItemId
+            {
+                public static bool IsValid(int value) => value >= 1;
+            }
 
-            [Verifiable]
             public readonly record struct Item(ItemId Id, string Title);
 
-            [Verifiable]
             public readonly record struct Board(ItemId NextId, ImmutableDictionary<ItemId, Item> Items);
 
             public static class Engine
             {
-                [Verifiable]
                 public static Board Add(Board board, string title)
                 {
                     var item = new Item(board.NextId, title);
-                    var next = ItemId.From(board.NextId.Value + 1);
+                    var next = ItemId.From(board.NextId + 1);
                     return board with { NextId = next, Items = board.Items.Add(board.NextId, item) };
                 }
 
-                [Verifiable]
                 public static int BoundedSum(int n)
                 {
                     var acc = 0;
@@ -63,8 +64,8 @@ public class GatekeeperTests
     [InlineData("VER001", "ref parameter", "public static class C { [{ATTR}] public static void F(ref int x) { x = 1; } }")]
     [InlineData("VER002", "List<int>", "using System.Collections.Generic; public static class C { [{ATTR}] public static int F(List<int> xs) => xs.Count; }")]
     [InlineData("VER002", "array creation", "public static class C { [{ATTR}] public static int[] F() => new int[3]; }")]
-    [InlineData("VER003", "default(Refined)", "[Refined<int>(\"Value >= 1\")] public readonly partial record struct Id; public static class C { [{ATTR}] public static Id F() => default(Id); }")]
-    [InlineData("VER003", "new Invariant()", "[Invariant(\"X >= 0\")] public readonly record struct Pos(int X); public static class C { [{ATTR}] public static Pos F() => new Pos(); }")]
+    [InlineData("VER003", "default(TypeAlias)", "[TypeAlias<int>] public readonly partial record struct Id { public static bool IsValid(int v) => v >= 1; } public static class C { [{ATTR}] public static Id F() => default(Id); }")]
+    [InlineData("VER003", "new Invariant()", "public readonly record struct Pos(int X) { [Invariant] public bool NonNeg() => X >= 0; } public static class C { [{ATTR}] public static Pos F() => new Pos(); }")]
     [InlineData("VER004", "DateTime.UtcNow", "using System; public static class C { [{ATTR}] public static DateTime F() => DateTime.UtcNow; }")]
     [InlineData("VER004", "Guid.NewGuid()", "using System; public static class C { [{ATTR}] public static Guid F() => Guid.NewGuid(); }")]
     [InlineData("VER004", "mutable static field", "[{ATTR}] public static class C { public static int Counter = 0; }")]
@@ -137,9 +138,14 @@ public class GatekeeperTests
             using Verifiable.Contracts;
 
             [assembly: Verifiable]
-            [assembly: TypeAlias<int>("PositiveId", "Value >= 1", Namespace = "Scoped")]
 
             namespace Scoped;
+
+            [TypeAlias<int>]
+            public readonly partial record struct PositiveId
+            {
+                public static bool IsValid(int v) => v >= 1;
+            }
 
             public static class Boundary
             {
@@ -160,10 +166,7 @@ public class GatekeeperTests
         var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
         Assert.DoesNotContain(diags, d => d.Id == "AD0001");
 
-        // Boundary.NextGuid opted out via [Unverifiable] -> no VER004 inside Boundary.NextGuid
-        Assert.DoesNotContain(diags, d => d.Id == "VER004" && d.Location.GetLineSpan().StartLinePosition.Line < 13);
-
-        // CascadedEngine inherits [assembly: Verifiable] without per-method [Verifiable]
+        Assert.DoesNotContain(diags, d => d.Id == "VER004" && d.Location.GetLineSpan().StartLinePosition.Line < 18);
         Assert.Contains(diags, d => d.Id == "VER004" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
         Assert.Contains(diags, d => d.Id == "VER006" && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
     }

@@ -21,54 +21,11 @@ public sealed class UnverifiableAttribute : Attribute;
 public sealed class VerifiableCandidateAttribute : Attribute;
 
 /// <summary>
-/// Declares a type invariant predicate verified by the SMT prover and checked at inbound ports.
+/// Marks a parameterless <see langword="bool"/> instance method or property as a type invariant
+/// proved by Z3 and evaluated at <see cref="InboundPortAttribute"/> gates.
 /// </summary>
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = true)]
-public sealed class InvariantAttribute(string expression) : Attribute
-{
-    /// <summary>Gets the C# boolean invariant expression.</summary>
-    public string Expression { get; } = expression;
-}
-
-/// <summary>
-/// Declares a method precondition predicate that callers must satisfy under their path condition.
-/// </summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
-public sealed class RequiresAttribute(string expression) : Attribute
-{
-    /// <summary>Gets the C# boolean precondition expression.</summary>
-    public string Expression { get; } = expression;
-}
-
-/// <summary>
-/// Declares a method postcondition predicate referencing <c>result</c> and method parameters.
-/// </summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
-public sealed class EnsuresAttribute(string expression) : Attribute
-{
-    /// <summary>Gets the C# boolean postcondition expression.</summary>
-    public string Expression { get; } = expression;
-}
-
-/// <summary>
-/// Declares a loop invariant predicate used to verify inductive loops inside verifiable methods.
-/// </summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
-public sealed class LoopInvariantAttribute(string expression) : Attribute
-{
-    /// <summary>Gets the C# boolean loop invariant expression.</summary>
-    public string Expression { get; } = expression;
-}
-
-/// <summary>
-/// Declares a non-negative integer ranking expression that strictly decreases on every loop iteration.
-/// </summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
-public sealed class DecreasesAttribute(string expression) : Attribute
-{
-    /// <summary>Gets the decreasing integer expression.</summary>
-    public string Expression { get; } = expression;
-}
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
+public sealed class InvariantAttribute : Attribute;
 
 /// <summary>
 /// Marks a value type as a linear obligation token that must be passed to a <see cref="ConsumesObligationAttribute"/> sink on every control-flow path.
@@ -89,7 +46,7 @@ public sealed class ConsumesObligationAttribute : Attribute;
 public sealed class InboundPortAttribute : Attribute;
 
 /// <summary>
-/// Marks a proof-only specification property or field used in contracts and invariants.
+/// Marks a proof-only specification property or field excluded from generated raw I/O DTOs.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
 public sealed class GhostAttribute : Attribute;
@@ -107,31 +64,15 @@ public sealed class PureAxiomAttribute : Attribute;
 public sealed class CheckedArithmeticAttribute : Attribute;
 
 /// <summary>
-/// Marks a <c>readonly partial record struct</c> for refinement type expansion by <c>Verifiable.Generators</c>.
+/// Marks a <c>readonly partial record struct</c> declaring <c>public static bool IsValid(TUnderlying value)</c>
+/// for constrained type alias generation by <c>Verifiable.Generators</c>.
 /// </summary>
 [AttributeUsage(AttributeTargets.Struct)]
-public sealed class RefinedAttribute<TUnderlying>(string predicate) : Attribute
-{
-    /// <summary>Gets the refinement predicate referencing <c>Value</c>.</summary>
-    public string Predicate { get; } = predicate;
-}
+public sealed class TypeAliasAttribute<TUnderlying> : Attribute;
 
 /// <summary>
-/// Generates a zero-allocation constrained type alias backed by <typeparamref name="TUnderlying"/> with compile-time invariants,
-/// implicit widening to <typeparamref name="TUnderlying"/>, JSON serialization, and checked/unchecked constructors.
+/// Marks a <c>readonly partial record struct</c> declaring <c>public static bool IsValid(TUnderlying value)</c>
+/// for refinement type expansion by <c>Verifiable.Generators</c>.
 /// </summary>
-[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = true)]
-public sealed class TypeAliasAttribute<TUnderlying>(string name, string predicate) : Attribute
-{
-    /// <summary>Gets the generated type name.</summary>
-    public string Name { get; } = name;
-
-    /// <summary>Gets the refinement predicate referencing <c>Value</c>.</summary>
-    public string Predicate { get; } = predicate;
-
-    /// <summary>Gets or sets the target namespace when applied at the assembly level (defaults to the declaring namespace when applied on a type).</summary>
-    public string? Namespace { get; set; }
-
-    /// <summary>Gets or sets whether the generated alias type is <c>internal</c> instead of <c>public</c>.</summary>
-    public bool IsInternal { get; set; }
-}
+[AttributeUsage(AttributeTargets.Struct)]
+public sealed class RefinedAttribute<TUnderlying> : Attribute;

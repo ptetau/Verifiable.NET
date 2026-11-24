@@ -33,17 +33,19 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class OccurrenceExample
             {
-                [Verifiable]
-                [Requires("x > 5 && x <= 100")]
-                [Ensures("result >= 12")]
-                public static int DoubleBounded(int x) => x * 2;
+                public static int DoubleBounded(int x)
+                {
+                    Spec.Requires(x > 5 && x <= 100);
+                    Spec.Ensures<int>(result => result >= 12);
+                    return x * 2;
+                }
 
-                [Verifiable]
-                [Ensures("result >= 0")]
                 public static int Caller(int requested)
                 {
+                    Spec.Ensures<int>(result => result >= 0);
                     if (requested > 5 && requested <= 100)
                     {
                         return DoubleBounded(requested);
@@ -66,12 +68,15 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class BrokenMath
             {
-                [Verifiable]
-                [Requires("x >= 0")]
-                [Ensures("result >= 10")]
-                public static int AddFive(int x) => x + 5;
+                public static int AddFive(int x)
+                {
+                    Spec.Requires(x >= 0);
+                    Spec.Ensures<int>(result => result >= 10);
+                    return x + 5;
+                }
             }
             """;
 
@@ -90,16 +95,21 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class LedgerCheck
             {
-                [Verifiable]
-                [Ensures("result == 0.3m")]
-                public static decimal ExactDecimalSum() => 0.1m + 0.2m;
+                public static decimal ExactDecimalSum()
+                {
+                    Spec.Ensures<decimal>(result => result == 0.3m);
+                    return 0.1m + 0.2m;
+                }
 
-                [Verifiable]
-                [Requires("fromBal >= amount && amount > 0m")]
-                [Ensures("result >= 0m")]
-                public static decimal Withdraw(decimal fromBal, decimal amount) => fromBal - amount;
+                public static decimal Withdraw(decimal fromBal, decimal amount)
+                {
+                    Spec.Requires(fromBal >= amount && amount > 0m);
+                    Spec.Ensures<decimal>(result => result >= 0m);
+                    return fromBal - amount;
+                }
             }
             """;
 
@@ -111,12 +121,15 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class BrokenLedger
             {
-                [Verifiable]
-                [Requires("amount > 0m")]
-                [Ensures("result >= 0m")]
-                public static decimal UnguardedWithdraw(decimal fromBal, decimal amount) => fromBal - amount;
+                public static decimal UnguardedWithdraw(decimal fromBal, decimal amount)
+                {
+                    Spec.Requires(amount > 0m);
+                    Spec.Ensures<decimal>(result => result >= 0m);
+                    return fromBal - amount;
+                }
             }
             """;
 
@@ -125,25 +138,32 @@ public class SmtProverTests
     }
 
     [Fact]
-    public async Task StringLengthAndRefinedString_AreVerifiedByZ3()
+    public async Task StringLengthAndTypeAliasString_AreVerifiedByZ3()
     {
         const string source = """
             using Verifiable.Contracts;
 
             namespace SmtSamples;
 
-            [Refined<string>("Length is >= 1 and <= 200")]
-            public readonly partial record struct TitleText;
+            [TypeAlias<string>]
+            public readonly partial record struct TitleText
+            {
+                public static bool IsValid(string value) => value is { Length: >= 1 and <= 200 };
+            }
 
+            [Verifiable]
             public static class Strings
             {
-                [Verifiable]
-                [Ensures("result >= 1 && result <= 200")]
-                public static int GetLength(TitleText title) => title.Value.Length;
+                public static int GetLength(TitleText title)
+                {
+                    Spec.Ensures<int>(result => result >= 1 && result <= 200);
+                    return title.Length;
+                }
             }
             """;
 
         var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableSmtAnalyzer());
+        Assert.DoesNotContain(diags, d => d.Id == "AD0001");
         Assert.DoesNotContain(diags, d => d.Id.StartsWith("VER1"));
     }
 
@@ -155,15 +175,17 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable, CheckedArithmetic]
             public static class CheckedOps
             {
-                [Verifiable, CheckedArithmetic]
                 public static int UnboundedAdd(int a, int b) => a + b;
 
-                [Verifiable, CheckedArithmetic]
-                [Requires("a >= 0 && a <= 1000 && b >= 0 && b <= 1000")]
-                [Ensures("result >= 0 && result <= 2000")]
-                public static int BoundedAdd(int a, int b) => a + b;
+                public static int BoundedAdd(int a, int b)
+                {
+                    Spec.Requires(a >= 0 && a <= 1000 && b >= 0 && b <= 1000);
+                    Spec.Ensures<int>(result => result >= 0 && result <= 2000);
+                    return a + b;
+                }
             }
             """;
 
@@ -182,33 +204,42 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
-            [Refined<int>("Value >= 1")]
-            public readonly partial record struct ItemId;
+            [TypeAlias<int>]
+            public readonly partial record struct ItemId
+            {
+                public static bool IsValid(int v) => v >= 1;
+            }
 
             [Verifiable]
             public readonly record struct Item(ItemId Id, int Weight);
 
             [Verifiable]
-            [Invariant("NextId.Value >= 1")]
-            [Invariant("ActiveCount >= 0")]
-            [Invariant("Items.Count == ActiveCount")]
-            [Invariant("Items.Count == NextId.Value - 1")]
             public readonly record struct Board(
                 ItemId NextId,
                 ImmutableDictionary<ItemId, Item> Items,
-                int ActiveCount);
+                int ActiveCount)
+            {
+                [Invariant]
+                public bool IsConsistent() =>
+                    NextId >= 1
+                    && ActiveCount >= 0
+                    && Items.Count == ActiveCount
+                    && Items.Count == NextId - 1;
+            }
 
+            [Verifiable]
             public static class Engine
             {
-                [Verifiable]
-                [Requires("weight >= 1 && !board.Items.ContainsKey(board.NextId)")]
-                [Ensures("result.NextId.Value == board.NextId.Value + 1")]
-                [Ensures("result.ActiveCount == board.ActiveCount + 1")]
-                [Ensures("result.Items.Count == board.Items.Count + 1")]
                 public static Board AddItem(Board board, int weight)
                 {
+                    Spec.Requires(weight >= 1 && !board.Items.ContainsKey(board.NextId));
+                    Spec.Ensures<Board>(result =>
+                        result.NextId == board.NextId + 1
+                        && result.ActiveCount == board.ActiveCount + 1
+                        && result.Items.Count == board.Items.Count + 1);
+
                     var item = new Item(board.NextId, weight);
-                    var nextId = ItemId.From(board.NextId.Value + 1);
+                    var nextId = ItemId.From(board.NextId + 1);
                     return board with
                     {
                         NextId = nextId,
@@ -225,35 +256,46 @@ public class SmtProverTests
     }
 
     [Fact]
-    public async Task LoopInvariantAndDecreases_PassWhenInductiveAndFailWhenBroken()
+    public async Task LoopInvariantAndDecreases_PassWhenInductiveAndSupportMultipleLoops()
     {
-        const string validLoop = """
+        const string validLoops = """
             using Verifiable.Contracts;
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class Loops
             {
-                [Verifiable]
-                [Requires("n >= 0")]
-                [LoopInvariant("i >= 0 && i <= n && acc >= 0")]
-                [Decreases("n - i")]
-                [Ensures("result >= 0")]
-                public static int SumUp(int n)
+                public static int SumUpTwice(int n)
                 {
+                    Spec.Requires(n >= 0);
+                    Spec.Ensures<int>(result => result >= 0);
+
                     int i = 0;
                     int acc = 0;
                     while (i < n)
                     {
+                        Spec.LoopInvariant(i >= 0 && i <= n && acc >= 0);
+                        Spec.Decreases(n - i);
                         acc = acc + i;
                         i = i + 1;
+                    }
+
+                    int j = 0;
+                    while (j < n)
+                    {
+                        Spec.LoopInvariant(j >= 0 && j <= n && acc >= 0);
+                        Spec.Decreases(n - j);
+                        acc = acc + j;
+                        j = j + 1;
                     }
                     return acc;
                 }
             }
             """;
 
-        var validDiags = await AnalyzerTestHarness.AnalyzeAsync(validLoop, new VerifiableSmtAnalyzer());
+        var validDiags = await AnalyzerTestHarness.AnalyzeAsync(validLoops, new VerifiableSmtAnalyzer());
+        Assert.DoesNotContain(validDiags, d => d.Id == "AD0001");
         Assert.DoesNotContain(validDiags, d => d.Id.StartsWith("VER1"));
 
         const string invalidLoop = """
@@ -261,17 +303,17 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class BadLoops
             {
-                [Verifiable]
-                [Requires("n >= 0")]
-                [LoopInvariant("i >= 0 && i <= n")]
-                [Decreases("n - i")]
                 public static int NonDecreasing(int n)
                 {
+                    Spec.Requires(n >= 0);
                     int i = 0;
                     while (i < n)
                     {
+                        Spec.LoopInvariant(i >= 0 && i <= n);
+                        Spec.Decreases(n - i);
                         i = i + 0;
                     }
                     return i;
@@ -284,19 +326,21 @@ public class SmtProverTests
     }
 
     [Fact]
-    public async Task InvalidContractSyntax_EmitsVER101WithFix()
+    public async Task InvalidSpecUsage_EmitsVER101WithFix()
     {
         const string source = """
             using Verifiable.Contracts;
 
             namespace SmtSamples;
 
-            public static class SyntaxErr
+            [Verifiable]
+            public static class SpecErr
             {
-                [Verifiable]
-                [Requires("x >=")]
-                [Ensures("result >= 0")]
-                public static int F(int x) => x;
+                public static int WrongReturnType(int x)
+                {
+                    Spec.Ensures<long>(result => result >= 0);
+                    return x;
+                }
             }
             """;
 
@@ -313,12 +357,15 @@ public class SmtProverTests
 
             namespace SmtSamples;
 
+            [Verifiable]
             public static class AgentFailSample
             {
-                [Verifiable]
-                [Requires("a >= 1")]
-                [Ensures("result > 10")]
-                public static int Inc(int a) => a + 1;
+                public static int Inc(int a)
+                {
+                    Spec.Requires(a >= 1);
+                    Spec.Ensures<int>(result => result > 10);
+                    return a + 1;
+                }
             }
             """;
 
@@ -373,12 +420,15 @@ public class SmtProverTests
             var source = $$"""
                 using Verifiable.Contracts;
                 namespace SoundnessProbe;
+                [Verifiable]
                 public static class Probe
                 {
-                    [Verifiable]
-                    [Requires("x >= {{p.minBound}} && x <= {{p.maxBound}}")]
-                    [Ensures("result >= {{p.target}}")]
-                    public static int Compute(int x) => x + ({{p.offset}});
+                    public static int Compute(int x)
+                    {
+                        Spec.Requires(x >= {{p.minBound}} && x <= {{p.maxBound}});
+                        Spec.Ensures<int>(result => result >= {{p.target}});
+                        return x + ({{p.offset}});
+                    }
                 }
                 """;
 
@@ -414,7 +464,6 @@ public class SmtProverTests
                 return false;
             }
 
-            // Counterexample MUST satisfy precondition and violate postcondition!
             return ceX >= p.minBound && ceX <= p.maxBound && (ceX + p.offset) < p.target;
         });
 
@@ -424,22 +473,30 @@ public class SmtProverTests
         const string validSource = """
             using Verifiable.Contracts;
 
-            [assembly: TypeAlias<int>("PositiveCount", "Value >= 1", Namespace = "AliasProofs")]
-            [assembly: TypeAlias<int>("NonNegCount", "Value >= 0", Namespace = "AliasProofs")]
-            [assembly: TypeAlias<decimal>("PositiveMoney", "Value > 0m", Namespace = "AliasProofs")]
-
             namespace AliasProofs;
 
+            [TypeAlias<int>]
+            public readonly partial record struct PositiveCount { public static bool IsValid(int v) => v >= 1; }
+
+            [TypeAlias<int>]
+            public readonly partial record struct NonNegCount { public static bool IsValid(int v) => v >= 0; }
+
+            [TypeAlias<decimal>]
+            public readonly partial record struct PositiveMoney { public static bool IsValid(decimal v) => v > 0m; }
+
             [Verifiable]
-            [Invariant("Total >= 0m")]
-            public readonly record struct Account(PositiveCount Version, NonNegCount TxCount, decimal Total);
+            public readonly record struct Account(PositiveCount Version, NonNegCount TxCount, decimal Total)
+            {
+                [Invariant]
+                public bool IsSolvent => Total >= 0m;
+            }
 
             [Verifiable]
             public static class AliasEngine
             {
-                [Ensures("result.Version == acc.Version + 1 && result.Total > acc.Total")]
                 public static Account Credit(Account acc, PositiveMoney deposit)
                 {
+                    Spec.Ensures<Account>(result => result.Version == acc.Version + 1 && result.Total > acc.Total);
                     var nextVer = PositiveCount.From(acc.Version + 1);
                     var nextTx = NonNegCount.From(acc.TxCount + 1);
                     return acc with { Version = nextVer, TxCount = nextTx, Total = acc.Total + deposit };
@@ -463,9 +520,10 @@ public class SmtProverTests
         const string invalidSource = """
             using Verifiable.Contracts;
 
-            [assembly: TypeAlias<int>("NonNegCount", "Value >= 0", Namespace = "BrokenAliasProofs")]
-
             namespace BrokenAliasProofs;
+
+            [TypeAlias<int>]
+            public readonly partial record struct NonNegCount { public static bool IsValid(int v) => v >= 0; }
 
             [Verifiable]
             public static class BrokenAliasEngine

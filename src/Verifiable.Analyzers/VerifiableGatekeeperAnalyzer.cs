@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -232,15 +233,12 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
         if (scope == VerificationScope.None) return;
 
         var isCandidate = scope == VerificationScope.Candidate;
-        var hasLoopAnnotation =
-            VerifiableSymbolHelpers.HasAttribute(owning, VerifiableSymbolHelpers.LoopInvariantAttr) ||
-            VerifiableSymbolHelpers.HasAttribute(owning, VerifiableSymbolHelpers.DecreasesAttr);
 
         foreach (var block in context.OperationBlocks)
         {
             foreach (var op in block.DescendantsAndSelf())
             {
-                AnalyzeOperation(context, op, isCandidate, hasLoopAnnotation);
+                AnalyzeOperation(context, op, isCandidate);
             }
         }
     }
@@ -248,8 +246,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
     private static void AnalyzeOperation(
         OperationBlockAnalysisContext context,
         IOperation op,
-        bool isCandidate,
-        bool hasLoopAnnotation)
+        bool isCandidate)
     {
         switch (op)
         {
@@ -481,7 +478,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 break;
 
             case IWhileLoopOperation whileOp:
-                if (!hasLoopAnnotation && whileOp.Syntax is WhileStatementSyntax or DoStatementSyntax)
+                if (!LoopHasSpecAnnotation(whileOp.Body) && whileOp.Syntax is WhileStatementSyntax or DoStatementSyntax)
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.DisallowedControlFlow,
@@ -493,7 +490,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 break;
 
             case IForEachLoopOperation foreachOp:
-                if (!hasLoopAnnotation)
+                if (!LoopHasSpecAnnotation(foreachOp.Body))
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.DisallowedControlFlow,
@@ -504,6 +501,31 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 break;
         }
+    }
+
+    private static bool LoopHasSpecAnnotation(IOperation body)
+    {
+        var stack = new Stack<IOperation>();
+        stack.Push(body);
+        while (stack.Count > 0)
+        {
+            var cur = stack.Pop();
+            if (cur is IInvocationOperation inv &&
+                (VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "LoopInvariant") ||
+                 VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Decreases")))
+            {
+                return true;
+            }
+
+            foreach (var child in cur.ChildOperations)
+            {
+                if (child is not ILoopOperation)
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+        return false;
     }
 
     private static bool IsInsideObjectOrWithInitializer(IOperation assign)

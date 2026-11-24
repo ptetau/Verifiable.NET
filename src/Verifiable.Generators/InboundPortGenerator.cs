@@ -30,24 +30,12 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         IReadOnlyList<DomainMember> ConstructorMembers,
         IReadOnlyList<DomainMember> InitMembers,
         ISet<string> AllInstanceMemberNames,
-        IReadOnlyList<string> Invariants,
+        IReadOnlyList<(string Name, bool IsMethod)> InvariantMembers,
         IReadOnlyList<string> UsingDirectives);
 
     /// <inheritdoc />
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var assemblyAliases = context.CompilationProvider.Select(static (comp, _) =>
-            TypeRefHelper.ExtractTypeAliases(
-                comp.Assembly.GetAttributes(),
-                defaultNamespace: string.Empty,
-                fallbackLocation: Location.None));
-
-        var typeAliases = context.SyntaxProvider.ForAttributeWithMetadataName(
-            TypeRefHelper.TypeAliasAttributeMetadataName,
-            predicate: static (node, _) => node is TypeDeclarationSyntax,
-            transform: static (ctx, _) => ExtractTypeAliases(ctx))
-            .Collect();
-
         var portMethods = context.SyntaxProvider.ForAttributeWithMetadataName(
             TypeRefHelper.InboundPortAttributeMetadataName,
             predicate: static (node, _) => node is MethodDeclarationSyntax,
@@ -55,43 +43,15 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             .Where(static m => m is not null)
             .Collect();
 
-        var allAliases = assemblyAliases.Combine(typeAliases);
-        var combined = portMethods.Combine(allAliases);
-
-        context.RegisterSourceOutput(combined, static (spc, pair) =>
+        context.RegisterSourceOutput(portMethods, static (spc, methods) =>
         {
-            var methods = pair.Left;
             if (methods.IsDefaultOrEmpty)
             {
                 return;
             }
 
-            var specs = new List<TypeAliasSpec>(pair.Right.Left);
-            foreach (var list in pair.Right.Right)
-            {
-                if (list is not null)
-                {
-                    specs.AddRange(list);
-                }
-            }
-
-            var lookup = new TypeAliasLookup(specs);
-            EmitAll(spc, methods!, lookup);
+            EmitAll(spc, methods!);
         });
-    }
-
-    private static List<TypeAliasSpec>? ExtractTypeAliases(GeneratorAttributeSyntaxContext context)
-    {
-        if (context.TargetSymbol is not INamedTypeSymbol symbol)
-        {
-            return null;
-        }
-
-        return TypeRefHelper.ExtractTypeAliases(
-            context.Attributes,
-            TypeRefHelper.GetNamespace(symbol),
-            context.TargetNode.GetLocation(),
-            TypeRefHelper.CollectUsings(context.TargetNode.SyntaxTree));
     }
 
     private static PortMethodTarget? TransformMethod(GeneratorAttributeSyntaxContext context)
@@ -105,61 +65,55 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         return new PortMethodTarget(method, usings);
     }
 
-    private static void EmitAll(
-        SourceProductionContext spc,
-        ImmutableArray<PortMethodTarget> targets,
-        TypeAliasLookup aliases)
+    private static void EmitAll(SourceProductionContext spc, ImmutableArray<PortMethodTarget> targets)
     {
         var discoveredTypes = new Dictionary<INamedTypeSymbol, IReadOnlyList<string>>(SymbolEqualityComparer.Default);
-        var queue = new Queue<(ITypeSymbol Type, string ContextNs, IReadOnlyList<string> Usings)>();
+        var queue = new Queue<(ITypeSymbol Type, IReadOnlyList<string> Usings)>();
 
         foreach (var t in targets)
         {
-            var ns = TypeRefHelper.GetNamespace(t.Method.ContainingType);
             foreach (var p in t.Method.Parameters)
             {
-                queue.Enqueue((p.Type, ns, t.UsingDirectives));
+                queue.Enqueue((p.Type, t.UsingDirectives));
             }
         }
 
         while (queue.Count > 0)
         {
-            var (type, ns, usings) = queue.Dequeue();
-            DiscoverCompositeTypes(type, ns, usings, aliases, discoveredTypes, queue);
+            var (type, usings) = queue.Dequeue();
+            DiscoverCompositeTypes(type, usings, discoveredTypes, queue);
         }
 
         foreach (var kv in discoveredTypes)
         {
             var shape = BuildDomainShape(kv.Key, kv.Value);
-            EmitGateFile(spc, shape, aliases);
+            EmitGateFile(spc, shape);
         }
 
         foreach (var group in targets.GroupBy(t => t.Method.ContainingType, SymbolEqualityComparer.Default))
         {
             if (group.Key is INamedTypeSymbol declaringType)
             {
-                EmitPortClassFile(spc, declaringType, group.ToList(), aliases);
+                EmitPortClassFile(spc, declaringType, group.ToList());
             }
         }
     }
 
     private static void DiscoverCompositeTypes(
         ITypeSymbol type,
-        string contextNamespace,
         IReadOnlyList<string> usings,
-        TypeAliasLookup aliases,
         Dictionary<INamedTypeSymbol, IReadOnlyList<string>> discovered,
-        Queue<(ITypeSymbol Type, string ContextNs, IReadOnlyList<string> Usings)> queue)
+        Queue<(ITypeSymbol Type, IReadOnlyList<string> Usings)> queue)
     {
         if (type is INamedTypeSymbol nullableNamed &&
             nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
             nullableNamed.TypeArguments.Length == 1)
         {
-            queue.Enqueue((nullableNamed.TypeArguments[0], contextNamespace, usings));
+            queue.Enqueue((nullableNamed.TypeArguments[0], usings));
             return;
         }
 
-        if (TryResolveRefinedOrAlias(type, contextNamespace, usings, aliases, out _, out _, out _))
+        if (TypeRefHelper.TryGetConstrainedUnderlyingType(type, out _))
         {
             return;
         }
@@ -171,12 +125,12 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
 
         if (TypeRefHelper.IsImmutableCollection(type, out _, out var elemOrKey, out var valType))
         {
-            if (elemOrKey is not null) queue.Enqueue((elemOrKey, contextNamespace, usings));
-            if (valType is not null) queue.Enqueue((valType, contextNamespace, usings));
+            if (elemOrKey is not null) queue.Enqueue((elemOrKey, usings));
+            if (valType is not null) queue.Enqueue((valType, usings));
             return;
         }
 
-        if (type is INamedTypeSymbol named && type.TypeKind != TypeKind.Error && !discovered.ContainsKey(named))
+        if (type is INamedTypeSymbol named && !discovered.ContainsKey(named))
         {
             var mergedUsings = usings.ToList();
             foreach (var loc in named.Locations)
@@ -188,42 +142,12 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             }
             discovered[named] = mergedUsings.Distinct(StringComparer.Ordinal).ToList();
 
-            var namedNs = TypeRefHelper.GetNamespace(named);
             var shape = BuildDomainShape(named, discovered[named]);
             foreach (var m in shape.ConstructorMembers.Concat(shape.InitMembers))
             {
-                queue.Enqueue((m.Type, namedNs, discovered[named]));
+                queue.Enqueue((m.Type, discovered[named]));
             }
         }
-    }
-
-    private static bool TryResolveRefinedOrAlias(
-        ITypeSymbol type,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases,
-        out ITypeSymbol? underlyingType,
-        out string? targetGlobalName,
-        out bool isNullableAlias)
-    {
-        if (TypeRefHelper.TryGetRefinedUnderlyingType(type, out underlyingType, out _))
-        {
-            targetGlobalName = TypeRefHelper.ToGlobalTypeName(type);
-            isNullableAlias = false;
-            return true;
-        }
-
-        if (aliases.TryResolve(type, contextNamespace, usings, out var spec, out isNullableAlias))
-        {
-            underlyingType = spec!.UnderlyingType;
-            targetGlobalName = spec.GlobalTypeName;
-            return true;
-        }
-
-        underlyingType = null;
-        targetGlobalName = null;
-        isNullableAlias = false;
-        return false;
     }
 
     private static DomainShape BuildDomainShape(INamedTypeSymbol symbol, IReadOnlyList<string> usings)
@@ -242,9 +166,12 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             props.Select(p => p.Name).Concat(fields.Select(f => f.Name)),
             StringComparer.Ordinal);
 
-        var nonGhostProps = props.Where(p => !TypeRefHelper.HasGhostAttribute(p)).ToList();
+        var inputProps = props
+            .Where(p => !TypeRefHelper.HasGhostAttribute(p) && !TypeRefHelper.HasInvariantAttribute(p))
+            .ToList();
+
         var propByName = new Dictionary<string, IPropertySymbol>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in nonGhostProps)
+        foreach (var p in inputProps)
         {
             propByName[p.Name] = p;
         }
@@ -271,7 +198,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         }
 
         var initMembers = new List<DomainMember>();
-        foreach (var p in nonGhostProps)
+        foreach (var p in inputProps)
         {
             if (matchedPropNames.Contains(p.Name))
             {
@@ -284,14 +211,14 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             }
         }
 
-        var invariants = TypeRefHelper.GetInvariants(symbol);
+        var invariants = TypeRefHelper.GetInvariantMembers(symbol);
         return new DomainShape(symbol, ctorMembers, initMembers, allMemberNames, invariants, usings);
     }
 
     private static bool IsCopyConstructor(INamedTypeSymbol type, IMethodSymbol ctor) =>
         ctor.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(ctor.Parameters[0].Type, type);
 
-    private static void EmitGateFile(SourceProductionContext spc, DomainShape shape, TypeAliasLookup aliases)
+    private static void EmitGateFile(SourceProductionContext spc, DomainShape shape)
     {
         var ns = TypeRefHelper.GetNamespace(shape.Symbol);
         var rawName = GetRawTypeShortName(shape.Symbol);
@@ -329,7 +256,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         sb.Append(indent).AppendLine("{");
         foreach (var m in allInputMembers)
         {
-            var rawType = GetRawPropertyTypeName(m.Type, forCollectionItem: false, ns, shape.UsingDirectives, aliases);
+            var rawType = GetRawPropertyTypeName(m.Type, forCollectionItem: false);
             var defaultInit = GetRawDefaultInitializer(m.Type);
             sb.Append(indent).Append("    public ").Append(rawType).Append(' ').Append(m.Name)
                 .Append(" { get; set; }").Append(defaultInit).AppendLine();
@@ -368,10 +295,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                 m.Type,
                 $"__ver_prefix + {TypeRefHelper.EscapeStringLiteral(m.Name)}",
                 varName,
-                ref counter,
-                ns,
-                shape.UsingDirectives,
-                aliases);
+                ref counter);
         }
 
         var initAssignments = new List<(string PropName, string VarName)>();
@@ -386,10 +310,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                 m.Type,
                 $"__ver_prefix + {TypeRefHelper.EscapeStringLiteral(m.Name)}",
                 varName,
-                ref counter,
-                ns,
-                shape.UsingDirectives,
-                aliases);
+                ref counter);
         }
 
         sb.AppendLine();
@@ -410,20 +331,17 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         }
         sb.AppendLine(";");
 
-        foreach (var inv in shape.Invariants)
+        foreach (var (invName, isMethod) in shape.InvariantMembers)
         {
-            if (PredicateHelper.TryValidateExpression(inv, out var parsedInv, out _))
-            {
-                var qualified = PredicateHelper.QualifyMembers(parsedInv!, "candidate", shape.AllInstanceMemberNames);
-                var invPath = $"string.IsNullOrEmpty(path) ? {TypeRefHelper.EscapeStringLiteral(shape.Symbol.Name)} : path";
-                var invLit = TypeRefHelper.EscapeStringLiteral(inv);
-                var invMsg = TypeRefHelper.EscapeStringLiteral($"Invariant '{inv}' failed on {shape.Symbol.Name}.");
-                sb.Append(b).Append("    if (!(").Append(qualified).AppendLine("))");
-                sb.Append(b).AppendLine("    {");
-                sb.Append(b).Append("        __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(")
-                    .Append(invPath).Append(", ").Append(invLit).Append(", ").Append(invMsg).AppendLine("));");
-                sb.Append(b).AppendLine("    }");
-            }
+            var checkExpr = isMethod ? $"candidate.{invName}()" : $"candidate.{invName}";
+            var invPath = $"string.IsNullOrEmpty(path) ? {TypeRefHelper.EscapeStringLiteral(shape.Symbol.Name)} : path";
+            var invLit = TypeRefHelper.EscapeStringLiteral(invName);
+            var invMsg = TypeRefHelper.EscapeStringLiteral($"Invariant '{invName}' failed on {shape.Symbol.Name}.");
+            sb.Append(b).Append("    if (!").Append(checkExpr).AppendLine(")");
+            sb.Append(b).AppendLine("    {");
+            sb.Append(b).Append("        __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(")
+                .Append(invPath).Append(", ").Append(invLit).Append(", ").Append(invMsg).AppendLine("));");
+            sb.Append(b).AppendLine("    }");
         }
 
         sb.AppendLine();
@@ -451,15 +369,15 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
     private static void EmitPortClassFile(
         SourceProductionContext spc,
         INamedTypeSymbol declaringType,
-        IReadOnlyList<PortMethodTarget> methods,
-        TypeAliasLookup aliases)
+        IReadOnlyList<PortMethodTarget> methods)
     {
         var ns = TypeRefHelper.GetNamespace(declaringType);
         var portClassName = declaringType.Name + "Port";
         var declaringGlobal = TypeRefHelper.ToGlobalTypeName(declaringType);
-        var mergedUsings = methods.SelectMany(m => m.UsingDirectives).Distinct(StringComparer.Ordinal).ToList();
 
-        var usings = new HashSet<string>(mergedUsings, StringComparer.Ordinal)
+        var usings = new HashSet<string>(
+            methods.SelectMany(m => m.UsingDirectives),
+            StringComparer.Ordinal)
         {
             "System",
             "System.Collections.Generic",
@@ -493,7 +411,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         for (var idx = 0; idx < methods.Count; idx++)
         {
             if (idx > 0) sb.AppendLine();
-            EmitPortMethod(sb, mIndent, declaringGlobal, ns, mergedUsings, aliases, methods[idx].Method);
+            EmitPortMethod(sb, mIndent, declaringGlobal, methods[idx].Method);
         }
 
         sb.Append(indent).AppendLine("}");
@@ -512,12 +430,9 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         StringBuilder sb,
         string indent,
         string declaringGlobal,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases,
         IMethodSymbol method)
     {
-        var returnGlobal = TypeRefHelper.FormatGlobalTypeName(method.ReturnType, contextNamespace, usings, aliases);
+        var returnGlobal = TypeRefHelper.ToGlobalTypeName(method.ReturnType);
         var sigParams = new List<string>();
 
         if (!method.IsStatic)
@@ -527,7 +442,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
 
         foreach (var p in method.Parameters)
         {
-            var rawType = GetRawPropertyTypeName(p.Type, forCollectionItem: false, contextNamespace, usings, aliases);
+            var rawType = GetRawPropertyTypeName(p.Type, forCollectionItem: false);
             sigParams.Add($"{rawType} __ver_raw_{p.Name}");
         }
 
@@ -548,10 +463,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                 p.Type,
                 TypeRefHelper.EscapeStringLiteral(p.Name),
                 p.Name,
-                ref counter,
-                contextNamespace,
-                usings,
-                aliases);
+                ref counter);
         }
 
         sb.AppendLine();
@@ -561,8 +473,8 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             .AppendLine(">.Fail(global::System.Collections.Immutable.ImmutableArray.CreateRange(__ver_violations));");
         sb.Append(b).AppendLine("}");
 
-        var requires = TypeRefHelper.GetRequires(method);
-        if (requires.Count > 0)
+        var requiresExprs = TypeRefHelper.GetLeadingSpecRequiresExpressions(method);
+        if (requiresExprs.Count > 0)
         {
             var instanceMemberNames = new HashSet<string>(
                 method.ContainingType.GetMembers()
@@ -570,21 +482,19 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                     .Select(m => m.Name),
                 StringComparer.Ordinal);
 
-            foreach (var req in requires)
+            foreach (var reqExpr in requiresExprs)
             {
-                if (PredicateHelper.TryValidateExpression(req, out var parsedReq, out _))
-                {
-                    var evalExpr = method.IsStatic
-                        ? req
-                        : PredicateHelper.QualifyMembers(parsedReq!, "__ver_instance", instanceMemberNames);
-                    var reqLit = TypeRefHelper.EscapeStringLiteral(req);
-                    var msgLit = TypeRefHelper.EscapeStringLiteral($"Precondition '{req}' failed.");
-                    sb.Append(b).Append("if (!(").Append(evalExpr).AppendLine("))");
-                    sb.Append(b).AppendLine("{");
-                    sb.Append(b).Append("    __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(\"requires\", ")
-                        .Append(reqLit).Append(", ").Append(msgLit).AppendLine("));");
-                    sb.Append(b).AppendLine("}");
-                }
+                var reqText = reqExpr.ToString();
+                var evalExpr = method.IsStatic
+                    ? reqText
+                    : PredicateHelper.QualifyMembers(reqExpr, "__ver_instance", instanceMemberNames);
+                var reqLit = TypeRefHelper.EscapeStringLiteral(reqText);
+                var msgLit = TypeRefHelper.EscapeStringLiteral($"Precondition '{reqText}' failed.");
+                sb.Append(b).Append("if (!(").Append(evalExpr).AppendLine("))");
+                sb.Append(b).AppendLine("{");
+                sb.Append(b).Append("    __ver_violations.Add(new global::Verifiable.Contracts.ContractViolation(\"requires\", ")
+                    .Append(reqLit).Append(", ").Append(msgLit).AppendLine("));");
+                sb.Append(b).AppendLine("}");
             }
 
             sb.Append(b).AppendLine("if (__ver_violations.Count > 0)");
@@ -610,13 +520,10 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         ITypeSymbol targetType,
         string fieldPathExpr,
         string targetVarName,
-        ref int counter,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases)
+        ref int counter)
     {
         var id = counter++;
-        var targetGlobal = TypeRefHelper.FormatGlobalTypeName(targetType, contextNamespace, usings, aliases);
+        var targetGlobal = TypeRefHelper.ToGlobalTypeName(targetType);
 
         if (targetType is INamedTypeSymbol nullableNamed &&
             nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
@@ -627,42 +534,22 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             sb.Append(indent).Append(targetGlobal).Append(' ').Append(targetVarName).AppendLine(" = null;");
             sb.Append(indent).Append("if (").Append(rawExpr).AppendLine(" is not null)");
             sb.Append(indent).AppendLine("{");
-            var innerRawExpr = IsNullableValueTypeInRaw(innerType, contextNamespace, usings, aliases) ? $"{rawExpr}.Value" : rawExpr;
-            EmitMarshalExpression(sb, indent + "    ", innerRawExpr, innerType, fieldPathExpr, innerVar, ref counter, contextNamespace, usings, aliases);
+            var innerRawExpr = IsNullableValueTypeInRaw(innerType) ? $"{rawExpr}.Value" : rawExpr;
+            EmitMarshalExpression(sb, indent + "    ", innerRawExpr, innerType, fieldPathExpr, innerVar, ref counter);
             sb.Append(indent).Append("    ").Append(targetVarName).Append(" = ").Append(innerVar).AppendLine(";");
             sb.Append(indent).AppendLine("}");
             return;
         }
 
-        if (TryResolveRefinedOrAlias(targetType, contextNamespace, usings, aliases, out var underlying, out var aliasGlobalName, out var isNullableAlias))
+        if (TypeRefHelper.TryGetConstrainedUnderlyingType(targetType, out _))
         {
-            if (isNullableAlias)
-            {
-                var innerVar = $"__ver_opt_{id}";
-                var resVar = $"__ver_res_{id}";
-                var nullableTargetGlobal = aliasGlobalName + "?";
-                var innerRawExpr = underlying!.IsValueType ? $"{rawExpr}.Value" : rawExpr;
-                sb.Append(indent).Append(nullableTargetGlobal).Append(' ').Append(targetVarName).AppendLine(" = null;");
-                sb.Append(indent).Append("if (").Append(rawExpr).AppendLine(" is not null)");
-                sb.Append(indent).AppendLine("{");
-                sb.Append(indent).Append("    var ").Append(resVar).Append(" = ").Append(aliasGlobalName)
-                    .Append(".TryMarshal(").Append(innerRawExpr).Append("!, ").Append(fieldPathExpr).AppendLine(");");
-                sb.Append(indent).Append("    if (!").Append(resVar).Append(".IsValid) __ver_violations.AddRange(")
-                    .Append(resVar).AppendLine(".Violations);");
-                sb.Append(indent).Append("    ").Append(aliasGlobalName).Append(' ').Append(innerVar)
-                    .Append(" = ").Append(resVar).AppendLine(".Value;");
-                sb.Append(indent).Append("    ").Append(targetVarName).Append(" = ").Append(innerVar).AppendLine(";");
-                sb.Append(indent).AppendLine("}");
-                return;
-            }
-
-            var resVarNonNull = $"__ver_res_{id}";
-            sb.Append(indent).Append("var ").Append(resVarNonNull).Append(" = ").Append(aliasGlobalName)
+            var resVar = $"__ver_res_{id}";
+            sb.Append(indent).Append("var ").Append(resVar).Append(" = ").Append(targetGlobal)
                 .Append(".TryMarshal(").Append(rawExpr).Append("!, ").Append(fieldPathExpr).AppendLine(");");
-            sb.Append(indent).Append("if (!").Append(resVarNonNull).Append(".IsValid) __ver_violations.AddRange(")
-                .Append(resVarNonNull).AppendLine(".Violations);");
-            sb.Append(indent).Append(aliasGlobalName).Append(' ').Append(targetVarName)
-                .Append(" = ").Append(resVarNonNull).AppendLine(".Value;");
+            sb.Append(indent).Append("if (!").Append(resVar).Append(".IsValid) __ver_violations.AddRange(")
+                .Append(resVar).AppendLine(".Violations);");
+            sb.Append(indent).Append(targetGlobal).Append(' ').Append(targetVarName)
+                .Append(" = ").Append(resVar).AppendLine(".Value;");
             return;
         }
 
@@ -670,8 +557,8 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         {
             if (kind == "ImmutableDictionary")
             {
-                var kGlobal = TypeRefHelper.FormatGlobalTypeName(elemOrKey!, contextNamespace, usings, aliases);
-                var vGlobal = TypeRefHelper.FormatGlobalTypeName(valType!, contextNamespace, usings, aliases);
+                var kGlobal = TypeRefHelper.ToGlobalTypeName(elemOrKey!);
+                var vGlobal = TypeRefHelper.ToGlobalTypeName(valType!);
                 var builderVar = $"__ver_dict_{id}";
                 var kvVar = $"__ver_kv_{id}";
                 var keyVar = $"__ver_k_{id}";
@@ -689,8 +576,8 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                 var dictPathVar = $"__ver_dp_{id}";
                 sb.Append(indent).Append("        var ").Append(dictPathVar).Append(" = ").Append(fieldPathExpr)
                     .Append(" + $\"[{").Append(kvVar).AppendLine(".Key}]\";");
-                EmitMarshalExpression(sb, indent + "        ", $"{kvVar}.Key", elemOrKey!, dictPathVar, keyVar, ref counter, contextNamespace, usings, aliases);
-                EmitMarshalExpression(sb, indent + "        ", $"{kvVar}.Value", valType!, dictPathVar, valVar, ref counter, contextNamespace, usings, aliases);
+                EmitMarshalExpression(sb, indent + "        ", $"{kvVar}.Key", elemOrKey!, dictPathVar, keyVar, ref counter);
+                EmitMarshalExpression(sb, indent + "        ", $"{kvVar}.Value", valType!, dictPathVar, valVar, ref counter);
                 sb.Append(indent).Append("        if (__ver_violations.Count == ").Append(beforeCount).Append(") ")
                     .Append(builderVar).Append('[').Append(keyVar).Append("] = ").Append(valVar).AppendLine(";");
                 sb.Append(indent).AppendLine("    }");
@@ -701,7 +588,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
             }
             else
             {
-                var eGlobal = TypeRefHelper.FormatGlobalTypeName(elemOrKey!, contextNamespace, usings, aliases);
+                var eGlobal = TypeRefHelper.ToGlobalTypeName(elemOrKey!);
                 var builderVar = $"__ver_col_{id}";
                 var idxVar = $"__ver_i_{id}";
                 var elemVar = $"__ver_e_{id}";
@@ -719,7 +606,7 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
                 var listPathVar = $"__ver_lp_{id}";
                 sb.Append(indent).Append("        var ").Append(listPathVar).Append(" = ").Append(fieldPathExpr)
                     .Append(" + $\"[{").Append(idxVar).AppendLine("}]\";");
-                EmitMarshalExpression(sb, indent + "        ", $"{listVar}[{idxVar}]", elemOrKey!, listPathVar, elemVar, ref counter, contextNamespace, usings, aliases);
+                EmitMarshalExpression(sb, indent + "        ", $"{listVar}[{idxVar}]", elemOrKey!, listPathVar, elemVar, ref counter);
                 sb.Append(indent).Append("        ").Append(builderVar).Append(".Add(").Append(elemVar).AppendLine(");");
                 sb.Append(indent).AppendLine("    }");
                 sb.Append(indent).AppendLine("}");
@@ -774,63 +661,48 @@ public sealed class InboundPortGenerator : IIncrementalGenerator
         }
     }
 
-    private static bool IsNullableValueTypeInRaw(
-        ITypeSymbol type,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases)
+    private static bool IsNullableValueTypeInRaw(ITypeSymbol type)
     {
-        if (TryResolveRefinedOrAlias(type, contextNamespace, usings, aliases, out var underlying, out _, out _))
+        if (TypeRefHelper.TryGetConstrainedUnderlyingType(type, out var underlying))
         {
             return underlying!.IsValueType;
         }
         return type.IsValueType;
     }
 
-    private static string GetRawPropertyTypeName(
-        ITypeSymbol type,
-        bool forCollectionItem,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases)
+    private static string GetRawPropertyTypeName(ITypeSymbol type, bool forCollectionItem)
     {
         if (type is INamedTypeSymbol nullableNamed &&
             nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
             nullableNamed.TypeArguments.Length == 1)
         {
-            var inner = GetRawPropertyTypeName(nullableNamed.TypeArguments[0], forCollectionItem: false, contextNamespace, usings, aliases);
+            var inner = GetRawPropertyTypeName(nullableNamed.TypeArguments[0], forCollectionItem: false);
             return inner.EndsWith("?", StringComparison.Ordinal) ? inner : inner + "?";
         }
 
-        if (TryResolveRefinedOrAlias(type, contextNamespace, usings, aliases, out var underlying, out _, out var isNullableAlias))
+        if (TypeRefHelper.TryGetConstrainedUnderlyingType(type, out var underlying))
         {
             if (underlying!.SpecialType == SpecialType.System_String)
             {
-                return forCollectionItem && !isNullableAlias ? "string" : "string?";
+                return forCollectionItem ? "string" : "string?";
             }
-            var underlyingGlobal = TypeRefHelper.ToGlobalTypeName(underlying);
-            return isNullableAlias ? underlyingGlobal + "?" : underlyingGlobal;
+            return TypeRefHelper.ToGlobalTypeName(underlying);
         }
 
-        return GetRawCollectionOrCompositeTypeName(type, forCollectionItem, contextNamespace, usings, aliases);
+        return GetRawCollectionOrCompositeTypeName(type, forCollectionItem);
     }
 
-    private static string GetRawCollectionOrCompositeTypeName(
-        ITypeSymbol type,
-        bool forCollectionItem,
-        string contextNamespace,
-        IReadOnlyList<string> usings,
-        TypeAliasLookup aliases)
+    private static string GetRawCollectionOrCompositeTypeName(ITypeSymbol type, bool forCollectionItem)
     {
         if (TypeRefHelper.IsImmutableCollection(type, out var kind, out var elemOrKey, out var valType))
         {
             if (kind == "ImmutableDictionary")
             {
-                var k = GetRawPropertyTypeName(elemOrKey!, forCollectionItem: true, contextNamespace, usings, aliases);
-                var v = GetRawPropertyTypeName(valType!, forCollectionItem: true, contextNamespace, usings, aliases);
+                var k = GetRawPropertyTypeName(elemOrKey!, forCollectionItem: true);
+                var v = GetRawPropertyTypeName(valType!, forCollectionItem: true);
                 return $"global::System.Collections.Generic.Dictionary<{k}, {v}>?";
             }
-            var e = GetRawPropertyTypeName(elemOrKey!, forCollectionItem: true, contextNamespace, usings, aliases);
+            var e = GetRawPropertyTypeName(elemOrKey!, forCollectionItem: true);
             return $"global::System.Collections.Generic.List<{e}>?";
         }
 

@@ -8,32 +8,16 @@ internal static class GeneratorDescriptors
 
     public static readonly DiagnosticDescriptor RefinedMustBeReadOnlyPartialRecordStruct = new(
         id: "VER201",
-        title: "Invalid [Refined<T>] target declaration",
-        messageFormat: "Type '{0}' decorated with [Refined<T>] must be declared as a 'readonly partial record struct'. Fix: Change the declaration to 'public readonly partial record struct {0};'.",
+        title: "Invalid constrained struct target declaration",
+        messageFormat: "Type '{0}' decorated with [TypeAlias<T>] or [Refined<T>] must be declared as a 'readonly partial record struct'. Fix: Change the declaration to 'public readonly partial record struct {0} {{ public static bool IsValid(...) => ...; }}'.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor InvalidRefinementPredicate = new(
+    public static readonly DiagnosticDescriptor MissingOrInvalidIsValidMethod = new(
         id: "VER202",
-        title: "Invalid refinement predicate expression",
-        messageFormat: "Refinement predicate '{0}' on '{1}' is invalid: {2}. Fix: Provide a valid C# boolean expression referencing 'Value', for example [Refined<int>(\"Value >= 1\")].",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
-
-    public static readonly DiagnosticDescriptor InvalidTypeAliasName = new(
-        id: "VER203",
-        title: "Invalid [TypeAlias<T>] type name",
-        messageFormat: "Type alias name '{0}' in [TypeAlias<T>] is not a valid C# identifier. Fix: Provide a valid unqualified identifier such as 'TodoId'.",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
-
-    public static readonly DiagnosticDescriptor DuplicateTypeAlias = new(
-        id: "VER204",
-        title: "Duplicate [TypeAlias<T>] declaration",
-        messageFormat: "Type alias '{0}' is declared more than once. Fix: Remove the duplicate [TypeAlias<T>] attribute or use distinct names/namespaces.",
+        title: "Missing or invalid IsValid method on constrained type",
+        messageFormat: "Constrained type '{0}' must declare 'public static bool IsValid({1} value) => ...;' with a single boolean predicate expression. Fix: Add 'public static bool IsValid({1} value) => ...;' inside '{0}'.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
