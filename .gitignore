@@ -1,0 +1,30 @@
+# Build outputs
+bin/
+obj/
+artifacts/
+TestResults/
+*.nupkg
+*.snupkg
+
+# IDE & Editor
+.vs/
+.vscode/*
+!.vscode/settings.json
+*.user
+*.suo
+*.DotSettings.user
+
+# Testing & Tooling state
+.galaxycheck/
+.tools/
+.verifiable/
+
+# SQLite databases (generated during runs/tests)
+*.db
+*.db-wal
+*.db-shm
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db

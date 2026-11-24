@@ -1,0 +1,3 @@
+Verifiable.NET: compile-time formal verification toolchain for C# (.NET 9 / .NET 10).
+Agent reference (being expanded alongside package implementation).
+Set VERIFIABLE_AGENT=1 for single-line JSON <verifiable-counterexample> diagnostics and GALAXYCHECK_AGENT=1 for GalaxyCheck agent mode.

@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup Condition="$([System.String]::Copy('$(MSBuildProjectDirectory)').Replace('\','/').Contains('/external/galactic-heck/'))">
+    <BeforeMicrosoftNETSdkTargets>$(MSBuildThisFileDirectory)build\GalaxyCheck.SdkOverride.targets</BeforeMicrosoftNETSdkTargets>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="!$([System.String]::Copy('$(MSBuildProjectDirectory)').Replace('\','/').Contains('/external/'))">
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <Authors>Verifiable.NET Contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/ptetau/csharpest</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <VersionPrefix>0.1.0</VersionPrefix>
+  </PropertyGroup>
+</Project>

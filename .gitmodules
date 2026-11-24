@@ -1,0 +1,3 @@
+[submodule "external/galactic-heck"]
+	path = external/galactic-heck
+	url = https://github.com/ptetau/galactic-heck.git
