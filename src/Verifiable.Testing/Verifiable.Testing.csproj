@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Verifiable.Contracts\Verifiable.Contracts.csproj" />
-    <ProjectReference Include="..\..\external\galactic-heck\src\GalaxyCheck\GalaxyCheck.csproj" />
+    <ProjectReference Include="..\..\external\GalaxyCheck\src\GalaxyCheck\GalaxyCheck.csproj" />
   </ItemGroup>
 
   <ItemGroup>

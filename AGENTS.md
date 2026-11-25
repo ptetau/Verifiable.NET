@@ -43,7 +43,7 @@ Every Verifiable diagnostic uses an Elm-style layout (`-- TITLE ---- File.cs`, s
 ```
 
 ### GalaxyCheck Property Failure
-Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` JSON block with `counterexample`, `csharp`, `replay`, `seed`, and an exact `rerun` command. See `docs/agents.md` and `external/galactic-heck/docs/agents.md` for full schemas.
+Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` JSON block with `counterexample`, `csharp`, `replay`, `seed`, and an exact `rerun` command. See `docs/agents.md` and `external/GalaxyCheck/docs/agents.md` for full schemas.
 
 ### Interactive Verification Query CLI (`Verifiable.Query`)
 Run pure .NET Core formal queries without modifying source files (`verifiable-query` or `dotnet run --project src/Verifiable.Query -c Release -- ...`):

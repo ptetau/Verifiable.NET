@@ -17,8 +17,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\external\galactic-heck\src\GalaxyCheck\GalaxyCheck.csproj" />
-    <ProjectReference Include="..\..\external\galactic-heck\src\GalaxyCheck.Xunit\GalaxyCheck.Xunit.csproj" />
+    <ProjectReference Include="..\..\external\GalaxyCheck\src\GalaxyCheck\GalaxyCheck.csproj" />
+    <ProjectReference Include="..\..\external\GalaxyCheck\src\GalaxyCheck.Xunit\GalaxyCheck.Xunit.csproj" />
     <ProjectReference Include="..\..\src\Verifiable.Contracts\Verifiable.Contracts.csproj" />
     <ProjectReference Include="..\..\src\Verifiable.Generators\Verifiable.Generators.csproj" />
     <ProjectReference Include="..\..\src\Verifiable.Analyzers\Verifiable.Analyzers.csproj" />

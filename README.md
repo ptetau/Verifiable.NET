@@ -191,7 +191,7 @@ bash scripts/install-z3.sh
 ./scripts/verify.sh
 ```
 
-Verifiable.NET uses **GalaxyCheck** (`external/galactic-heck`, via `GalaxyCheck.Xunit`) for property-based and stateful testing across generators, Z3 counterexample soundness, and SQLite crash/replay tests.
+Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xunit`) for property-based and stateful testing across generators, Z3 counterexample soundness, and SQLite crash/replay tests.
 
 ---
 

@@ -42,13 +42,13 @@ All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Gene
 
 Queries run over persistent `z3 -in` worker processes with `(echo "__VERIFIABLE_DONE__")` sentinels, `(set-option :timeout 2500)`, and SHA-256 in-memory + `%TEMP%/verifiable-smt-cache-v1` caching.
 
-## 3. GalaxyCheck Integration (`external/galactic-heck`)
+## 3. GalaxyCheck Integration (`external/GalaxyCheck`)
 
-All test suites use **GalaxyCheck** (`https://github.com/ptetau/galactic-heck`) via `GalaxyCheck.Xunit` and `Verifiable.Testing`:
+All test suites use **GalaxyCheck** (`https://github.com/ptetau/GalaxyCheck`) via `GalaxyCheck.Xunit` and `Verifiable.Testing`:
 - Property-based tests (`[Property]`) for refined types, `[InboundPort]` gates, Gatekeeper severity parity, CodeFixes, and Z3 counterexample soundness.
 - Stateful differential + fault-injected SQLite persistence properties (`DifferentialPersistenceProperty.Create`, `FaultInjectedSqliteHarness`) testing `PreCommitCrash`, `PostCommitCrashBeforeAck`, and `DuplicateDelivery` against WAL SQLite and append-only journal replay.
 
-For full GalaxyCheck agent documentation, see `external/galactic-heck/docs/agents.md` and `external/galactic-heck/docs/llms.txt`.
+For full GalaxyCheck agent documentation, see `external/GalaxyCheck/docs/agents.md` and `external/GalaxyCheck/docs/llms.txt`.
 
 ## 4. `Verifiable.Query` CLI Agent Schema
 

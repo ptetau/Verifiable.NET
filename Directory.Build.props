@@ -1,5 +1,5 @@
 <Project>
-  <PropertyGroup Condition="$([System.String]::Copy('$(MSBuildProjectDirectory)').Replace('\','/').Contains('/external/galactic-heck/'))">
+  <PropertyGroup Condition="$([System.String]::Copy('$(MSBuildProjectDirectory)').Replace('\','/').Contains('/external/GalaxyCheck/'))">
     <BeforeMicrosoftNETSdkTargets>$(MSBuildThisFileDirectory)build\GalaxyCheck.SdkOverride.targets</BeforeMicrosoftNETSdkTargets>
   </PropertyGroup>
 
