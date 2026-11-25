@@ -172,7 +172,7 @@ jobs:
 
       - name: Check NuGet Auth Configuration
         id: nuget_auth
-        if: inputs.publish_nuget != false
+        if: github.event_name == 'push' || inputs.publish_nuget
         env:
           INPUT_USER: ${{ inputs.nuget_user }}
           VAR_USER: ${{ vars.NUGET_USER }}
@@ -185,14 +185,14 @@ jobs:
           fi
 
       - name: NuGet login (OIDC -> temp API key)
-        if: inputs.publish_nuget != false && steps.nuget_auth.outputs.use_oidc == 'true'
+        if: (github.event_name == 'push' || inputs.publish_nuget) && steps.nuget_auth.outputs.use_oidc == 'true'
         uses: NuGet/login@v1
         id: login
         with:
           user: ${{ inputs.nuget_user || vars.NUGET_USER || secrets.NUGET_USER }}
 
       - name: Publish to NuGet.org
-        if: inputs.publish_nuget != false
+        if: github.event_name == 'push' || inputs.publish_nuget
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
         run: |
