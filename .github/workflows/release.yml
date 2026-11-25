@@ -11,7 +11,7 @@ on:
         required: false
         type: string
       publish_nuget:
-        description: 'Push packages to NuGet.org (via Trusted Publishing NUGET_USER or NUGET_API_KEY)'
+        description: 'Push Verifiable.Z3 and Verifiable.NET to NuGet.org via Trusted Publishing'
         required: false
         default: true
         type: boolean
@@ -170,7 +170,7 @@ jobs:
           path: artifacts/nupkg/*.nupkg
           if-no-files-found: error
 
-      - name: Check NuGet Auth Configuration
+      - name: Check NuGet Trusted Publishing User
         id: nuget_auth
         if: github.event_name == 'push' || inputs.publish_nuget
         env:
@@ -191,31 +191,24 @@ jobs:
         with:
           user: ${{ inputs.nuget_user || vars.NUGET_USER || secrets.NUGET_USER }}
 
-      - name: Publish to NuGet.org
+      - name: Publish Verifiable.Z3 and Verifiable.NET to NuGet.org
         if: github.event_name == 'push' || inputs.publish_nuget
         env:
-          OIDC_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
-          FALLBACK_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PKG_VER: ${{ steps.version.outputs.package_version }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$OIDC_API_KEY" ] && [ -z "$FALLBACK_API_KEY" ]; then
-            echo "::warning::Configure NUGET_USER (Trusted Publishing) or NUGET_API_KEY; skipping NuGet.org push."
-            exit 0
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::NUGET_USER (for NuGet Trusted Publishing) is not configured."
+            exit 1
           fi
-          PRIMARY_KEY="${OIDC_API_KEY:-$FALLBACK_API_KEY}"
-          for pkg in artifacts/nupkg/*.nupkg; do
+          for id in Verifiable.Z3 Verifiable.NET; do
+            pkg="artifacts/nupkg/${id}.${PKG_VER}.nupkg"
             echo "==> Pushing $pkg"
-            if OUTPUT=$(dotnet nuget push "$pkg" --api-key "$PRIMARY_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate 2>&1); then
-              echo "$OUTPUT"
-              continue
-            fi
-            echo "$OUTPUT"
-            if echo "$OUTPUT" | grep -q "403" && [ -n "$OIDC_API_KEY" ] && [ -n "$FALLBACK_API_KEY" ]; then
-              echo "::notice::OIDC push returned 403 for $pkg (new package IDs require an initial push by an API key to establish ownership); retrying with NUGET_API_KEY."
-              dotnet nuget push "$pkg" --api-key "$FALLBACK_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
-            else
-              exit 1
-            fi
+            dotnet nuget push "$pkg" \
+              --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json \
+              --skip-duplicate
           done
 
       - name: Create GitHub Release
