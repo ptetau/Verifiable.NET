@@ -837,8 +837,24 @@ internal sealed class CfgSsaLowerer
         }
         if (_queryProbeParams is not null)
         {
+            var resultName = _queryResultParam?.Name;
             foreach (var probeParam in _queryProbeParams)
             {
+                if (resultName is not null && probeParam.Name == resultName)
+                {
+                    if (resultTerm is not null)
+                    {
+                        queryEnv.Vars[probeParam] = resultTerm;
+                    }
+                    continue;
+                }
+
+                if (_entryThis is not null && probeParam.Name == "__ver_this")
+                {
+                    queryEnv.Vars[probeParam] = _entryThis;
+                    continue;
+                }
+
                 var matchingMethodParam = _method.Parameters.FirstOrDefault(p => p.Name == probeParam.Name);
                 if (matchingMethodParam is not null && _entryParamVars.TryGetValue(matchingMethodParam, out var pTerm))
                 {
