@@ -194,16 +194,29 @@ jobs:
       - name: Publish to NuGet.org
         if: github.event_name == 'push' || inputs.publish_nuget
         env:
-          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
+          OIDC_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          FALLBACK_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "::warning::Configure NUGET_USER (variable/secret for Trusted Publishing) or NUGET_API_KEY; skipping NuGet.org push."
+          set -euo pipefail
+          if [ -z "$OIDC_API_KEY" ] && [ -z "$FALLBACK_API_KEY" ]; then
+            echo "::warning::Configure NUGET_USER (Trusted Publishing) or NUGET_API_KEY; skipping NuGet.org push."
             exit 0
           fi
-          dotnet nuget push "artifacts/nupkg/*.nupkg" \
-            --api-key "$NUGET_API_KEY" \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+          PRIMARY_KEY="${OIDC_API_KEY:-$FALLBACK_API_KEY}"
+          for pkg in artifacts/nupkg/*.nupkg; do
+            echo "==> Pushing $pkg"
+            if OUTPUT=$(dotnet nuget push "$pkg" --api-key "$PRIMARY_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate 2>&1); then
+              echo "$OUTPUT"
+              continue
+            fi
+            echo "$OUTPUT"
+            if echo "$OUTPUT" | grep -q "403" && [ -n "$OIDC_API_KEY" ] && [ -n "$FALLBACK_API_KEY" ]; then
+              echo "::notice::OIDC push returned 403 for $pkg (new package IDs require an initial push by an API key to establish ownership); retrying with NUGET_API_KEY."
+              dotnet nuget push "$pkg" --api-key "$FALLBACK_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+            else
+              exit 1
+            fi
+          done
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
