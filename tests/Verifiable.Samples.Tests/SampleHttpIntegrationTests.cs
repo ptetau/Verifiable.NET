@@ -55,16 +55,29 @@ public class SampleHttpIntegrationTests
             Assert.True(replayReceipt.WasDuplicate);
             Assert.Equal(1, replayReceipt.Board.ActiveCount);
 
-            // 4. Delete item, then attempt resurrection via Complete -> 409 Conflict
+            // 4. Add a second item, rename it, complete it, then reopen it
+            (await client.PostAsJsonAsync("/api/todos/add", new AddTodoHttpRequest(Guid.NewGuid(), "Draft note", 150))).EnsureSuccessStatusCode();
+            var renameResp = await client.PostAsJsonAsync("/api/todos/rename", new RenameTodoHttpRequest(Guid.NewGuid(), 2, "Finalized note", 160));
+            renameResp.EnsureSuccessStatusCode();
+            var renameReceipt = await renameResp.Content.ReadFromJsonAsync<TodoCommitReceipt>();
+            Assert.Equal("Finalized note", renameReceipt.Board.Items[TodoId.From(2)].Title.Value);
+
+            (await client.PostAsJsonAsync("/api/todos/complete", new CompleteTodoHttpRequest(Guid.NewGuid(), 2, 170))).EnsureSuccessStatusCode();
+            var reopenResp = await client.PostAsJsonAsync("/api/todos/reopen", new ReopenTodoHttpRequest(Guid.NewGuid(), 2, 180));
+            reopenResp.EnsureSuccessStatusCode();
+            var reopenReceipt = await reopenResp.Content.ReadFromJsonAsync<TodoCommitReceipt>();
+            Assert.Equal(TodoStatus.Active, reopenReceipt.Board.Items[TodoId.From(2)].Status);
+
+            // 5. Delete item #1, then attempt resurrection via Complete -> 409 Conflict
             var delResp = await client.PostAsJsonAsync("/api/todos/delete", new DeleteTodoHttpRequest(Guid.NewGuid(), 1, 200));
             delResp.EnsureSuccessStatusCode();
 
             var resurrectResp = await client.PostAsJsonAsync("/api/todos/complete", new CompleteTodoHttpRequest(Guid.NewGuid(), 1, 300));
             Assert.Equal(HttpStatusCode.Conflict, resurrectResp.StatusCode);
 
-            // 5. GET board reflects exact state
+            // 6. GET board reflects exact state (#1 Deleted, #2 Active)
             var board = await client.GetFromJsonAsync<TodoBoard>("/api/board");
-            Assert.Equal(0, board.ActiveCount);
+            Assert.Equal(1, board.ActiveCount);
             Assert.Equal(1, board.DeletedCount);
         }
         finally
@@ -135,13 +148,21 @@ public class SampleHttpIntegrationTests
                 new ReverseEntryHttpRequest(Guid.NewGuid(), 2, 15));
             Assert.Equal(HttpStatusCode.Conflict, revAgain.StatusCode);
 
-            // 8. Compare live ledger vs append-only journal replay
+            // 8. 3-leg fee-split transfer ($100 gross = $90 recipient Expense + $10 Fee account #4)
+            (await client.PostAsJsonAsync("/api/accounts/open",
+                new OpenAccountHttpRequest(Guid.NewGuid(), 4, "Platform Fee", AccountType.Expense, "USD", false, 16))).EnsureSuccessStatusCode();
+            var splitResp = await client.PostAsJsonAsync("/api/journal/fee-split",
+                new PostFeeSplitHttpRequest(Guid.NewGuid(), 1, 3, 4, 100.00m, 10.00m, "Split hosting", 17));
+            splitResp.EnsureSuccessStatusCode();
+
+            // 9. Compare live ledger vs append-only journal replay
             var live = await client.GetFromJsonAsync<LedgerState>("/api/ledger");
             var replayed = await client.GetFromJsonAsync<LedgerState>("/api/ledger/replay");
 
             Assert.Equal(live.TotalDebits, live.TotalCredits);
-            Assert.Equal(500.00m, live.Accounts[AccountId.From(1)].Balance);
-            Assert.Equal(0m, live.Accounts[AccountId.From(3)].Balance);
+            Assert.Equal(400.00m, live.Accounts[AccountId.From(1)].Balance);
+            Assert.Equal(90.00m, live.Accounts[AccountId.From(3)].Balance);
+            Assert.Equal(10.00m, live.Accounts[AccountId.From(4)].Balance);
             Assert.Equal(live.TotalDebits, replayed.TotalDebits);
             Assert.Equal(live.TotalCredits, replayed.TotalCredits);
             Assert.Equal(live.Journal.Count, replayed.Journal.Count);

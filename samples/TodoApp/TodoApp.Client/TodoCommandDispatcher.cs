@@ -44,6 +44,14 @@ public sealed class TodoCommandDispatcher(HttpClient http)
                     "/api/todos/delete",
                     new DeleteTodoHttpRequest(command.CommandId.Value, command.TargetIdValue ?? 0, command.Timestamp.Value),
                     ct),
+                "rename" => await http.PostAsJsonAsync(
+                    "/api/todos/rename",
+                    new RenameTodoHttpRequest(command.CommandId.Value, command.TargetIdValue ?? 0, command.TitleText, command.Timestamp.Value),
+                    ct),
+                "reopen" => await http.PostAsJsonAsync(
+                    "/api/todos/reopen",
+                    new ReopenTodoHttpRequest(command.CommandId.Value, command.TargetIdValue ?? 0, command.Timestamp.Value),
+                    ct),
                 _ => throw new InvalidOperationException($"Unknown operation kind '{command.OperationKind}'.")
             };
 

@@ -23,6 +23,19 @@ public sealed class LedgerCommandDispatcher(HttpClient http)
         }
     }
 
+    public async Task<Result<LedgerState, string>> ReplayLedgerAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var state = await http.GetFromJsonAsync<LedgerState>("/api/ledger/replay", ct);
+            return Result<LedgerState, string>.Ok(state);
+        }
+        catch (Exception ex)
+        {
+            return Result<LedgerState, string>.Fail(ex.Message);
+        }
+    }
+
     [ConsumesObligation]
     public async Task<Result<LedgerCommitReceipt, string>> DispatchAsync(
         UnsentLedgerCommand command,
@@ -40,6 +53,8 @@ public sealed class LedgerCommandDispatcher(HttpClient http)
                     await http.PostAsJsonAsync("/api/journal/post", command.BalancedEntry, ct),
                 "reverse" when command.Reverse is not null =>
                     await http.PostAsJsonAsync("/api/journal/reverse", command.Reverse, ct),
+                "fee-split" when command.FeeSplit is not null =>
+                    await http.PostAsJsonAsync("/api/journal/fee-split", command.FeeSplit, ct),
                 _ => throw new InvalidOperationException($"Invalid ledger command '{command.OperationKind}'.")
             };
 

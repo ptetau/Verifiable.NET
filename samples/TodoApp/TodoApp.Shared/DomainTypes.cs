@@ -129,4 +129,10 @@ public sealed record CompleteTodoHttpRequest(Guid CommandId, int TodoId, long Ti
 public sealed record DeleteTodoHttpRequest(Guid CommandId, int TodoId, long Timestamp);
 
 [Unverifiable]
+public sealed record RenameTodoHttpRequest(Guid CommandId, int TodoId, string? Title, long Timestamp);
+
+[Unverifiable]
+public sealed record ReopenTodoHttpRequest(Guid CommandId, int TodoId, long Timestamp);
+
+[Unverifiable]
 public sealed record ApiErrorResponse(string Message, ImmutableArray<ContractViolation> Violations);

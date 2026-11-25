@@ -42,6 +42,27 @@
         </div>
     </section>
 
+    <section style="margin-bottom: 1.5rem; padding: 1rem; border: 1px solid #e5e7eb;">
+        <h2>Post Fee-Split Transfer (3-Leg Entry)</h2>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <input type="number" @bind="_splitFromId" placeholder="From ID" style="width: 75px;" />
+            <input type="number" @bind="_splitToId" placeholder="To ID" style="width: 75px;" />
+            <input type="number" @bind="_splitFeeId" placeholder="Fee ID" style="width: 75px;" />
+            <input type="number" step="0.01" @bind="_splitGross" placeholder="Gross" style="width: 95px;" />
+            <input type="number" step="0.01" @bind="_splitFee" placeholder="Fee" style="width: 85px;" />
+            <input @bind="_splitMemo" placeholder="Memo" />
+            <button @onclick="HandleFeeSplitAsync" disabled="@_state.IsSyncing">Post Split</button>
+        </div>
+    </section>
+
+    <div style="margin-bottom: 1rem;">
+        <button @onclick="HandleVerifyReplayAsync" disabled="@_state.IsSyncing">Verify Journal Replay</button>
+        @if (!string.IsNullOrEmpty(_auditMessage))
+        {
+            <span style="margin-left: 0.75rem;">@_auditMessage</span>
+        }
+    </div>
+
     <h2>Accounts</h2>
     <ul>
         @foreach (var acc in _state.State.Accounts.Values.OrderBy(a => a.Id))
@@ -82,6 +103,14 @@
     private decimal _transferAmount = 100m;
     private string _memo = "Transfer";
 
+    private int _splitFromId = 1;
+    private int _splitToId = 2;
+    private int _splitFeeId = 3;
+    private decimal _splitGross = 100m;
+    private decimal _splitFee = 5m;
+    private string _splitMemo = "Payout with fee";
+    private string _auditMessage = string.Empty;
+
     protected override async Task OnInitializedAsync()
     {
         var loaded = await Dispatcher.LoadLedgerAsync();
@@ -119,6 +148,32 @@
         var (next, cmd) = LedgerUiEngine.OnSubmitReverse(_state, req, cmdId);
         _state = next;
         await DispatchAndApplyAsync(cmd);
+    }
+
+    private async Task HandleFeeSplitAsync()
+    {
+        var cmdId = CommandId.From(Guid.NewGuid());
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var req = new PostFeeSplitHttpRequest(cmdId.Value, _splitFromId, _splitToId, _splitFeeId, _splitGross, _splitFee, _splitMemo, ts);
+        var (next, cmd) = LedgerUiEngine.OnSubmitFeeSplit(_state, req, cmdId);
+        _state = next;
+        await DispatchAndApplyAsync(cmd);
+    }
+
+    private async Task HandleVerifyReplayAsync()
+    {
+        var replay = await Dispatcher.ReplayLedgerAsync();
+        if (!replay.IsSuccess)
+        {
+            _auditMessage = $"Replay failed: {replay.Error}";
+            return;
+        }
+        var matches = replay.Value.TotalDebits == _state.State.TotalDebits
+            && replay.Value.TotalCredits == _state.State.TotalCredits
+            && replay.Value.Journal.Count == _state.State.Journal.Count;
+        _auditMessage = matches
+            ? $"Replay verified: {replay.Value.Journal.Count} entries, TotalDebits={replay.Value.TotalDebits:N2}."
+            : "Replay mismatch detected.";
     }
 
     private async Task DispatchAndApplyAsync(UnsentLedgerCommand cmd)

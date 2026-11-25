@@ -118,6 +118,12 @@ public readonly record struct LedgerTransition(
 public readonly record struct EntryTotals(NonNegativeDecimal DebitTotal, NonNegativeDecimal CreditTotal);
 
 [Verifiable]
+public readonly record struct TrialBalanceSummary(
+    decimal AssetExpenseTotal,
+    decimal LiabilityEquityRevenueTotal,
+    int AccountCount);
+
+[Verifiable]
 public readonly record struct AccountUpdateOutcome(
     ImmutableDictionary<AccountId, Account> Accounts,
     bool IsSuccess,
@@ -140,7 +146,8 @@ public readonly record struct UnsentLedgerCommand(
     OpenAccountHttpRequest? OpenAccount,
     PostTransferHttpRequest? Transfer,
     PostBalancedEntryHttpRequest? BalancedEntry,
-    ReverseEntryHttpRequest? Reverse);
+    ReverseEntryHttpRequest? Reverse,
+    PostFeeSplitHttpRequest? FeeSplit = null);
 
 [Verifiable]
 public readonly record struct LedgerCommitReceipt(
@@ -188,6 +195,16 @@ public sealed record PostBalancedEntryHttpRequest(
 public sealed record ReverseEntryHttpRequest(
     Guid CommandId,
     int EntryId,
+    long Timestamp);
+
+public sealed record PostFeeSplitHttpRequest(
+    Guid CommandId,
+    int FromAccountId,
+    int ToAccountId,
+    int FeeAccountId,
+    decimal GrossAmount,
+    decimal FeeAmount,
+    string? Memo,
     long Timestamp);
 
 public sealed record LedgerErrorResponse(string Message, ImmutableArray<ContractViolation> Violations);

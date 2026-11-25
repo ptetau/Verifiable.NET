@@ -179,6 +179,135 @@ public static class LedgerEngine
         return new LedgerTransition(nextState, true, null, entry.Id);
     }
 
+    [InboundPort]
+    public static LedgerTransition PostFeeSplitTransfer(
+        LedgerState state,
+        AccountId from,
+        AccountId to,
+        AccountId feeAccount,
+        PositiveAmount grossAmount,
+        PositiveAmount feeAmount,
+        string memo,
+        UnixTimestamp now)
+    {
+        Spec.Ensures<LedgerTransition>(
+            result => result.State.TotalDebits == result.State.TotalCredits,
+            "Every 3-leg fee-split transfer keeps total debits equal to total credits.");
+        Spec.Ensures<LedgerTransition>(
+            result => !result.IsSuccess || result.State.TotalDebits == state.TotalDebits + grossAmount,
+            "A successful fee-split transfer increases total debits by the exact gross amount.");
+        Spec.Ensures<LedgerTransition>(
+            result => result.IsSuccess || result.State == state,
+            "A rejected fee-split transfer leaves the ledger completely unchanged.");
+
+        if (from == to || from == feeAccount || to == feeAccount)
+        {
+            return new LedgerTransition(state, false, "Source, recipient, and fee accounts must all differ.", null);
+        }
+
+        if (!state.Accounts.ContainsKey(from) || !state.Accounts.ContainsKey(to) || !state.Accounts.ContainsKey(feeAccount))
+        {
+            return new LedgerTransition(state, false, "One or more accounts were not found.", null);
+        }
+
+        var netDec = grossAmount - feeAmount;
+        if (netDec <= 0m)
+        {
+            return new LedgerTransition(state, false, "Fee must be strictly less than gross transfer amount.", null);
+        }
+
+        var fromAcc = state.Accounts[from];
+        var toAcc = state.Accounts[to];
+        var feeAcc = state.Accounts[feeAccount];
+
+        if (fromAcc.Currency != toAcc.Currency || fromAcc.Currency != feeAcc.Currency)
+        {
+            return new LedgerTransition(state, false, "All three accounts in a fee-split transfer must share a currency.", null);
+        }
+
+        var netAmount = PositiveAmount.From(netDec);
+        var fromDelta = SignedBalanceDelta(fromAcc.Kind, EntrySide.Credit, grossAmount);
+        var toDelta = SignedBalanceDelta(toAcc.Kind, EntrySide.Debit, netAmount);
+        var feeDelta = SignedBalanceDelta(feeAcc.Kind, EntrySide.Debit, feeAmount);
+
+        var newFromBalance = fromAcc.Balance + fromDelta;
+        var newToBalance = toAcc.Balance + toDelta;
+        var newFeeBalance = feeAcc.Balance + feeDelta;
+
+        if (!fromAcc.AllowOverdraft && newFromBalance < 0m)
+        {
+            return new LedgerTransition(state, false, "Insufficient funds in source account for gross amount.", null);
+        }
+
+        if ((!toAcc.AllowOverdraft && newToBalance < 0m) || (!feeAcc.AllowOverdraft && newFeeBalance < 0m))
+        {
+            return new LedgerTransition(state, false, "Overdraft guard violated on destination or fee account.", null);
+        }
+
+        var nextAccounts = state.Accounts
+            .SetItem(from, fromAcc with { Balance = newFromBalance })
+            .SetItem(to, toAcc with { Balance = newToBalance })
+            .SetItem(feeAccount, feeAcc with { Balance = newFeeBalance });
+
+        var lines = ImmutableList<JournalLine>.Empty
+            .Add(new JournalLine(to, EntrySide.Debit, netAmount))
+            .Add(new JournalLine(feeAccount, EntrySide.Debit, feeAmount))
+            .Add(new JournalLine(from, EntrySide.Credit, grossAmount));
+
+        var entryTotal = PositiveDecimal.From(grossAmount);
+        var entry = new PostedJournalEntry(
+            state.NextEntryId,
+            lines,
+            entryTotal,
+            entryTotal,
+            memo,
+            now,
+            false,
+            null);
+
+        var nextState = state with
+        {
+            Accounts = nextAccounts,
+            Journal = state.Journal.Add(entry),
+            NextEntryId = JournalEntryId.From(state.NextEntryId + 1),
+            TotalDebits = NonNegativeDecimal.From(state.TotalDebits + grossAmount),
+            TotalCredits = NonNegativeDecimal.From(state.TotalCredits + grossAmount)
+        };
+
+        return new LedgerTransition(nextState, true, null, entry.Id);
+    }
+
+    public static TrialBalanceSummary ComputeTrialBalance(ImmutableList<Account> accounts)
+    {
+        Spec.Ensures<TrialBalanceSummary>(
+            result => result.AccountCount == accounts.Count,
+            "Trial balance visits every account in the snapshot once.");
+
+        decimal assetExpense = 0m;
+        decimal creditNormal = 0m;
+        var i = 0;
+
+        while (i < accounts.Count)
+        {
+            Spec.LoopInvariant(i >= 0 && i <= accounts.Count, "Loop index stays within accounts list.");
+            Spec.Decreases(accounts.Count - i, "Remaining accounts shrink by one on each iteration.");
+
+            var acc = accounts[i];
+            if (acc.Kind == AccountType.Asset || acc.Kind == AccountType.Expense)
+            {
+                assetExpense = assetExpense + acc.Balance;
+            }
+            else
+            {
+                creditNormal = creditNormal + acc.Balance;
+            }
+
+            i = i + 1;
+        }
+
+        return new TrialBalanceSummary(assetExpense, creditNormal, accounts.Count);
+    }
+
     public static EntryTotals SumEntrySides(ImmutableList<JournalLine> lines)
     {
         var debits = 0m;
@@ -456,6 +585,17 @@ public static class LedgerUiEngine
     {
         var next = state with { IsSyncing = true, PendingCommandId = commandId, StatusText = "Syncing...", LastError = null };
         var cmd = new UnsentLedgerCommand(commandId, "reverse", null, null, null, req with { CommandId = commandId.Value });
+        return (next, cmd);
+    }
+
+    [Unverifiable]
+    public static (LedgerUiState State, UnsentLedgerCommand Command) OnSubmitFeeSplit(
+        LedgerUiState state,
+        PostFeeSplitHttpRequest req,
+        CommandId commandId)
+    {
+        var next = state with { IsSyncing = true, PendingCommandId = commandId, StatusText = "Syncing...", LastError = null };
+        var cmd = new UnsentLedgerCommand(commandId, "fee-split", null, null, null, null, req with { CommandId = commandId.Value });
         return (next, cmd);
     }
 

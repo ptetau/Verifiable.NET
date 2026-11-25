@@ -101,6 +101,60 @@ app.MapPost("/api/todos/delete", async (DeleteTodoHttpRequest req, SqliteTodoRep
     return Results.Ok(receipt);
 });
 
+app.MapPost("/api/todos/rename", async (RenameTodoHttpRequest req, SqliteTodoRepository repo, CancellationToken ct) =>
+{
+    var cmdCheck = CommandId.TryMarshal(req.CommandId, nameof(req.CommandId));
+    if (!cmdCheck.IsValid)
+    {
+        return Results.BadRequest(new ApiErrorResponse("Invalid CommandId.", cmdCheck.Violations));
+    }
+
+    var rawBoard = await repo.LoadRawBoardAsync(ct);
+    var portRes = TodoEnginePort.Rename(rawBoard, req.TodoId, req.Title!, req.Timestamp);
+    if (!portRes.IsValid)
+    {
+        return Results.BadRequest(new ApiErrorResponse("Inbound port validation failed.", portRes.Violations));
+    }
+
+    var transition = portRes.Value;
+    if (!transition.IsSuccess || transition.AffectedId is null)
+    {
+        return Results.Conflict(new ApiErrorResponse(transition.Error ?? "Rename failed.", ImmutableArray<ContractViolation>.Empty));
+    }
+
+    var item = transition.Board.Items[transition.AffectedId.Value];
+    var pending = TodoEngine.CreatePendingCommit(cmdCheck.Value, "rename", transition.Board, item, UnixTimestamp.From(req.Timestamp));
+    var receipt = await repo.CommitAsync(pending, ct);
+    return Results.Ok(receipt);
+});
+
+app.MapPost("/api/todos/reopen", async (ReopenTodoHttpRequest req, SqliteTodoRepository repo, CancellationToken ct) =>
+{
+    var cmdCheck = CommandId.TryMarshal(req.CommandId, nameof(req.CommandId));
+    if (!cmdCheck.IsValid)
+    {
+        return Results.BadRequest(new ApiErrorResponse("Invalid CommandId.", cmdCheck.Violations));
+    }
+
+    var rawBoard = await repo.LoadRawBoardAsync(ct);
+    var portRes = TodoEnginePort.Reopen(rawBoard, req.TodoId, req.Timestamp);
+    if (!portRes.IsValid)
+    {
+        return Results.BadRequest(new ApiErrorResponse("Inbound port validation failed.", portRes.Violations));
+    }
+
+    var transition = portRes.Value;
+    if (!transition.IsSuccess || transition.AffectedId is null)
+    {
+        return Results.Conflict(new ApiErrorResponse(transition.Error ?? "Reopen failed.", ImmutableArray<ContractViolation>.Empty));
+    }
+
+    var item = transition.Board.Items[transition.AffectedId.Value];
+    var pending = TodoEngine.CreatePendingCommit(cmdCheck.Value, "reopen", transition.Board, item, UnixTimestamp.From(req.Timestamp));
+    var receipt = await repo.CommitAsync(pending, ct);
+    return Results.Ok(receipt);
+});
+
 app.Run();
 
 public partial class Program;

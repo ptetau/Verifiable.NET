@@ -146,6 +146,42 @@ app.MapPost("/api/journal/reverse", async (ReverseEntryHttpRequest req, SqliteLe
     return Results.Ok(receipt);
 });
 
+app.MapPost("/api/journal/fee-split", async (PostFeeSplitHttpRequest req, SqliteLedgerRepository repo, CancellationToken ct) =>
+{
+    var cmdCheck = CommandId.TryMarshal(req.CommandId, nameof(req.CommandId));
+    if (!cmdCheck.IsValid)
+    {
+        return Results.BadRequest(new LedgerErrorResponse("Invalid CommandId.", cmdCheck.Violations));
+    }
+
+    var rawState = await repo.LoadRawLedgerAsync(ct);
+    var portRes = LedgerEnginePort.PostFeeSplitTransfer(
+        rawState,
+        req.FromAccountId,
+        req.ToAccountId,
+        req.FeeAccountId,
+        req.GrossAmount,
+        req.FeeAmount,
+        req.Memo ?? string.Empty,
+        req.Timestamp);
+    if (!portRes.IsValid)
+    {
+        return Results.BadRequest(new LedgerErrorResponse("Inbound port validation failed.", portRes.Violations));
+    }
+
+    var transition = portRes.Value;
+    if (!transition.IsSuccess || transition.CreatedEntryId is null)
+    {
+        return Results.Conflict(new LedgerErrorResponse(transition.Error ?? "Fee-split transfer failed.", ImmutableArray<ContractViolation>.Empty));
+    }
+
+    var entry = transition.State.Journal[^1];
+    var pending = LedgerEngine.CreatePendingCommit(
+        cmdCheck.Value, "fee-split", transition.State, null, entry, null, UnixTimestamp.From(req.Timestamp));
+    var receipt = await repo.CommitAsync(pending, ct);
+    return Results.Ok(receipt);
+});
+
 app.Run();
 
 public partial class Program;

@@ -129,6 +129,115 @@ public static class TodoEngine
         return new TodoTransition(nextCompletedBoard, true, null, id);
     }
 
+    [InboundPort]
+    public static TodoTransition Rename(TodoBoard board, TodoId id, TodoTitle newTitle, UnixTimestamp now)
+    {
+        Spec.Ensures<TodoTransition>(
+            result => result.IsSuccess || result.Board == board,
+            "A failed Rename leaves the board completely unchanged.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+            "Deleted todo items cannot be renamed.");
+        Spec.Ensures<TodoTransition>(
+            result => !result.IsSuccess || (
+                result.Board.NextId == board.NextId &&
+                result.Board.ActiveCount == board.ActiveCount &&
+                result.Board.CompletedCount == board.CompletedCount &&
+                result.Board.DeletedCount == board.DeletedCount),
+            "Renaming a todo preserves NextId and all status counts.");
+        Spec.Ensures<TodoTransition>(
+            result => !result.IsSuccess || (result.Board.Items.ContainsKey(id) && result.Board.Items[id].Title == newTitle),
+            "A successful Rename stores the exact validated new title.");
+
+        if (!board.Items.ContainsKey(id))
+        {
+            return new TodoTransition(board, false, "Todo item not found.", null);
+        }
+
+        var item = board.Items[id];
+        if (item.Status == TodoStatus.Deleted)
+        {
+            return new TodoTransition(board, false, "Cannot rename a deleted todo item.", id);
+        }
+
+        if (item.Title == newTitle)
+        {
+            return new TodoTransition(board, true, null, id);
+        }
+
+        var updated = item with { Title = newTitle, UpdatedAt = now };
+        var nextBoard = board with { Items = board.Items.SetItem(id, updated) };
+        return new TodoTransition(nextBoard, true, null, id);
+    }
+
+    [InboundPort]
+    public static TodoTransition Reopen(TodoBoard board, TodoId id, UnixTimestamp now)
+    {
+        Spec.Ensures<TodoTransition>(
+            result => result.IsSuccess || result.Board == board,
+            "A failed Reopen leaves the board completely unchanged.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+            "Deleted todo items are terminal and cannot be reopened.");
+        Spec.Ensures<TodoTransition>(
+            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Active || (result.IsSuccess && result.Board == board),
+            "Reopening an already-active todo is idempotent.");
+
+        if (!board.Items.ContainsKey(id))
+        {
+            return new TodoTransition(board, false, "Todo item not found.", null);
+        }
+
+        var item = board.Items[id];
+        if (item.Status == TodoStatus.Deleted)
+        {
+            return new TodoTransition(board, false, "Cannot reopen a deleted todo item.", id);
+        }
+
+        if (item.Status == TodoStatus.Active)
+        {
+            return new TodoTransition(board, true, null, id);
+        }
+
+        if (board.CompletedCount <= 0)
+        {
+            return new TodoTransition(board, false, "Board completed count is inconsistent.", id);
+        }
+
+        var updated = item with { Status = TodoStatus.Active, UpdatedAt = now };
+        var nextBoard = board with
+        {
+            Items = board.Items.SetItem(id, updated),
+            ActiveCount = NonNegativeInt.From(board.ActiveCount + 1),
+            CompletedCount = NonNegativeInt.From(board.CompletedCount - 1)
+        };
+        return new TodoTransition(nextBoard, true, null, id);
+    }
+
+    public static int CountItemsByStatus(System.Collections.Immutable.ImmutableList<TodoItem> items, TodoStatus status)
+    {
+        Spec.Ensures<int>(
+            result => result >= 0 && result <= items.Count,
+            "Filtered count can never be negative or exceed total items.");
+
+        var count = 0;
+        var i = 0;
+        while (i < items.Count)
+        {
+            Spec.LoopInvariant(
+                i >= 0 && i <= items.Count && count >= 0 && count <= i,
+                "Matched count never exceeds the number of items inspected so far.");
+            Spec.Decreases(items.Count - i, "Remaining items shrink by one on each iteration.");
+
+            if (items[i].Status == status)
+            {
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+        return count;
+    }
+
     public static PendingTodoCommit CreatePendingCommit(
         CommandId commandId,
         string operationKind,
@@ -188,6 +297,41 @@ public static class TodoUiEngine
             LastError = null
         };
         var cmd = new UnsentTodoCommand(commandId, "delete", null, id, now);
+        return (nextState, cmd);
+    }
+
+    public static (TodoUiState State, UnsentTodoCommand Command) OnSubmitRename(
+        TodoUiState state,
+        TodoId id,
+        TodoTitle newTitle,
+        CommandId commandId,
+        UnixTimestamp now)
+    {
+        var nextState = state with
+        {
+            IsSyncing = true,
+            PendingCommandId = commandId,
+            StatusText = "Syncing...",
+            LastError = null
+        };
+        var cmd = new UnsentTodoCommand(commandId, "rename", newTitle, id, now);
+        return (nextState, cmd);
+    }
+
+    public static (TodoUiState State, UnsentTodoCommand Command) OnSubmitReopen(
+        TodoUiState state,
+        TodoId id,
+        CommandId commandId,
+        UnixTimestamp now)
+    {
+        var nextState = state with
+        {
+            IsSyncing = true,
+            PendingCommandId = commandId,
+            StatusText = "Syncing...",
+            LastError = null
+        };
+        var cmd = new UnsentTodoCommand(commandId, "reopen", null, id, now);
         return (nextState, cmd);
     }
 

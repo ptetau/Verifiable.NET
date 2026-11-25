@@ -15,15 +15,30 @@
         <button @onclick="HandleAddAsync" disabled="@_state.IsSyncing">Add</button>
     </div>
 
-    <ul style="list-style: none; padding: 0;">
-        @foreach (var item in _state.Board.Items.Values.OrderBy(i => i.Id))
+    <div style="display: flex; gap: 0.4rem; margin-bottom: 1rem;">
+        @foreach (var f in new[] { "All", "Active", "Completed", "Deleted" })
         {
-            <li style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #e5e7eb;">
+            <button @onclick="() => _filter = f" disabled="@(_filter == f)">@f</button>
+        }
+    </div>
+
+    <ul style="list-style: none; padding: 0;">
+        @foreach (var item in FilteredItems())
+        {
+            <li style="display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #e5e7eb;">
                 <span>#@item.Id [@item.Status] @item.Title</span>
-                <span style="display: flex; gap: 0.4rem;">
+                <span style="display: flex; gap: 0.4rem; align-items: center;">
+                    @if (item.Status != TodoStatus.Deleted)
+                    {
+                        <button @onclick="() => BeginRename(item)" disabled="@_state.IsSyncing">Edit</button>
+                    }
                     @if (item.Status == TodoStatus.Active)
                     {
                         <button @onclick="() => HandleCompleteAsync(item.Id)" disabled="@_state.IsSyncing">Complete</button>
+                    }
+                    @if (item.Status == TodoStatus.Completed)
+                    {
+                        <button @onclick="() => HandleReopenAsync(item.Id)" disabled="@_state.IsSyncing">Reopen</button>
                     }
                     @if (item.Status != TodoStatus.Deleted)
                     {
@@ -33,11 +48,35 @@
             </li>
         }
     </ul>
+
+    @if (_editingId is { } editId)
+    {
+        <div style="display: flex; gap: 0.5rem; margin-top: 1rem; padding: 0.75rem; border: 1px solid #d1d5db;">
+            <span>Rename #@editId:</span>
+            <input @bind="_editingTitle" style="flex: 1; padding: 0.25rem;" />
+            <button @onclick="() => HandleRenameAsync(editId)" disabled="@_state.IsSyncing">Save</button>
+            <button @onclick="() => _editingId = null" disabled="@_state.IsSyncing">Cancel</button>
+        </div>
+    }
 </main>
 
 @code {
     private TodoUiState _state = TodoUiState.Initial();
     private string _newTitle = string.Empty;
+    private string _filter = "All";
+    private TodoId? _editingId;
+    private string _editingTitle = string.Empty;
+
+    private IEnumerable<TodoItem> FilteredItems() =>
+        _state.Board.Items.Values
+            .Where(i => _filter == "All" || i.Status.ToString() == _filter)
+            .OrderBy(i => i.Id);
+
+    private void BeginRename(TodoItem item)
+    {
+        _editingId = item.Id;
+        _editingTitle = item.Title.Value;
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -90,6 +129,45 @@
     private async Task HandleDeleteAsync(TodoId id)
     {
         var (nextState, cmd) = TodoUiEngine.OnSubmitDelete(
+            _state,
+            id,
+            CommandId.From(Guid.NewGuid()),
+            UnixTimestamp.From(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        _state = nextState;
+        var res = await Dispatcher.DispatchAsync(cmd);
+        _state = res.IsSuccess && _state.IsSyncing && _state.PendingCommandId == res.Value.CommandId
+            ? TodoUiEngine.OnCommitConfirmed(_state, res.Value)
+            : TodoUiEngine.OnCommitFailed(_state, res.IsSuccess ? "Mismatched receipt CommandId." : res.Error);
+    }
+
+    private async Task HandleRenameAsync(TodoId id)
+    {
+        var titleRes = TodoTitle.TryFrom(_editingTitle);
+        if (!titleRes.IsValid)
+        {
+            _state = TodoUiEngine.OnCommitFailed(_state, titleRes.Violations[0].Message);
+            return;
+        }
+
+        var (nextState, cmd) = TodoUiEngine.OnSubmitRename(
+            _state,
+            id,
+            titleRes.Value,
+            CommandId.From(Guid.NewGuid()),
+            UnixTimestamp.From(DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        _state = nextState;
+        _editingId = null;
+        var res = await Dispatcher.DispatchAsync(cmd);
+        _state = res.IsSuccess && _state.IsSyncing && _state.PendingCommandId == res.Value.CommandId
+            ? TodoUiEngine.OnCommitConfirmed(_state, res.Value)
+            : TodoUiEngine.OnCommitFailed(_state, res.IsSuccess ? "Mismatched receipt CommandId." : res.Error);
+    }
+
+    private async Task HandleReopenAsync(TodoId id)
+    {
+        var (nextState, cmd) = TodoUiEngine.OnSubmitReopen(
             _state,
             id,
             CommandId.From(Guid.NewGuid()),
