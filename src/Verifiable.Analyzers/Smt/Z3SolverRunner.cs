@@ -584,7 +584,7 @@ internal static class Z3SolverRunner
             _stdin.WriteLine($"(echo \"{DoneSentinel}\")");
             _stdin.Flush();
 
-            var hardWaitMs = timeoutMs + 2500;
+            var hardWaitMs = timeoutMs + 10000;
             var checkOutput = ReadUntilSentinel(DoneSentinel, hardWaitMs, out var timedOut);
             if (timedOut)
             {
