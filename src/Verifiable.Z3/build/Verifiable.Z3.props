@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <_VerifiableZ3Arch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)</_VerifiableZ3Arch>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('Windows')) and '$(_VerifiableZ3Arch)' == 'X64'">win-x64</_VerifiableZ3Rid>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('Windows')) and '$(_VerifiableZ3Arch)' == 'Arm64'">win-arm64</_VerifiableZ3Rid>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('Linux')) and '$(_VerifiableZ3Arch)' == 'X64'">linux-x64</_VerifiableZ3Rid>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('Linux')) and '$(_VerifiableZ3Arch)' == 'Arm64'">linux-arm64</_VerifiableZ3Rid>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('OSX')) and '$(_VerifiableZ3Arch)' == 'X64'">osx-x64</_VerifiableZ3Rid>
+    <_VerifiableZ3Rid Condition="$([MSBuild]::IsOSPlatform('OSX')) and '$(_VerifiableZ3Arch)' == 'Arm64'">osx-arm64</_VerifiableZ3Rid>
+    <_VerifiableZ3ExeName Condition="$([MSBuild]::IsOSPlatform('Windows'))">z3.exe</_VerifiableZ3ExeName>
+    <_VerifiableZ3ExeName Condition="!$([MSBuild]::IsOSPlatform('Windows'))">z3</_VerifiableZ3ExeName>
+    <_VerifiableZ3Candidate>$(MSBuildThisFileDirectory)..\tools\$(_VerifiableZ3Rid)\$(_VerifiableZ3ExeName)</_VerifiableZ3Candidate>
+    <VerifiableZ3Path Condition="'$(VerifiableZ3Path)' == '' and Exists('$(_VerifiableZ3Candidate)')">$([System.IO.Path]::GetFullPath('$(_VerifiableZ3Candidate)'))</VerifiableZ3Path>
+  </PropertyGroup>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="VerifiableZ3Path" />
+  </ItemGroup>
+</Project>

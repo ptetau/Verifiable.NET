@@ -18,6 +18,7 @@ TestResults/
 .galaxycheck/
 .tools/
 .verifiable/
+src/Verifiable.Z3/tools/
 
 # SQLite databases (generated during runs/tests)
 *.db

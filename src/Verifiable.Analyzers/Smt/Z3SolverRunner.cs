@@ -46,6 +46,7 @@ internal static class Z3SolverRunner
     private static readonly ConcurrentDictionary<string, SmtQueryResult> MemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SmtDetailedResult> DetailedMemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, byte> UnixChmodChecked = new(StringComparer.Ordinal);
 
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
     {
@@ -521,6 +522,7 @@ internal static class Z3SolverRunner
 
         public static Z3Worker Start(string z3Path)
         {
+            EnsureUnixExecutable(z3Path);
             var psi = new ProcessStartInfo
             {
                 FileName = z3Path,
@@ -538,6 +540,32 @@ internal static class Z3SolverRunner
             process.ErrorDataReceived += static (_, _) => { };
             process.BeginErrorReadLine();
             return new Z3Worker(process);
+        }
+
+        private static void EnsureUnixExecutable(string z3Path)
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !UnixChmodChecked.TryAdd(z3Path, 0))
+            {
+                return;
+            }
+
+            try
+            {
+                using var chmod = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "/bin/chmod",
+                    Arguments = $"+x \"{z3Path.Replace("\"", "\\\"")}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                });
+                chmod?.WaitForExit(2000);
+            }
+            catch
+            {
+                // Best-effort permission fix; Process.Start(z3Path) will surface any remaining execution error.
+            }
         }
 
         public SmtDetailedResult ExecuteDetailed(string scriptBody, string hash, int timeoutMs, bool produceUnsatCore, out bool shouldRecycle)

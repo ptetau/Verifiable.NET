@@ -1,0 +1,6 @@
+<Project>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="VerifiableZ3Path" />
+    <CompilerVisibleProperty Include="VerifiableAgent" />
+  </ItemGroup>
+</Project>

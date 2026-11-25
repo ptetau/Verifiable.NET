@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
@@ -15,7 +16,7 @@ env:
 jobs:
   verify:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -25,12 +26,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup .NET 9 & 10
+      - name: Setup .NET 8, 9, 10 & 11
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
+            8.0.x
             9.0.x
             10.0.x
+            11.0.x
 
       - name: Install Z3 (Linux)
         if: runner.os == 'Linux'
@@ -45,15 +48,93 @@ jobs:
         run: dotnet restore Verifiable.NET.sln
 
       - name: Build (Release + Z3 SMT Verification)
-        run: dotnet build Verifiable.NET.sln -c Release --no-restore
+        run: dotnet build Verifiable.NET.sln -c Release --no-restore -m:1
 
       - name: Test (GalaxyCheck + Roslyn + SQLite Fault Injection)
         run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
 
-      - name: Pack NuGet Packages
+  pack:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8, 9, 10 & 11
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+            11.0.x
+
+      - name: Stage Z3 Binaries for Verifiable.Z3
+        run: bash scripts/prepare-z3-nupkg.sh
+
+      - name: Restore & Build Release
+        run: |
+          dotnet restore Verifiable.NET.sln
+          dotnet build Verifiable.NET.sln -c Release --no-restore -m:1
+
+      - name: Pack All NuGet Packages
         run: |
           dotnet pack src/Verifiable.Contracts/Verifiable.Contracts.csproj -c Release --no-build -o artifacts/nupkg
           dotnet pack src/Verifiable.Generators/Verifiable.Generators.csproj -c Release --no-build -o artifacts/nupkg
           dotnet pack src/Verifiable.Analyzers/Verifiable.Analyzers.csproj -c Release --no-build -o artifacts/nupkg
           dotnet pack src/Verifiable.CodeFixes/Verifiable.CodeFixes.csproj -c Release --no-build -o artifacts/nupkg
           dotnet pack src/Verifiable.Testing/Verifiable.Testing.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.Query/Verifiable.Query.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.Z3/Verifiable.Z3.csproj -c Release --no-build -o artifacts/nupkg
+          dotnet pack src/Verifiable.NET/Verifiable.NET.csproj -c Release --no-build -o artifacts/nupkg
+
+      - name: Smoke Test Verifiable.NET NuGet Package (.NET 8, 9, 10, 11)
+        run: |
+          set -euo pipefail
+          FEED="$PWD/artifacts/nupkg"
+          for tfm in net8.0 net9.0 net10.0 net11.0; do
+            echo "==> Smoke testing Verifiable.NET on $tfm"
+            TMP="$(mktemp -d)"
+            (
+              cd "$TMP"
+              dotnet new classlib -n SmokeApp -o . >/dev/null
+              sed -i "s|<TargetFramework>.*</TargetFramework>|<TargetFramework>$tfm</TargetFramework>|" SmokeApp.csproj
+              cat > nuget.config <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="local" value="$FEED" />
+            </packageSources>
+          </configuration>
+          EOF
+              dotnet add package Verifiable.NET --version 0.1.0 >/dev/null
+              cat > Class1.cs <<'EOF'
+          using Verifiable.Contracts;
+          [assembly: Verifiable]
+          namespace SmokeApp;
+          [TypeAlias<decimal>("Amount must be positive.")]
+          public readonly partial record struct PositiveAmount { public static bool IsValid(decimal value) => value > 0m; }
+          public static class Ledger
+          {
+              public static decimal Withdraw(decimal balance, PositiveAmount amount)
+              {
+                  Spec.Requires(balance >= amount, "Cannot overdraw.");
+                  Spec.Ensures<decimal>(r => r >= 0m, "Balance stays non-negative.");
+                  return balance - amount;
+              }
+          }
+          EOF
+              dotnet build -c Release --no-restore
+            )
+            rm -rf "$TMP"
+          done
+
+      - name: Upload NuGet Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: artifacts/nupkg/*.nupkg
+          if-no-files-found: error
