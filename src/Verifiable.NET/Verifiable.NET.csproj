@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '9.0'))">$(TargetFrameworks);net9.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '10.0'))">$(TargetFrameworks);net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '11.0'))">$(TargetFrameworks);net11.0</TargetFrameworks>
+    <PackageId>Verifiable.NET</PackageId>
+    <Description>All-in-one Verifiable.NET package: contracts, Roslyn source generators, compile-time Gatekeeper &amp; Z3 SMT prover analyzers, and CodeFix providers.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeVerifiableContractsInPackage</TargetsForTfmSpecificContentInPackage>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Verifiable.Contracts\Verifiable.Contracts.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Verifiable.Generators\Verifiable.Generators.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+    <ProjectReference Include="..\Verifiable.Analyzers\Verifiable.Analyzers.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+    <ProjectReference Include="..\Verifiable.CodeFixes\Verifiable.CodeFixes.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+    <ProjectReference Include="..\Verifiable.Z3\Verifiable.Z3.csproj"
+                      PrivateAssets="none"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Verifiable.Generators\bin\$(Configuration)\netstandard2.0\Verifiable.Generators.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="..\Verifiable.Analyzers\bin\$(Configuration)\netstandard2.0\Verifiable.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="..\Verifiable.CodeFixes\bin\$(Configuration)\netstandard2.0\Verifiable.CodeFixes.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="build\Verifiable.NET.props" Pack="true" PackagePath="build\Verifiable.NET.props" />
+    <None Include="build\Verifiable.NET.props" Pack="true" PackagePath="buildTransitive\Verifiable.NET.props" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="IncludeVerifiableContractsInPackage">
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="..\Verifiable.Contracts\bin\$(Configuration)\$(TargetFramework)\Verifiable.Contracts.dll">
+        <PackagePath>lib/$(TargetFramework)</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="..\Verifiable.Contracts\bin\$(Configuration)\$(TargetFramework)\Verifiable.Contracts.xml"
+                              Condition="Exists('..\Verifiable.Contracts\bin\$(Configuration)\$(TargetFramework)\Verifiable.Contracts.xml')">
+        <PackagePath>lib/$(TargetFramework)</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
+
+</Project>

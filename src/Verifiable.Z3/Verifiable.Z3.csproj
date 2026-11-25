@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <PackageId>Verifiable.Z3</PackageId>
+    <Description>Standalone Z3 SMT solver binaries (win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, osx-arm64) for Verifiable.NET compile-time verification.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoPackageAnalysis>true</NoPackageAnalysis>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="build\Verifiable.Z3.props" Pack="true" PackagePath="build\Verifiable.Z3.props" />
+    <None Include="build\Verifiable.Z3.props" Pack="true" PackagePath="buildTransitive\Verifiable.Z3.props" />
+    <None Include="tools\**\*" Pack="true" PackagePath="tools\" Visible="false" Condition="Exists('tools')" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

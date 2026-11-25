@@ -1,0 +1,185 @@
+name: Release NuGet Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'NuGet package version (e.g. 0.2.0). Defaults to tag or 0.1.0.'
+        required: false
+        type: string
+      publish_nuget:
+        description: 'Push packages to NuGet.org (requires NUGET_API_KEY secret)'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  VERIFIABLE_AGENT: "1"
+  GALAXYCHECK_AGENT: "1"
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8, 9, 10 & 11
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+            11.0.x
+
+      - name: Install Z3 (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/install-z3.sh
+
+      - name: Install Z3 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
+
+      - name: Build & Test
+        run: |
+          dotnet restore Verifiable.NET.sln
+          dotnet build Verifiable.NET.sln -c Release --no-restore -m:1
+          dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8, 9, 10 & 11
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+            11.0.x
+
+      - name: Resolve Package Version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            PKG_VER="${{ inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PKG_VER="${GITHUB_REF_NAME#v}"
+          else
+            PKG_VER="0.1.0"
+          fi
+          echo "package_version=$PKG_VER" >> "$GITHUB_OUTPUT"
+          echo "Resolved NuGet package version: $PKG_VER"
+
+      - name: Stage Z3 Binaries for Verifiable.Z3
+        run: bash scripts/prepare-z3-nupkg.sh
+
+      - name: Build & Pack All NuGet Packages
+        env:
+          PKG_VER: ${{ steps.version.outputs.package_version }}
+        run: |
+          dotnet restore Verifiable.NET.sln
+          dotnet build Verifiable.NET.sln -c Release --no-restore -m:1 -p:Version="$PKG_VER"
+          dotnet pack src/Verifiable.Contracts/Verifiable.Contracts.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.Generators/Verifiable.Generators.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.Analyzers/Verifiable.Analyzers.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.CodeFixes/Verifiable.CodeFixes.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.Testing/Verifiable.Testing.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.Query/Verifiable.Query.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.Z3/Verifiable.Z3.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+          dotnet pack src/Verifiable.NET/Verifiable.NET.csproj -c Release --no-build -p:Version="$PKG_VER" -o artifacts/nupkg
+
+      - name: Smoke Test Verifiable.NET NuGet Package (.NET 8, 9, 10, 11)
+        env:
+          PKG_VER: ${{ steps.version.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          FEED="$PWD/artifacts/nupkg"
+          for tfm in net8.0 net9.0 net10.0 net11.0; do
+            echo "==> Smoke testing Verifiable.NET $PKG_VER on $tfm"
+            TMP="$(mktemp -d)"
+            (
+              cd "$TMP"
+              dotnet new classlib -n SmokeApp -o . >/dev/null
+              sed -i "s|<TargetFramework>.*</TargetFramework>|<TargetFramework>$tfm</TargetFramework>|" SmokeApp.csproj
+              cat > nuget.config <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="local" value="$FEED" />
+            </packageSources>
+          </configuration>
+          EOF
+              dotnet add package Verifiable.NET --version "$PKG_VER" >/dev/null
+              cat > Class1.cs <<'EOF'
+          using Verifiable.Contracts;
+          [assembly: Verifiable]
+          namespace SmokeApp;
+          [TypeAlias<decimal>("Amount must be positive.")]
+          public readonly partial record struct PositiveAmount { public static bool IsValid(decimal value) => value > 0m; }
+          public static class Ledger
+          {
+              public static decimal Withdraw(decimal balance, PositiveAmount amount)
+              {
+                  Spec.Requires(balance >= amount, "Cannot overdraw.");
+                  Spec.Ensures<decimal>(r => r >= 0m, "Balance stays non-negative.");
+                  return balance - amount;
+              }
+          }
+          EOF
+              dotnet build -c Release --no-restore
+            )
+            rm -rf "$TMP"
+          done
+
+      - name: Upload NuGet Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages-${{ steps.version.outputs.package_version }}
+          path: artifacts/nupkg/*.nupkg
+          if-no-files-found: error
+
+      - name: Publish to NuGet.org
+        if: inputs.publish_nuget != false
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::warning::NUGET_API_KEY secret is not configured; skipping NuGet.org push."
+            exit 0
+          fi
+          dotnet nuget push "artifacts/nupkg/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/nupkg/*.nupkg
+          generate_release_notes: true

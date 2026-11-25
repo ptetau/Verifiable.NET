@@ -114,7 +114,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                                 z3Loc,
                                 "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped.",
                                 explanation: "Checked `VERIFIABLE_Z3_PATH`, `.tools/z3`, `~/.verifiable/z3`, and `PATH`.",
-                                fixHint: "Run `scripts/install-z3.ps1` (Windows) or `scripts/install-z3.sh` (Linux/macOS), or set `VERIFIABLE_Z3_PATH`.");
+                                fixHint: "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.");
                             opCtx.ReportDiagnostic(Diagnostic.Create(
                                 VerifiableDescriptors.Z3SolverUnavailable,
                                 z3Loc,
