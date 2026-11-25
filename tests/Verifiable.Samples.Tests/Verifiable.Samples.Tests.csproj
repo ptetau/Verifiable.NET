@@ -29,6 +29,7 @@
     <ProjectReference Include="..\..\samples\AccountingApp\AccountingApp.Server\AccountingApp.Server.csproj">
       <Aliases>AccountingSrv</Aliases>
     </ProjectReference>
+    <ProjectReference Include="..\..\samples\InventoryPricing\InventoryPricing.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1583,14 +1583,14 @@ internal sealed class CfgSsaLowerer
             }
             if (field.HasConstantValue && field.ConstantValue is not null)
             {
-                if (field.ConstantValue is int iv) return new SmtTypedTerm(_translator.FormatIntLiteral(iv, 32), field.Type);
-                if (field.ConstantValue is long lv) return new SmtTypedTerm(_translator.FormatLongLiteral(lv), field.Type);
-                if (field.ConstantValue is decimal dv) return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), field.Type);
                 if (field.Type.TypeKind == TypeKind.Enum)
                 {
                     var num = Convert.ToInt64(field.ConstantValue, CultureInfo.InvariantCulture);
                     return new SmtTypedTerm(num < 0 ? $"(- {-num})" : num.ToString(CultureInfo.InvariantCulture), field.Type);
                 }
+                if (field.ConstantValue is int iv) return new SmtTypedTerm(_translator.FormatIntLiteral(iv, 32), field.Type);
+                if (field.ConstantValue is long lv) return new SmtTypedTerm(_translator.FormatLongLiteral(lv), field.Type);
+                if (field.ConstantValue is decimal dv) return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), field.Type);
             }
             if (field.ContainingType?.OriginalDefinition.ToDisplayString() == "Verifiable.Contracts.Unit" && field.Name == "Value")
             {

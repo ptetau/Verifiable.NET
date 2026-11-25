@@ -356,4 +356,30 @@ public sealed class QueryTests
                 && falseReport.Results.Count == 1
                 && falseReport.Results[0].Counterexamples.Count == 1;
         });
+
+    [Fact]
+    public void InventoryPricing_CheckInvariant_PriceBreakdownConsistent_ProvesPriceCart()
+    {
+        var repo = FindRepoRoot();
+        var csproj = Path.Combine(repo, "samples", "InventoryPricing", "InventoryPricing.csproj");
+
+        var (code, stdout, stderr) = RunCli([
+            "check-invariant",
+            "--project", csproj,
+            "--type", "PriceBreakdown",
+            "--expr", "p => p.GrandTotalCents == p.SubtotalCents - p.DiscountCents + p.TaxCents && p.DiscountCents <= p.SubtotalCents",
+            "--format", "json"
+        ]);
+
+        Assert.Equal(0, code);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), $"Unexpected stderr: {stderr}");
+
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        Assert.Equal("proved", root.GetProperty("status").GetString());
+        Assert.Contains(
+            root.GetProperty("results").EnumerateArray(),
+            r => r.GetProperty("method").GetString() == "PricingEngine.PriceCart"
+              && r.GetProperty("status").GetString() == "proved");
+    }
 }
