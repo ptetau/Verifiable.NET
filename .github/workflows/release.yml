@@ -11,14 +11,18 @@ on:
         required: false
         type: string
       publish_nuget:
-        description: 'Push packages to NuGet.org (requires NUGET_API_KEY secret)'
+        description: 'Push packages to NuGet.org (via Trusted Publishing NUGET_USER or NUGET_API_KEY)'
         required: false
         default: true
         type: boolean
+      nuget_user:
+        description: 'NuGet.org username (profile name) for Trusted Publishing. Defaults to NUGET_USER variable/secret.'
+        required: false
+        type: string
 
 permissions:
   contents: write
-
+  id-token: write
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
@@ -65,6 +69,9 @@ jobs:
   publish:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -163,13 +170,20 @@ jobs:
           path: artifacts/nupkg/*.nupkg
           if-no-files-found: error
 
+      - name: NuGet login (OIDC -> temp API key)
+        if: inputs.publish_nuget != false && (inputs.nuget_user != '' || vars.NUGET_USER != '' || secrets.NUGET_USER != '')
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ inputs.nuget_user || vars.NUGET_USER || secrets.NUGET_USER }}
+
       - name: Publish to NuGet.org
         if: inputs.publish_nuget != false
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
         run: |
           if [ -z "$NUGET_API_KEY" ]; then
-            echo "::warning::NUGET_API_KEY secret is not configured; skipping NuGet.org push."
+            echo "::warning::Configure NUGET_USER (variable/secret for Trusted Publishing) or NUGET_API_KEY; skipping NuGet.org push."
             exit 0
           fi
           dotnet nuget push "artifacts/nupkg/*.nupkg" \
