@@ -210,10 +210,13 @@ Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xu
 
 ## Working Sample Applications
 
-| Sample | Shared Core | Client & Server | What It Demonstrates |
+See [**`samples/README.md`**](samples/README.md) for a cross-sample pattern matrix, runnable `verifiable-query` commands, and bug counterexamples.
+
+| Sample | Core Library | Client & Server | What It Demonstrates |
 | --- | --- | --- | --- |
-| **TodoApp** | [`samples/TodoApp/TodoApp.Shared`](samples/TodoApp/TodoApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | `[assembly: Verifiable]`, constrained types with spirit messages, MVU state transitions, `[InboundPort]` HTTP validation, `[MustConsume]` obligations, idempotent SQLite persistence. |
-| **AccountingApp** | [`samples/AccountingApp/AccountingApp.Shared`](samples/AccountingApp/AccountingApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | Double-entry ledger where `TotalDebits == TotalCredits` is proved by Z3 across multi-line entries (`Spec.LoopInvariant` / `Spec.Decreases`), transfers, and reversals. |
+| [**TodoApp**](samples/TodoApp/README.md) | [`samples/TodoApp/TodoApp.Shared`](samples/TodoApp/TodoApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | `[assembly: Verifiable]`, constrained types with spirit messages, MVU state transitions, `[InboundPort]` validation (`Add`/`Complete`/`Delete`/`Rename`/`Reopen`), `Spec.LoopInvariant` + `Spec.Decreases`, `[MustConsume]` obligations, idempotent SQLite persistence. |
+| [**AccountingApp**](samples/AccountingApp/README.md) | [`samples/AccountingApp/AccountingApp.Shared`](samples/AccountingApp/AccountingApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | Double-entry ledger where `TotalDebits == TotalCredits` is proved by Z3 across multi-line entries (`Spec.LoopInvariant` / `Spec.Decreases`), 2-leg and 3-leg fee-split transfers, trial balance computation, and reversals. |
+| [**InventoryPricing**](samples/InventoryPricing/README.md) | [`samples/InventoryPricing`](samples/InventoryPricing) | Pure domain library | `[CheckedArithmetic]` 32-bit BitVec overflow/underflow proofs, `WarehouseBin.ReadUnchecked` fixed-buffer bounds, `BasisPoints` share bounds, and `Result<T, PricingError>` cart pricing loops. |
 
 ---
 

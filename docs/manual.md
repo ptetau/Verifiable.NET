@@ -264,3 +264,13 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |
 
 For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds.
+
+---
+
+## 11. Worked Samples
+
+See [**`samples/README.md`**](../samples/README.md) for full walkthroughs, GalaxyCheck property suites, SQLite crash/replay tests, `verifiable-query` proof outputs, and real bug counterexamples across:
+
+- [**TodoApp**](../samples/TodoApp/README.md) — workflow state machine, `[MustConsume]` UI/API/SQLite protocol, and `CountItemsByStatus` loop proof.
+- [**AccountingApp**](../samples/AccountingApp/README.md) — double-entry ledger, 3-leg fee splits, `ComputeTrialBalance`, and entry reversals.
+- [**InventoryPricing**](../samples/InventoryPricing/README.md) — `[CheckedArithmetic]` BitVec overflow/underflow proofs, `BasisPoints` share bounds, and `WarehouseBin.ReadUnchecked`.
