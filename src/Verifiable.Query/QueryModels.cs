@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
+using Verifiable.Contracts;
 
 namespace Verifiable.Query;
 
@@ -22,6 +23,16 @@ public enum QueryOutcomeStatus
 
     /// <summary>Z3 SMT solver binary could not be discovered (exit code 4).</summary>
     Z3NotFound = 4
+}
+
+/// <summary>
+/// Validated per-path Z3 solver timeout in milliseconds.
+/// </summary>
+[TypeAlias<int>("Z3 query timeout in milliseconds must be strictly positive (1..600000).")]
+public readonly partial record struct QueryTimeoutMs
+{
+    /// <summary>Validates that a solver timeout falls within [1, 600000] milliseconds.</summary>
+    public static bool IsValid(int value) => value >= 1 && value <= 600_000;
 }
 
 /// <summary>

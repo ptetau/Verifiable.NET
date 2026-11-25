@@ -34,4 +34,9 @@
     <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Analyzer Include="..\Verifiable.Generators\bin\$(Configuration)\netstandard2.0\Verifiable.Generators.dll" />
+    <Analyzer Include="..\Verifiable.Analyzers\bin\$(Configuration)\netstandard2.0\Verifiable.Analyzers.dll" />
+  </ItemGroup>
+
 </Project>

@@ -15,6 +15,18 @@
   <ItemGroup>
     <ProjectReference Include="..\Verifiable.Contracts\Verifiable.Contracts.csproj" />
     <ProjectReference Include="..\..\external\GalaxyCheck\src\GalaxyCheck\GalaxyCheck.csproj" />
+    <ProjectReference Include="..\Verifiable.Generators\Verifiable.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+    <ProjectReference Include="..\Verifiable.Analyzers\Verifiable.Analyzers.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
   </ItemGroup>
 
   <ItemGroup>

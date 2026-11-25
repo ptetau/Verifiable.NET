@@ -275,6 +275,11 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
             case IAssignmentOperation assign when !assign.IsImplicit:
                 if (assign.Target is IMemberReferenceOperation memberTarget && !IsInsideObjectOrWithInitializer(assign))
                 {
+                    if (IsConstructorImmutableMemberInit(context.OwningSymbol, memberTarget))
+                    {
+                        break;
+                    }
+
                     if (memberTarget.Member is IFieldSymbol fs && fs.IsStatic && !fs.IsReadOnly && !fs.IsConst)
                     {
                         context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -295,6 +300,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     }
                 }
                 break;
+
 
             case IArrayCreationOperation arrCreate:
                 if (!(arrCreate.IsImplicit && arrCreate.Parent is IArgumentOperation { Parameter.IsParams: true }))
@@ -501,6 +507,25 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 break;
         }
+    }
+    private static bool IsConstructorImmutableMemberInit(ISymbol owningSymbol, IMemberReferenceOperation memberTarget)
+    {
+        if (owningSymbol is not IMethodSymbol { MethodKind: MethodKind.Constructor })
+        {
+            return false;
+        }
+
+        if (memberTarget.Instance is not IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance })
+        {
+            return false;
+        }
+
+        return memberTarget.Member switch
+        {
+            IFieldSymbol fs => fs.IsReadOnly,
+            IPropertySymbol ps => ps.SetMethod is null || ps.SetMethod.IsInitOnly,
+            _ => false
+        };
     }
 
     private static bool LoopHasSpecAnnotation(IOperation body)

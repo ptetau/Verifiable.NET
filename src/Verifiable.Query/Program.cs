@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Verifiable.Contracts;
 
 namespace Verifiable.Query;
 
@@ -89,7 +90,7 @@ public static class Program
                 $"Unknown subcommand `{args[0]}`.", Location.None,
                 "Use `ask`, `check-invariant`, or `list` (run `verifiable-query --help`).");
             stderr.WriteLine(QueryFormatter.FormatReport(errReport, "elm", agentMode, false));
-            return (int)QueryOutcomeStatus.Error;
+            return ResolveExitCode(QueryOutcomeStatus.Error);
         }
 
         string? project = null;
@@ -102,7 +103,7 @@ public static class Program
         string? assumeExpr = null;
         string? because = null;
         var format = "elm";
-        var timeoutMs = 5000;
+        var timeoutMs = NormalizeTimeoutMs(5000);
         string? z3Path = null;
         var verbose = false;
 
@@ -128,7 +129,7 @@ public static class Program
                 case "--because": because = NextVal(); break;
                 case "--format": format = NextVal() ?? "elm"; break;
                 case "--timeout":
-                    if (int.TryParse(NextVal(), out var ms) && ms > 0) timeoutMs = ms;
+                    if (int.TryParse(NextVal(), out var ms) && ms > 0) timeoutMs = NormalizeTimeoutMs(ms);
                     break;
                 case "--z3": z3Path = NextVal(); break;
                 case "--verbose": verbose = true; break;
@@ -139,7 +140,7 @@ public static class Program
                         "UNKNOWN OPTION", $"Unrecognized option `{flag}`.", Location.None,
                         "Run `verifiable-query --help` to see supported options.");
                     WriteOutput(command, uErr, format, agentMode, verbose, stdout, stderr);
-                    return (int)QueryOutcomeStatus.Error;
+                    return ResolveExitCode(QueryOutcomeStatus.Error);
             }
         }
 
@@ -158,7 +159,7 @@ public static class Program
                 "FAILED TO LOAD SOURCES", loadResult.ErrorMessage ?? "Could not load C# sources.",
                 Location.None, "Check `--project`, `--file`, or `--stdin` arguments.");
             WriteOutput(command, lErr, format, agentMode, verbose, stdout, stderr);
-            return (int)QueryOutcomeStatus.Error;
+            return ResolveExitCode(QueryOutcomeStatus.Error);
         }
 
         if (loadResult.CompilationErrors.Count > 0)
@@ -171,7 +172,7 @@ public static class Program
                 "SOURCE COMPILATION ERROR", msg, first.Location,
                 "Fix the C# compiler errors in the target sources before running queries.");
             WriteOutput(command, cErr, format, agentMode, verbose, stdout, stderr);
-            return (int)QueryOutcomeStatus.Error;
+            return ResolveExitCode(QueryOutcomeStatus.Error);
         }
 
         var compilation = loadResult.Compilation;
@@ -195,12 +196,12 @@ public static class Program
                     Location.None,
                     "Example: verifiable-query check-invariant --project App.csproj --type LedgerState --expr \"s => s.TotalDebits == s.TotalCredits\"");
                 WriteOutput(command, mErr, format, agentMode, verbose, stdout, stderr);
-                return (int)QueryOutcomeStatus.Error;
+                return ResolveExitCode(QueryOutcomeStatus.Error);
             }
 
             var report = QueryEngine.CheckInvariant(compilation, typeName!, assertExpr!, assumeExpr, because, z3Path, timeoutMs);
             WriteOutput(command, report, format, agentMode, verbose, stdout, stderr);
-            return (int)report.Status;
+            return ResolveExitCode(report.Status);
         }
 
         // command == "ask"
@@ -214,14 +215,37 @@ public static class Program
                 Location.None,
                 "Example: verifiable-query ask --project App.csproj --target LedgerEngine.PostTransfer --assert \"result.State.TotalDebits == result.State.TotalCredits\"");
             WriteOutput(command, aErr, format, agentMode, verbose, stdout, stderr);
-            return (int)QueryOutcomeStatus.Error;
+            return ResolveExitCode(QueryOutcomeStatus.Error);
         }
 
         var askReport = QueryEngine.Ask(compilation, target, all, assertExpr!, assumeExpr, because, z3Path, timeoutMs);
         WriteOutput(command, askReport, format, agentMode, verbose, stdout, stderr);
-        return (int)askReport.Status;
+        return ResolveExitCode(askReport.Status);
     }
 
+
+    [Verifiable]
+    internal static QueryTimeoutMs NormalizeTimeoutMs(int requestedMs)
+    {
+        if (requestedMs < 1) return QueryTimeoutMs.From(5000);
+        if (requestedMs > 600_000) return QueryTimeoutMs.From(600_000);
+        return QueryTimeoutMs.From(requestedMs);
+    }
+
+    [Verifiable]
+    internal static int ResolveExitCode(QueryOutcomeStatus status)
+    {
+        Spec.Ensures<int>(
+            result => result >= 0 && result <= 4,
+            "verifiable-query exit codes must be in 0..4.");
+
+        if (status == QueryOutcomeStatus.Proved) return 0;
+        if (status == QueryOutcomeStatus.Refuted) return 1;
+        if (status == QueryOutcomeStatus.Inconclusive) return 2;
+        if (status == QueryOutcomeStatus.Error) return 3;
+        if (status == QueryOutcomeStatus.Z3NotFound) return 4;
+        return 3;
+    }
     private static void WriteOutput(
         string command,
         QueryReport report,
