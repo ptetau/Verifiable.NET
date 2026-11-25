@@ -49,3 +49,12 @@ All test suites use **GalaxyCheck** (`https://github.com/ptetau/galactic-heck`) 
 - Stateful differential + fault-injected SQLite persistence properties (`DifferentialPersistenceProperty.Create`, `FaultInjectedSqliteHarness`) testing `PreCommitCrash`, `PostCommitCrashBeforeAck`, and `DuplicateDelivery` against WAL SQLite and append-only journal replay.
 
 For full GalaxyCheck agent documentation, see `external/galactic-heck/docs/agents.md` and `external/galactic-heck/docs/llms.txt`.
+
+## 4. `Verifiable.Query` CLI Agent Schema
+
+`Verifiable.Query` (`verifiable-query`, pure .NET Core) exposes `ask`, `check-invariant`, and `list` over `--project`, `--file`, or `--stdin`.
+
+- **Exit codes**: `0` proved, `1` refuted, `2` inconclusive, `3` usage/compilation/binding error, `4` Z3 not found.
+- **`--format json`** writes structured JSON to stdout; **`--format elm` + `VERIFIABLE_AGENT=1`** appends `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` on `list`):
+  - Top-level fields: `command`, `status` (`"proved" | "refuted" | "inconclusive" | "error" | "z3_not_found"`), `exitCode`, `claim`, optional `assume`, `because`, `targetType`, `error`, `fix`, and `results[]`.
+  - Per-method fields: `method`, `returnType`, `status`, `vacuous`, `pathsChecked`, `smtHash`, `reasons[]` (`{kind, label, spirit?, file?, line?}` from Z3 unsat core), `counterexamples[]` (`{file, line, values}`), optional `error`, `hint`.

@@ -97,3 +97,14 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `Verifiable.Analyzers` (Gatekeeper, Linear Types, Z3 SMT prover)
 - `Verifiable.CodeFixes` (Incremental refactorings for `[VerifiableCandidate]`)
 - `Verifiable.Testing` (GalaxyCheck stateful & crash/replay harnesses)
+- `Verifiable.Query` (`net10.0` pure .NET Core CLI tool `verifiable-query`)
+
+## 6. Query CLI (`Verifiable.Query` / `verifiable-query`)
+
+Ask typed C# questions about `[Verifiable]` code and get Z3 unsat-core explanations ("why") or counterexamples ("why not"):
+- `dotnet run --project src/Verifiable.Query -c Release -- ask --project App.csproj --target Type.Method --assert "result.X == 0" [--assume "cond"] [--because "why"]`
+- `dotnet run --project src/Verifiable.Query -c Release -- check-invariant --project App.csproj --type StateType --expr "s => s.TotalDebits == s.TotalCredits"`
+- `dotnet run --project src/Verifiable.Query -c Release -- list --project App.csproj` (also supports `--file <a.cs>` and `--stdin`)
+- Flags: `--format elm|json`, `--timeout <ms>`, `--z3 <path>`, `--all`, `--verbose`
+- Exit codes: `0`=proved, `1`=refuted, `2`=inconclusive, `3`=error/unbound claim, `4`=Z3 missing
+- Under `VERIFIABLE_AGENT=1`, emits single-line `<verifiable-query-result>{...}</verifiable-query-result>` with `reasons[]` (unsat-core rules + spirit strings + `file:line`), `vacuous`, and `counterexamples[]`.

@@ -136,6 +136,30 @@ You do not have to rewrite everything at once:
 
 ---
 
+### 7. "Ask whether a business rule holds (e.g., credits == debits)—and see *why* or *why not*"
+
+Sometimes you want to ask an interactive question about your domain—without editing source files to add a new contract first. `Verifiable.Query` (`verifiable-query`) is a pure **.NET Core** CLI tool built on the same Roslyn + Z3 prover:
+
+```powershell
+# Ask across every method producing LedgerState whether debits always equal credits
+dotnet run --project src/Verifiable.Query -c Release -- check-invariant `
+  --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj `
+  --type LedgerState `
+  --expr "s => s.TotalDebits == s.TotalCredits"
+
+# Ask why a specific transfer preserves balance
+dotnet run --project src/Verifiable.Query -c Release -- ask `
+  --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj `
+  --target LedgerEngine.PostTransfer `
+  --assert "result.State.TotalDebits == result.State.TotalCredits"
+```
+
+- **If it holds:** Z3 returns the minimal proof core (`-- QUERY HOLDS`), listing the exact `[Invariant]`, `[TypeAlias<T>]`, and `Spec.*` rules responsible—along with their `file:line` and plain-English spirit strings.
+- **If it fails:** Z3 returns `-- QUERY REFUTED` with a concrete counterexample (`from = ...`, `amount = ...`, `result = ...`) and the exact `return` line where it happens.
+- **Agent-friendly:** Add `--format json` or set `VERIFIABLE_AGENT=1` for single-line `<verifiable-query-result>{...}</verifiable-query-result>` output and deterministic exit codes (`0` holds, `1` refuted, `2` inconclusive, `3` expression/load error, `4` Z3 missing).
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -180,6 +204,7 @@ Verifiable.NET uses **GalaxyCheck** (`external/galactic-heck`, via `GalaxyCheck.
 | `Verifiable.Analyzers` | Gatekeeper (`VER001`–`VER006`), linear obligation checker (`VER007`), and Z3 proof engine (`VER101`–`VER104`) with Elm-style diagnostics. |
 | `Verifiable.CodeFixes` | Automated IDE/Roslyn refactorings for `[VerifiableCandidate]` migration. |
 | `Verifiable.Testing` | Deterministic state-machine drivers and fault-injected persistence test helpers. |
+| `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`) for asking ad-hoc `ask`, `check-invariant`, and `list` verification queries with Z3 unsat-core explanations. |
 
 ---
 

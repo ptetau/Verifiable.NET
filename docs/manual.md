@@ -207,7 +207,45 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 
 ---
 
-## 9. Diagnostic Reference (`VER001`–`VER202`)
+## 9. Asking Formal Questions (`Verifiable.Query` / `verifiable-query`)
+
+**Problem:** You want to verify a domain hypothesis right now (for example *"does every ledger transition preserve `TotalDebits == TotalCredits`?"*), check why a property holds, or test a `--assume` hypothesis without modifying your source files.
+
+**Solution:** Use `Verifiable.Query` (`verifiable-query`, a pure `.NET Core` CLI requiring only .NET + Z3):
+
+- **Check a single method (`ask`):**
+  ```bash
+  dotnet run --project src/Verifiable.Query -c Release -- ask \
+    --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj \
+    --target LedgerEngine.PostTransfer \
+    --assume "result.IsSuccess" \
+    --assert "result.State.TotalDebits > state.TotalDebits"
+  ```
+- **Verify an invariant across every method returning a type (`check-invariant`):**
+  ```bash
+  dotnet run --project src/Verifiable.Query -c Release -- check-invariant \
+    --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj \
+    --type LedgerState \
+    --expr "s => s.TotalDebits == s.TotalCredits"
+  ```
+- **Inspect available types, `[Invariant]` members, and `[Verifiable]` methods (`list`):**
+  ```bash
+  dotnet run --project src/Verifiable.Query -c Release -- list \
+    --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj
+  ```
+- **Query quick snippets from stdin (`--stdin`) or standalone `.cs` files (`--file`):**
+  Pipe C# directly into `--stdin`, or pass `--file FileA.cs --file FileB.cs`.
+- **Exit codes & machine output:**
+  - `0` — Claim proved across all reachable paths (Z3 unsat core lists exact `[Invariant]` / `[TypeAlias<T>]` / `Spec.Requires` rules and spirit strings; flags vacuous proofs if premises are unreachable).
+  - `1` — Refuted (concrete counterexample + `file:line`).
+  - `2` — Inconclusive (solver timeout/unknown).
+  - `3` — Input/compilation error or unbound query expression (lists variables and properties in scope).
+  - `4` — Z3 binary not found (`VERIFIABLE_Z3_PATH` / `scripts/install-z3.*`).
+  Pass `--format json` for pure JSON, or set `VERIFIABLE_AGENT=1` with default `--format elm` to append `<verifiable-query-result>{...}</verifiable-query-result>`.
+
+---
+
+## 10. Diagnostic Reference (`VER001`–`VER202`)
 
 | Code | Banner Title | What Happened & Typical Fix |
 | --- | --- | --- |

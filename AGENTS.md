@@ -45,6 +45,14 @@ Every Verifiable diagnostic uses an Elm-style layout (`-- TITLE ---- File.cs`, s
 ### GalaxyCheck Property Failure
 Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` JSON block with `counterexample`, `csharp`, `replay`, `seed`, and an exact `rerun` command. See `docs/agents.md` and `external/galactic-heck/docs/agents.md` for full schemas.
 
+### Interactive Verification Query CLI (`Verifiable.Query`)
+Run pure .NET Core formal queries without modifying source files (`verifiable-query` or `dotnet run --project src/Verifiable.Query -c Release -- ...`):
+- `ask --project <p> --target <Type.Method|Type> --assert <expr> [--assume <expr>] [--because <text>]`
+- `check-invariant --project <p> --type <TypeName> --expr <lambda> [--assume <expr>]`
+- `list --project <p>` (or `--file` / `--stdin`)
+
+Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=load/bind error, `4`=Z3 missing). With `--format json`, pure JSON is emitted; with `--format elm` + `VERIFIABLE_AGENT=1`, Elm output includes a single-line `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` for `list`).
+
 ## 4. Incremental Migration Workflow (`[VerifiableCandidate]`)
 
 1. Annotate a legacy assembly, class, or method with `[VerifiableCandidate]` (emits Warnings, never breaks build).
