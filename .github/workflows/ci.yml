@@ -14,13 +14,35 @@ env:
   GALAXYCHECK_AGENT: "1"
 
 jobs:
-  verify:
-    runs-on: ${{ matrix.os }}
+  verify-linux:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:11.0
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    env:
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Z3 & Archive Tools
+        run: |
+          command -v unzip >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends unzip)
+          bash scripts/install-z3.sh
+
+      - name: Restore
+        run: dotnet restore Verifiable.NET.sln
+
+      - name: Build (Release + Z3 SMT Verification)
+        run: dotnet build Verifiable.NET.sln -c Release --no-restore -m:1
+
+      - name: Test (GalaxyCheck + Roslyn + SQLite Fault Injection)
+        run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
+
+  verify-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,12 +57,7 @@ jobs:
             10.0.x
             11.0.x
 
-      - name: Install Z3 (Linux)
-        if: runner.os == 'Linux'
-        run: bash scripts/install-z3.sh
-
       - name: Install Z3 (Windows)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
 
@@ -54,25 +71,20 @@ jobs:
         run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
 
   pack:
-    needs: verify
+    needs: [verify-linux, verify-windows]
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:11.0
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup .NET 8, 9, 10 & 11
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            8.0.x
-            9.0.x
-            10.0.x
-            11.0.x
-
       - name: Stage Z3 Binaries for Verifiable.Z3
-        run: bash scripts/prepare-z3-nupkg.sh
+        run: |
+          command -v unzip >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends unzip)
+          bash scripts/prepare-z3-nupkg.sh
 
       - name: Restore & Build Release
         run: |
