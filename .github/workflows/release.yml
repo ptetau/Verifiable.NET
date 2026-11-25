@@ -170,8 +170,22 @@ jobs:
           path: artifacts/nupkg/*.nupkg
           if-no-files-found: error
 
+      - name: Check NuGet Auth Configuration
+        id: nuget_auth
+        if: inputs.publish_nuget != false
+        env:
+          INPUT_USER: ${{ inputs.nuget_user }}
+          VAR_USER: ${{ vars.NUGET_USER }}
+          SECRET_USER: ${{ secrets.NUGET_USER }}
+        run: |
+          if [ -n "${INPUT_USER:-${VAR_USER:-$SECRET_USER}}" ]; then
+            echo "use_oidc=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "use_oidc=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: NuGet login (OIDC -> temp API key)
-        if: inputs.publish_nuget != false && (inputs.nuget_user != '' || vars.NUGET_USER != '' || secrets.NUGET_USER != '')
+        if: inputs.publish_nuget != false && steps.nuget_auth.outputs.use_oidc == 'true'
         uses: NuGet/login@v1
         id: login
         with:
