@@ -29,13 +29,22 @@ internal sealed record SmtQueryResult(
     IReadOnlyDictionary<string, string> Model,
     string? ErrorMessage);
 
+internal sealed record SmtDetailedResult(
+    SmtStatus Status,
+    string QueryHash,
+    IReadOnlyDictionary<string, string> Model,
+    IReadOnlyList<string> UnsatCore,
+    string? ErrorMessage);
+
 internal static class Z3SolverRunner
 {
     private const string DoneSentinel = "__VERIFIABLE_DONE__";
     private const string ModelSentinel = "__VERIFIABLE_MODEL_DONE__";
+    private const string CoreSentinel = "__VERIFIABLE_CORE_DONE__";
     private const int DefaultTimeoutMs = 2500;
 
     private static readonly ConcurrentDictionary<string, SmtQueryResult> MemoryCache = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, SmtDetailedResult> DetailedMemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
 
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
@@ -145,6 +154,40 @@ internal static class Z3SolverRunner
         {
             MemoryCache.TryAdd(hash, result);
             TrySaveDiskCache(hash, result);
+        }
+
+        return result;
+    }
+
+    public static SmtDetailedResult ExecuteWithUnsatCore(
+        string smtScriptBody,
+        string? msbuildZ3Path = null,
+        string? sourceFilePath = null,
+        int timeoutMs = 5000)
+    {
+        var z3Path = DiscoverZ3Path(msbuildZ3Path, sourceFilePath);
+        if (z3Path is null)
+        {
+            return new SmtDetailedResult(
+                SmtStatus.SolverUnavailable,
+                string.Empty,
+                new Dictionary<string, string>(),
+                Array.Empty<string>(),
+                "Z3 binary not found.");
+        }
+
+        var hash = ComputeSha256(z3Path + "\nCORE\n" + timeoutMs + "\n" + smtScriptBody);
+        if (DetailedMemoryCache.TryGetValue(hash, out var cached))
+        {
+            return cached;
+        }
+
+        var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
+        var result = pool.RunDetailedQuery(smtScriptBody, hash, timeoutMs, produceUnsatCore: true);
+
+        if (result.Status is SmtStatus.Unsat or SmtStatus.Sat)
+        {
+            DetailedMemoryCache.TryAdd(hash, result);
         }
 
         return result;
@@ -419,6 +462,12 @@ internal static class Z3SolverRunner
 
         public SmtQueryResult RunQuery(string scriptBody, string hash, int timeoutMs)
         {
+            var detailed = RunDetailedQuery(scriptBody, hash, timeoutMs, produceUnsatCore: false);
+            return new SmtQueryResult(detailed.Status, detailed.QueryHash, detailed.Model, detailed.ErrorMessage);
+        }
+
+        public SmtDetailedResult RunDetailedQuery(string scriptBody, string hash, int timeoutMs, bool produceUnsatCore)
+        {
             _semaphore.Wait();
             Z3Worker? worker = null;
             var recycle = false;
@@ -430,13 +479,12 @@ internal static class Z3SolverRunner
                     worker = Z3Worker.Start(_z3Path);
                 }
 
-                var result = worker.Execute(scriptBody, hash, timeoutMs, out recycle);
-                return result;
+                return worker.ExecuteDetailed(scriptBody, hash, timeoutMs, produceUnsatCore, out recycle);
             }
             catch (Exception ex)
             {
                 recycle = true;
-                return new SmtQueryResult(SmtStatus.Error, hash, new Dictionary<string, string>(), ex.Message);
+                return new SmtDetailedResult(SmtStatus.Error, hash, new Dictionary<string, string>(), Array.Empty<string>(), ex.Message);
             }
             finally
             {
@@ -492,13 +540,17 @@ internal static class Z3SolverRunner
             return new Z3Worker(process);
         }
 
-        public SmtQueryResult Execute(string scriptBody, string hash, int timeoutMs, out bool shouldRecycle)
+        public SmtDetailedResult ExecuteDetailed(string scriptBody, string hash, int timeoutMs, bool produceUnsatCore, out bool shouldRecycle)
         {
             shouldRecycle = false;
 
             _stdin.WriteLine("(reset)");
             _stdin.WriteLine($"(set-option :timeout {timeoutMs})");
             _stdin.WriteLine("(set-option :model true)");
+            if (produceUnsatCore)
+            {
+                _stdin.WriteLine("(set-option :produce-unsat-cores true)");
+            }
             _stdin.WriteLine(scriptBody);
             _stdin.WriteLine("(check-sat)");
             _stdin.WriteLine($"(echo \"{DoneSentinel}\")");
@@ -509,19 +561,41 @@ internal static class Z3SolverRunner
             if (timedOut)
             {
                 shouldRecycle = true;
-                return new SmtQueryResult(SmtStatus.Unknown, hash, new Dictionary<string, string>(), $"Z3 exceeded wall-clock timeout ({hardWaitMs}ms).");
+                return new SmtDetailedResult(SmtStatus.Unknown, hash, new Dictionary<string, string>(), Array.Empty<string>(), $"Z3 exceeded wall-clock timeout ({hardWaitMs}ms).");
             }
 
             var status = ParseStatus(checkOutput, out var errorLine);
             if (status == SmtStatus.Error)
             {
                 shouldRecycle = true;
-                return new SmtQueryResult(SmtStatus.Error, hash, new Dictionary<string, string>(), errorLine ?? "Z3 returned an error.");
+                return new SmtDetailedResult(SmtStatus.Error, hash, new Dictionary<string, string>(), Array.Empty<string>(), errorLine ?? "Z3 returned an error.");
+            }
+
+            if (status == SmtStatus.Unsat)
+            {
+                if (!produceUnsatCore)
+                {
+                    return new SmtDetailedResult(SmtStatus.Unsat, hash, new Dictionary<string, string>(), Array.Empty<string>(), null);
+                }
+
+                _stdin.WriteLine("(get-unsat-core)");
+                _stdin.WriteLine($"(echo \"{CoreSentinel}\")");
+                _stdin.Flush();
+
+                var coreOutput = ReadUntilSentinel(CoreSentinel, hardWaitMs, out var coreTimedOut);
+                if (coreTimedOut)
+                {
+                    shouldRecycle = true;
+                    return new SmtDetailedResult(SmtStatus.Unsat, hash, new Dictionary<string, string>(), Array.Empty<string>(), null);
+                }
+
+                var core = ParseUnsatCore(coreOutput);
+                return new SmtDetailedResult(SmtStatus.Unsat, hash, new Dictionary<string, string>(), core, null);
             }
 
             if (status != SmtStatus.Sat)
             {
-                return new SmtQueryResult(status, hash, new Dictionary<string, string>(), status == SmtStatus.Unknown ? "Z3 returned unknown." : null);
+                return new SmtDetailedResult(status, hash, new Dictionary<string, string>(), Array.Empty<string>(), status == SmtStatus.Unknown ? "Z3 returned unknown." : null);
             }
 
             _stdin.WriteLine("(get-model)");
@@ -532,11 +606,42 @@ internal static class Z3SolverRunner
             if (modelTimedOut)
             {
                 shouldRecycle = true;
-                return new SmtQueryResult(SmtStatus.Sat, hash, new Dictionary<string, string>(), null);
+                return new SmtDetailedResult(SmtStatus.Sat, hash, new Dictionary<string, string>(), Array.Empty<string>(), null);
             }
 
             var model = ParseModel(modelOutput);
-            return new SmtQueryResult(SmtStatus.Sat, hash, model, null);
+            return new SmtDetailedResult(SmtStatus.Sat, hash, model, Array.Empty<string>(), null);
+        }
+
+        private static IReadOnlyList<string> ParseUnsatCore(string coreOutput)
+        {
+            if (string.IsNullOrWhiteSpace(coreOutput))
+            {
+                return Array.Empty<string>();
+            }
+
+            var openIdx = coreOutput.IndexOf('(');
+            if (openIdx < 0)
+            {
+                return Array.Empty<string>();
+            }
+
+            var form = ReadBalancedForm(coreOutput, openIdx, out _);
+            if (form is null || form.StartsWith("(error", StringComparison.Ordinal))
+            {
+                return Array.Empty<string>();
+            }
+
+            var tokens = TokenizeTopLevelChildren(form);
+            var list = new List<string>(tokens.Count);
+            foreach (var tok in tokens)
+            {
+                if (!string.IsNullOrWhiteSpace(tok))
+                {
+                    list.Add(tok.Trim());
+                }
+            }
+            return list;
         }
 
         private string ReadUntilSentinel(string sentinel, int timeoutMs, out bool timedOut)

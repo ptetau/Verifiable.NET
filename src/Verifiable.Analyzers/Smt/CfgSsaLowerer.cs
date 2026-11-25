@@ -21,6 +21,32 @@ internal sealed record ProofObligation(
     IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters,
     string? Reason = null);
 
+internal sealed record NamedPremise(
+    string Id,
+    string Kind,
+    string Label,
+    string? Reason,
+    string? FilePath,
+    int Line,
+    string SmtFormula);
+
+internal sealed record QueryObligation(
+    string MethodDisplay,
+    string ClaimText,
+    Location ReturnLocation,
+    string PathCondition,
+    IReadOnlyList<string> PathConjuncts,
+    NamedPremise? ResultAssumption,
+    string GoalTerm,
+    string ResultSmtName,
+    string ScriptPreamble,
+    IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters,
+    IReadOnlyList<NamedPremise> Premises);
+
+internal sealed record QueryLoweringOutcome(
+    IReadOnlyList<QueryObligation> Obligations,
+    IReadOnlyList<(string Contract, Location Location, string Error)> Errors);
+
 internal sealed record LoweringOutcome(
     IReadOnlyList<ProofObligation> Obligations,
     IReadOnlyList<(string Contract, Location Location, string Error)> Errors);
@@ -29,17 +55,30 @@ internal sealed class CfgSsaLowerer
 {
     private readonly Compilation _compilation;
     private readonly IMethodSymbol _method;
+    private readonly bool _trackProofPremises;
     private readonly SmtTypeSystem _types;
     private readonly ContractExpressionTranslator _translator;
 
     private readonly List<string> _decls = new();
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
+    private readonly List<NamedPremise> _premises = new();
+    private readonly List<QueryObligation> _queryObligations = new();
     private readonly List<(string Contract, Location Location, string Error)> _errors = new();
     private readonly List<(string ParamName, string SmtName)> _trackedParams = new();
     private readonly HashSet<string> _emittedOnDemandKeys = new(StringComparer.Ordinal);
 
     private int _ssaCounter;
+    private int _premiseCounter;
+
+    private IOperation? _queryAssertOp;
+    private IParameterSymbol? _queryResultParam;
+    private IParameterSymbol? _queryThisParam;
+    private IReadOnlyList<IParameterSymbol>? _queryProbeParams;
+    private string? _queryAssertDisplay;
+    private IOperation? _queryAssumeOp;
+    private bool _queryAssumeUsesResult;
+    private string? _queryAssumeDisplay;
 
     private sealed record EnsuresSpec(
         IParameterSymbol? LambdaParam,
@@ -89,13 +128,43 @@ internal sealed class CfgSsaLowerer
     private readonly Dictionary<ISymbol, SmtTypedTerm> _entryParamVars = new(SymbolEqualityComparer.Default);
     private SmtTypedTerm? _entryThis;
 
-    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method)
+    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false)
     {
         _compilation = compilation;
         _method = method;
+        _trackProofPremises = trackProofPremises;
         var useBitVec = HasCheckedArithmetic(method);
         _types = new SmtTypeSystem(useBitVec);
         _translator = new ContractExpressionTranslator(compilation, _types);
+    }
+
+    public QueryLoweringOutcome LowerWithQuery(
+        ControlFlowGraph cfg,
+        ImmutableArray<IOperation> rawOperationBlocks,
+        IOperation assertBodyOp,
+        IParameterSymbol? resultParam,
+        IParameterSymbol? thisParam,
+        IReadOnlyList<IParameterSymbol> probeParams,
+        string assertDisplay,
+        IOperation? assumeBodyOp = null,
+        bool assumeUsesResult = false,
+        string? assumeDisplay = null)
+    {
+        _queryObligations.Clear();
+        _queryAssertOp = assertBodyOp;
+        _queryResultParam = resultParam;
+        _queryThisParam = thisParam;
+        _queryProbeParams = probeParams;
+        _queryAssertDisplay = assertDisplay;
+        _queryAssumeOp = assumeBodyOp;
+        _queryAssumeUsesResult = assumeUsesResult;
+        _queryAssumeDisplay = assumeDisplay;
+
+        Lower(cfg, rawOperationBlocks);
+
+        _queryAssertOp = null;
+        _queryAssumeOp = null;
+        return new QueryLoweringOutcome(_queryObligations.ToList(), _errors.ToList());
     }
 
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
@@ -141,11 +210,25 @@ internal sealed class CfgSsaLowerer
             try
             {
                 var reqTerm = LowerExpression(req.Condition, "true", entryEnv, emitObligations: false);
-                _assertions.Add($"(assert {reqTerm.Term})");
+                AddAssertion(reqTerm.Term, "Requires", req.DisplayText, req.Location, req.Because);
             }
             catch (ContractLoweringException ex)
             {
                 _errors.Add((req.DisplayText, req.Location, ex.Message));
+            }
+        }
+
+        if (_queryAssumeOp is not null && !_queryAssumeUsesResult)
+        {
+            try
+            {
+                var assumeEnv = BuildQueryEnv(entryEnv, resultTerm: null);
+                var assumeTerm = LowerExpression(_queryAssumeOp, "true", assumeEnv, emitObligations: false);
+                AddAssertion(assumeTerm.Term, "QueryAssumption", _queryAssumeDisplay ?? "assumption", methodLoc);
+            }
+            catch (ContractLoweringException ex)
+            {
+                _errors.Add((_queryAssumeDisplay ?? "assumption", methodLoc, ex.Message));
             }
         }
 
@@ -729,7 +812,98 @@ internal sealed class CfgSsaLowerer
 
         var retTerm = LowerExpression(block.BranchValue, gamma, env);
         var retLoc = block.BranchValue.Syntax.GetLocation();
+        if (_queryAssertOp is not null)
+        {
+            RecordQueryObligation(retTerm, gamma, retLoc, env);
+            return;
+        }
         VerifyReturnSpecsAndInvariants(retTerm, gamma, retLoc, env);
+    }
+
+    private BlockEnv BuildQueryEnv(BlockEnv baseEnv, SmtTypedTerm? resultTerm)
+    {
+        var queryEnv = baseEnv.Clone();
+        foreach (var kv in _entryParamVars)
+        {
+            queryEnv.Vars[kv.Key] = kv.Value;
+        }
+        if (_entryThis is not null)
+        {
+            queryEnv.ThisOverride = _entryThis;
+            if (_queryThisParam is not null)
+            {
+                queryEnv.Vars[_queryThisParam] = _entryThis;
+            }
+        }
+        if (_queryProbeParams is not null)
+        {
+            foreach (var probeParam in _queryProbeParams)
+            {
+                var matchingMethodParam = _method.Parameters.FirstOrDefault(p => p.Name == probeParam.Name);
+                if (matchingMethodParam is not null && _entryParamVars.TryGetValue(matchingMethodParam, out var pTerm))
+                {
+                    queryEnv.Vars[probeParam] = pTerm;
+                }
+            }
+        }
+        if (resultTerm is not null)
+        {
+            if (_queryResultParam is not null)
+            {
+                queryEnv.Vars[_queryResultParam] = resultTerm;
+            }
+            queryEnv.SpecResult = resultTerm;
+        }
+        return queryEnv;
+    }
+
+    private void RecordQueryObligation(SmtTypedTerm retTerm, string gamma, Location retLoc, BlockEnv postEnv)
+    {
+        try
+        {
+            var boundRet = BindSsaValue("query_result", retTerm);
+            var queryEnv = BuildQueryEnv(postEnv, boundRet);
+
+            NamedPremise? resultAssumption = null;
+            if (_queryAssumeOp is not null && _queryAssumeUsesResult)
+            {
+                var assumeTerm = LowerExpression(_queryAssumeOp, gamma, queryEnv, emitObligations: false);
+                var assumeId = $"p_assume_result_{++_premiseCounter}";
+                var (filePath, line) = ExtractFileAndLine(retLoc);
+                resultAssumption = new NamedPremise(
+                    assumeId,
+                    "QueryAssumption",
+                    _queryAssumeDisplay ?? "assumption",
+                    null,
+                    filePath,
+                    line,
+                    assumeTerm.Term);
+            }
+
+            var goal = LowerExpression(_queryAssertOp!, gamma, queryEnv, emitObligations: false);
+            var tracked = _trackedParams.ToList();
+            tracked.Add(("result", boundRet.Term));
+            var conjuncts = FlattenConjuncts(gamma);
+            var preamble = string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions));
+            var methodDisplay = $"{_method.ContainingType?.Name}.{_method.Name}";
+
+            _queryObligations.Add(new QueryObligation(
+                methodDisplay,
+                _queryAssertDisplay ?? _queryAssertOp!.Syntax.ToString(),
+                retLoc,
+                gamma,
+                conjuncts,
+                resultAssumption,
+                goal.Term,
+                boundRet.Term,
+                preamble,
+                tracked,
+                _premises.ToList()));
+        }
+        catch (ContractLoweringException ex)
+        {
+            _errors.Add((_queryAssertDisplay ?? "query", retLoc, ex.Message));
+        }
     }
 
     private void VerifyReturnSpecsAndInvariants(SmtTypedTerm retTerm, string gamma, Location retLoc, BlockEnv postEnv)
@@ -1116,7 +1290,7 @@ internal sealed class CfgSsaLowerer
         {
             var strType = _compilation.GetSpecialType(SpecialType.System_String);
             var strSsa = BindSsaValue("strcat", new SmtTypedTerm("str-null", strType), isFreshFreeSymbol: true);
-            _assertions.Add($"(assert (not (= {strSsa.Term} str-null)))");
+            AddAssertion($"(not (= {strSsa.Term} str-null))", "StringAxiom", "concatenation non-null", loc);
             return strSsa;
         }
 
@@ -1850,7 +2024,13 @@ internal sealed class CfgSsaLowerer
                 try
                 {
                     var ensTerm = LowerExpression(ens.BodyExpr, "true", calleeEnv, emitObligations: false);
-                    _assertions.Add($"(assert {ensTerm.Term})");
+                    var ensLoc = ens.Location != Location.None ? ens.Location : loc;
+                    AddAssertion(
+                        ensTerm.Term,
+                        "CalleeEnsures",
+                        $"{method.ContainingType?.Name}.{method.Name}: {ens.DisplayText}",
+                        ensLoc,
+                        ens.Because);
                 }
                 catch (ContractLoweringException ex)
                 {
@@ -1902,18 +2082,18 @@ internal sealed class CfgSsaLowerer
         if (_types.TryGetDictionaryInfo(value.Type, out _, out var dictId, out var kType, out _))
         {
             var kSort = _types.GetSort(kType!);
-            _assertions.Add($"(assert (>= (map_count_{dictId} {value.Term}) 0))");
-            _assertions.Add($"(assert (= (= (map_count_{dictId} {value.Term}) 0) (= (map_has_{dictId} {value.Term}) ((as const (Array {kSort} Bool)) false))))");
+            AddAssertion($"(>= (map_count_{dictId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(= (= (map_count_{dictId} {value.Term}) 0) (= (map_has_{dictId} {value.Term}) ((as const (Array {kSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
         else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out _))
         {
-            _assertions.Add($"(assert (>= (seq_count_{seqId} {value.Term}) 0))");
+            AddAssertion($"(>= (seq_count_{seqId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
         }
         else if (_types.TryGetSetInfo(value.Type, out _, out var setId, out var setElem))
         {
             var eSort = _types.GetSort(setElem!);
-            _assertions.Add($"(assert (>= (set_count_{setId} {value.Term}) 0))");
-            _assertions.Add($"(assert (= (= (set_count_{setId} {value.Term}) 0) (= (set_has_{setId} {value.Term}) ((as const (Array {eSort} Bool)) false))))");
+            AddAssertion($"(>= (set_count_{setId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(= (= (set_count_{setId} {value.Term}) 0) (= (set_has_{setId} {value.Term}) ((as const (Array {eSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
 
         if (value.Type is INamedTypeSymbol resNamed &&
@@ -1931,11 +2111,13 @@ internal sealed class CfgSsaLowerer
         {
             try
             {
+                SmtTypeSystem.TryGetConstrainedUnderlying(value.Type, out _, out var typeDesc);
                 var unwrapped = _translator.UnwrapRefinedIfApplicable(value);
                 var valEnv = new BlockEnv();
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var invTerm = LowerExpression(isValidBody!, "true", valEnv, emitObligations: false);
-                _assertions.Add($"(assert {invTerm.Term})");
+                var declLoc = isValidMethod!.Locations.FirstOrDefault() ?? loc;
+                AddAssertion(invTerm.Term, "TypeAlias", $"{value.Type.Name}.IsValid", declLoc, typeDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -1955,9 +2137,11 @@ internal sealed class CfgSsaLowerer
 
             try
             {
+                var invDesc = SmtTypeSystem.GetInvariantDescription(invMember);
                 var invEnv = new BlockEnv { ThisOverride = value };
                 var invTerm = LowerExpression(invBody!, "true", invEnv, emitObligations: false);
-                _assertions.Add($"(assert {invTerm.Term})");
+                var invLoc = invMember.Locations.FirstOrDefault() ?? loc;
+                AddAssertion(invTerm.Term, "TypeInvariant", $"[Invariant] {value.Type.Name}.{invMember.Name}", invLoc, invDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -1985,11 +2169,13 @@ internal sealed class CfgSsaLowerer
         {
             try
             {
+                SmtTypeSystem.TryGetConstrainedUnderlying(element.Type, out _, out var typeDesc);
                 var unwrapped = _translator.UnwrapRefinedIfApplicable(element);
                 var valEnv = new BlockEnv();
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var invTerm = LowerExpression(isValidBody!, "true", valEnv, emitObligations: false);
-                _assertions.Add($"(assert (=> {guardCond} {invTerm.Term}))");
+                var declLoc = isValidMethod!.Locations.FirstOrDefault() ?? loc;
+                AddAssertion($"(=> {guardCond} {invTerm.Term})", "TypeAlias", $"{element.Type.Name}.IsValid", declLoc, typeDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -2009,9 +2195,11 @@ internal sealed class CfgSsaLowerer
 
             try
             {
+                var invDesc = SmtTypeSystem.GetInvariantDescription(invMember);
                 var invEnv = new BlockEnv { ThisOverride = element };
                 var invTerm = LowerExpression(invBody!, "true", invEnv, emitObligations: false);
-                _assertions.Add($"(assert (=> {guardCond} {invTerm.Term}))");
+                var invLoc = invMember.Locations.FirstOrDefault() ?? loc;
+                AddAssertion($"(=> {guardCond} {invTerm.Term})", "TypeInvariant", $"[Invariant] {element.Type.Name}.{invMember.Name}", invLoc, invDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -2189,9 +2377,94 @@ internal sealed class CfgSsaLowerer
         _decls.Add($"(declare-const {name} {sort})");
         if (!isFreshFreeSymbol)
         {
-            _assertions.Add($"(assert (= {name} {value.Term}))");
+            AddAssertion($"(= {name} {value.Term})", "SsaBinding", name, Location.None);
         }
         return new SmtTypedTerm(name, value.Type);
+    }
+
+    private void AddAssertion(string smtFormula, string kind, string label, Location loc, string? reason = null)
+    {
+        if (!_trackProofPremises)
+        {
+            _assertions.Add($"(assert {smtFormula})");
+            return;
+        }
+
+        var id = $"p_{++_premiseCounter}_{kind}";
+        var (filePath, line) = ExtractFileAndLine(loc);
+        _premises.Add(new NamedPremise(id, kind, label, reason, filePath, line, smtFormula));
+        _assertions.Add($"(assert (! {smtFormula} :named {id}))");
+    }
+
+    private static (string? FilePath, int Line) ExtractFileAndLine(Location loc)
+    {
+        if (loc == Location.None || !loc.IsInSource)
+        {
+            return (null, 0);
+        }
+
+        var span = loc.GetMappedLineSpan();
+        var rawPath = span.Path ?? loc.SourceTree?.FilePath;
+        var file = string.IsNullOrEmpty(rawPath) ? null : rawPath;
+        return (file, span.StartLinePosition.Line + 1);
+    }
+
+    private static IReadOnlyList<string> FlattenConjuncts(string term)
+    {
+        var list = new List<string>();
+        Collect(term);
+        return list;
+
+        void Collect(string t)
+        {
+            var s = t.Trim();
+            if (string.IsNullOrEmpty(s) || s == "true") return;
+            if (!s.StartsWith("(and ", StringComparison.Ordinal) || !s.EndsWith(")", StringComparison.Ordinal))
+            {
+                list.Add(s);
+                return;
+            }
+
+            var i = 5;
+            var limit = s.Length - 1;
+            var children = new List<string>();
+            while (i < limit)
+            {
+                while (i < limit && char.IsWhiteSpace(s[i])) i++;
+                if (i >= limit) break;
+                if (s[i] == '(')
+                {
+                    var start = i;
+                    var depth = 0;
+                    var inStr = false;
+                    while (i < limit)
+                    {
+                        var ch = s[i];
+                        if (inStr)
+                        {
+                            if (ch == '"' && s[i - 1] != '\\') inStr = false;
+                        }
+                        else if (ch == '"') inStr = true;
+                        else if (ch == '(') depth++;
+                        else if (ch == ')')
+                        {
+                            depth--;
+                            if (depth == 0) { i++; break; }
+                        }
+                        i++;
+                    }
+                    children.Add(s.Substring(start, i - start));
+                }
+                else
+                {
+                    var start = i;
+                    while (i < limit && !char.IsWhiteSpace(s[i])) i++;
+                    children.Add(s.Substring(start, i - start));
+                }
+            }
+
+            foreach (var c in children) Collect(c);
+        }
     }
 
     private void AddObligation(string kind, string description, Location location, string gamma, string goalTerm, string? reason = null)
