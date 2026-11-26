@@ -224,7 +224,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
         if (VerifiableSymbolHelpers.IsSynthesizedRecordMember(owning) ||
             VerifiableSymbolHelpers.IsGeneratedByVerifiableGenerators(owning) ||
             VerifiableSymbolHelpers.HasAttribute(owning, VerifiableSymbolHelpers.PureAxiomAttr) ||
-            VerifiableSymbolHelpers.HasAttribute(owning, VerifiableSymbolHelpers.GhostAttr))
+            (owning is not IMethodSymbol && VerifiableSymbolHelpers.HasAttribute(owning, VerifiableSymbolHelpers.GhostAttr)))
         {
             return;
         }
@@ -415,7 +415,9 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         null,
                         $"System.Reflection call '{inv.TargetMethod.Name}'"));
                 }
-                else if (!VerifiableSymbolHelpers.IsTrustedPureMethod(inv.TargetMethod))
+                else if (VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.GhostAttr)
+                    ? !IsSpecificationUse(inv, context.OwningSymbol)
+                    : !VerifiableSymbolHelpers.IsTrustedPureMethod(inv.TargetMethod))
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.UnverifiedCallOrDynamic,
@@ -526,6 +528,17 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
             IPropertySymbol ps => ps.SetMethod is null || ps.SetMethod.IsInitOnly,
             _ => false
         };
+    }
+
+    private static bool IsSpecificationUse(IOperation op, ISymbol owningSymbol)
+    {
+        if (VerifiableSymbolHelpers.HasAttribute(owningSymbol, VerifiableSymbolHelpers.GhostAttr) ||
+            VerifiableSymbolHelpers.HasAttribute(owningSymbol, VerifiableSymbolHelpers.InvariantAttr))
+            return true;
+        for (var parent = op.Parent; parent is not null; parent = parent.Parent)
+            if (parent is IInvocationOperation inv && inv.TargetMethod.ContainingType?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+                return true;
+        return false;
     }
 
     private static bool LoopHasSpecAnnotation(IOperation body)

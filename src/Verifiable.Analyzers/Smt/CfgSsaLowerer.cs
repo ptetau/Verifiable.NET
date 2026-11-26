@@ -45,6 +45,7 @@ internal sealed record QueryObligation(
 
 internal sealed record QueryLoweringOutcome(
     IReadOnlyList<QueryObligation> Obligations,
+    IReadOnlyList<ProofObligation> Preconditions,
     IReadOnlyList<(string Contract, Location Location, string Error)> Errors);
 
 internal sealed record LoweringOutcome(
@@ -67,6 +68,7 @@ internal sealed class CfgSsaLowerer
     private readonly List<(string Contract, Location Location, string Error)> _errors = new();
     private readonly List<(string ParamName, string SmtName)> _trackedParams = new();
     private readonly HashSet<string> _emittedOnDemandKeys = new(StringComparer.Ordinal);
+    private readonly HashSet<IMethodSymbol> _expandingCalls = new(SymbolEqualityComparer.Default);
 
     private int _ssaCounter;
     private int _premiseCounter;
@@ -94,6 +96,7 @@ internal sealed class CfgSsaLowerer
 
     private sealed class MethodSpecs
     {
+        public HashSet<SyntaxNode> AnnotationCalls { get; } = new();
         public List<(IOperation Condition, Location Location, string DisplayText, string? Because)> Requires { get; } = new();
         public List<EnsuresSpec> Ensures { get; } = new();
         public List<LoopSpecGroup> Loops { get; } = new();
@@ -164,10 +167,25 @@ internal sealed class CfgSsaLowerer
 
         _queryAssertOp = null;
         _queryAssumeOp = null;
-        return new QueryLoweringOutcome(_queryObligations.ToList(), _errors.ToList());
+        return new QueryLoweringOutcome(_queryObligations.ToList(),
+            _obligations.Where(ob => ob.Kind == "Precondition").ToList(), _errors.ToList());
     }
 
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
+    {
+        try
+        {
+            return LowerCore(cfg, rawOperationBlocks);
+        }
+        catch (ContractLoweringException ex)
+        {
+            // Body and CFG expressions can be unsupported just like specification predicates.
+            _errors.Add((_method.Name, _method.Locations.FirstOrDefault() ?? Location.None, ex.Message));
+            return new LoweringOutcome(_obligations, _errors);
+        }
+    }
+
+    private LoweringOutcome LowerCore(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
         var methodLoc = _method.Locations.FirstOrDefault() ?? Location.None;
         var entryEnv = new BlockEnv();
@@ -296,7 +314,7 @@ internal sealed class CfgSsaLowerer
         return new LoweringOutcome(_obligations, _errors);
     }
 
-    public static bool MethodHasSpecRequires(IMethodSymbol method)
+    public static bool MethodHasSpecRequires(Compilation compilation, IMethodSymbol method)
     {
         foreach (var synRef in method.DeclaringSyntaxReferences)
         {
@@ -304,10 +322,11 @@ internal sealed class CfgSsaLowerer
             {
                 foreach (var inv in md.DescendantNodes().OfType<InvocationExpressionSyntax>())
                 {
-                    if (inv.Expression is MemberAccessExpressionSyntax ma &&
-                        ma.Name.Identifier.ValueText == "Requires" &&
-                        (ma.Expression is IdentifierNameSyntax { Identifier.ValueText: "Spec" } ||
-                         (ma.Expression is MemberAccessExpressionSyntax recMa && recMa.Name.Identifier.ValueText == "Spec")))
+                    var name = inv.Expression is MemberAccessExpressionSyntax access ? access.Name : inv.Expression;
+                    if (name is IdentifierNameSyntax { Identifier.ValueText: "Requires" } &&
+                        compilation.ContainsSyntaxTree(inv.SyntaxTree) &&
+                        compilation.GetSemanticModel(inv.SyntaxTree).GetSymbolInfo(inv).Symbol is IMethodSymbol target &&
+                        VerifiableSymbolHelpers.IsSpecCall(target, "Requires"))
                     {
                         return true;
                     }
@@ -377,6 +396,8 @@ internal sealed class CfgSsaLowerer
             {
                 var loc = inv.Syntax.GetLocation();
                 var text = inv.Syntax.ToString();
+                if (inv.TargetMethod.Name is "Ensures" or "Requires" or "LoopInvariant" or "Decreases")
+                    specs.AnnotationCalls.Add(inv.Syntax);
 
                 var because = inv.Arguments.Length >= 2
                     ? ExtractConstantStringArg(inv.Arguments[1].Value)
@@ -608,7 +629,7 @@ internal sealed class CfgSsaLowerer
         string? condBranchCond = null;
         string? fallBranchCond = null;
 
-        if (header.BranchValue is { } bv && header.ConditionalSuccessor is not null)
+        if (header.BranchValue is { } bv && header.ConditionalSuccessor is not null && !IsAnnotationFragment(bv))
         {
             var condVal = LowerExpression(bv, loopGamma, headerWorkEnv);
             if (header.ConditionKind == ControlFlowConditionKind.WhenTrue)
@@ -660,7 +681,8 @@ internal sealed class CfgSsaLowerer
 
             if (b.ConditionalSuccessor?.Destination is { } bCondDest)
             {
-                var bvTerm = b.BranchValue is not null ? LowerExpression(b.BranchValue, bGamma, bEnv) : null;
+                var bvTerm = b.BranchValue is { } branch && !IsAnnotationFragment(branch)
+                    ? LowerExpression(branch, bGamma, bEnv) : null;
                 string cTerm = "true", fTerm = "true";
                 if (bvTerm is not null)
                 {
@@ -762,7 +784,7 @@ internal sealed class CfgSsaLowerer
         if (block.ConditionalSuccessor?.Destination is { } condDest)
         {
             string condTerm = "true", fallTerm = "true";
-            if (block.BranchValue is { } bv)
+            if (block.BranchValue is { } bv && !IsAnnotationFragment(bv))
             {
                 var c = LowerExpression(bv, gamma, env);
                 if (block.ConditionKind == ControlFlowConditionKind.WhenTrue)
@@ -896,7 +918,8 @@ internal sealed class CfgSsaLowerer
                     assumeTerm.Term);
             }
 
-            var goal = LowerExpression(_queryAssertOp!, gamma, queryEnv, emitObligations: false);
+            var goalGamma = resultAssumption is null ? gamma : CombineAnd(gamma, resultAssumption.SmtFormula);
+            var goal = LowerExpression(_queryAssertOp!, goalGamma, queryEnv, emitObligations: false);
             var tracked = _trackedParams.ToList();
             tracked.Add(("result", boundRet.Term));
             var conjuncts = FlattenConjuncts(gamma);
@@ -1027,8 +1050,17 @@ internal sealed class CfgSsaLowerer
         }
     }
 
+    // Roslyn splits short-circuit annotation arguments across CFG blocks. They are
+    // checked from the original operation tree, not executed as body statements.
+    // Both edges of an annotation-only condition remain reachable in body simulation.
+    private bool IsAnnotationFragment(IOperation op) =>
+        _currentSpecs.AnnotationCalls.Count != 0 &&
+        op.Syntax.AncestorsAndSelf().Any(_currentSpecs.AnnotationCalls.Contains);
+
     private void LowerOperation(IOperation op, string gamma, BlockEnv env)
     {
+        if (IsAnnotationFragment(op)) return;
+
         switch (op)
         {
             case IExpressionStatementOperation es:
@@ -1092,6 +1124,11 @@ internal sealed class CfgSsaLowerer
         switch (op)
         {
             case IConversionOperation conv:
+                // In the CFG the ?? arms and their conversions are separate operations;
+                // do not reinterpret unsupported conversions (e.g. boxing) as identity.
+                var inCoalesce = conv.Syntax.AncestorsAndSelf().Any(s => s.IsKind(SyntaxKind.CoalesceExpression));
+                if (inCoalesce && conv.Conversion.IsUserDefined)
+                    throw new ContractLoweringException($"Unsupported user-defined conversion in '{conv.Syntax}' under ??.");
                 if (conv.Operand is ILiteralOperation litNull && litNull.ConstantValue.HasValue && litNull.ConstantValue.Value is null)
                 {
                     if (conv.Type is not null)
@@ -1100,10 +1137,22 @@ internal sealed class CfgSsaLowerer
                             return new SmtTypedTerm($"opt-none-{optId}", conv.Type);
                         if (conv.Type.SpecialType == SpecialType.System_String)
                             return new SmtTypedTerm("str-null", conv.Type);
+                        if (inCoalesce)
+                            throw new ContractLoweringException($"No SMT null representation for '{conv.Type}'.");
                         return new SmtTypedTerm(_types.GetDefaultTerm(conv.Type), conv.Type);
                     }
                 }
                 var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
+                if (conv.Type is { } target && !SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                    _types.TryGetNullableInfo(inner.Type, out _, out var srcId, out var srcType) &&
+                    _types.TryGetNullableInfo(target, out _, out var dstId, out var dstType))
+                {
+                    var payload = new SmtTypedTerm($"(opt-val-{srcId} {inner.Term})", srcType!);
+                    var converted = ConvertNullableValue(payload, dstType!);
+                    return new SmtTypedTerm($"(ite (= {inner.Term} opt-none-{srcId}) opt-none-{dstId} (opt-some-{dstId} {converted.Term}))", target);
+                }
+                if (inCoalesce && conv.IsImplicit && conv.Type is not null)
+                    return ConvertNullableValue(inner, conv.Type);
                 return conv.Type is not null ? _translator.ConvertTo(inner, conv.Type) : inner;
 
             case IParenthesizedOperation paren:
@@ -1197,6 +1246,8 @@ internal sealed class CfgSsaLowerer
                 return uOp;
 
             case IBinaryOperation bin:
+                if (bin.IsLifted)
+                    return LowerLiftedComparison(bin, gamma, env, emitObligations, inlineDepth);
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalAnd)
                 {
                     var lAnd = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
@@ -1212,6 +1263,24 @@ internal sealed class CfgSsaLowerer
                 var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                 var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
                 return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
+
+            case IIsNullOperation isNull:
+                var subject = LowerExpression(isNull.Operand, gamma, env, emitObligations, inlineDepth);
+                return new SmtTypedTerm(NullTest(subject), _compilation.GetSpecialType(SpecialType.System_Boolean));
+
+            case ICoalesceOperation coalesce:
+                var value = LowerExpression(coalesce.Value, gamma, env, emitObligations, inlineDepth);
+                var nullTest = NullTest(value);
+                if (coalesce.ValueConversion.IsUserDefined)
+                    throw new ContractLoweringException($"Unsupported user-defined ?? conversion in '{op.Syntax}'.");
+                var present = value;
+                if (_types.TryGetNullableInfo(value.Type, out _, out var id, out var payloadType) &&
+                    !SymbolEqualityComparer.Default.Equals(value.Type, coalesce.Type))
+                    present = new SmtTypedTerm($"(opt-val-{id} {value.Term})", payloadType!);
+                present = ConvertNullableValue(present, coalesce.Type!);
+                var fallback = LowerExpression(coalesce.WhenNull, CombineAnd(gamma, nullTest), env, emitObligations, inlineDepth);
+                fallback = ConvertNullableValue(fallback, coalesce.Type!);
+                return new SmtTypedTerm($"(ite {nullTest} {fallback.Term} {present.Term})", coalesce.Type!);
 
             case IConditionalOperation cond:
                 var cTerm = LowerExpression(cond.Condition, gamma, env, emitObligations, inlineDepth);
@@ -1246,16 +1315,64 @@ internal sealed class CfgSsaLowerer
                 return LowerCollectionExpression(colExpr, gamma, env, emitObligations, inlineDepth);
 
             default:
-                if (!emitObligations)
+                if (!emitObligations || op.Type is not null)
                 {
-                    throw new ContractLoweringException($"Unsupported C# syntax '{op.Kind}' ('{op.Syntax}') in specification.");
-                }
-                if (op.Type is not null)
-                {
-                    return BindSsaValue("unk", new SmtTypedTerm(_types.GetDefaultTerm(op.Type), op.Type), isFreshFreeSymbol: true);
+                    throw new ContractLoweringException($"Unsupported C# syntax '{op.Kind}' ('{op.Syntax}').");
                 }
                 return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
+    }
+
+    private string NullTest(SmtTypedTerm value)
+    {
+        if (_types.TryGetNullableInfo(value.Type, out _, out var id, out _))
+            return $"(= {value.Term} opt-none-{id})";
+        if (value.Type.SpecialType == SpecialType.System_String)
+            return $"(= {value.Term} str-null)";
+        throw new ContractLoweringException($"No SMT null representation for '{value.Type}'.");
+    }
+
+    private SmtTypedTerm ConvertNullableValue(SmtTypedTerm value, ITypeSymbol target)
+    {
+        if (SymbolEqualityComparer.Default.Equals(value.Type, target))
+            return value;
+        if (_types.TryGetNullableInfo(target, out _, out var id, out var payloadType))
+        {
+            var payload = ConvertNullableValue(value, payloadType!);
+            return new SmtTypedTerm($"(opt-some-{id} {payload.Term})", target);
+        }
+        if ((value.Type.SpecialType, target.SpecialType) is
+            (SpecialType.System_Int32, SpecialType.System_Int64 or SpecialType.System_Decimal) or
+            (SpecialType.System_Int64, SpecialType.System_Decimal))
+            return _translator.ConvertTo(value, target);
+        throw new ContractLoweringException($"Unsupported nullable conversion from '{value.Type}' to '{target}'.");
+    }
+
+    private SmtTypedTerm LowerLiftedComparison(IBinaryOperation bin, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
+    {
+        var equality = bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals;
+        if (bin.Type?.SpecialType != SpecialType.System_Boolean ||
+            (!equality && bin.OperatorKind is not (BinaryOperatorKind.LessThan or BinaryOperatorKind.LessThanOrEqual or
+                BinaryOperatorKind.GreaterThan or BinaryOperatorKind.GreaterThanOrEqual)) ||
+            (bin.OperatorMethod is { } method && method.ContainingType.SpecialType != SpecialType.System_Decimal))
+            throw new ContractLoweringException($"Unsupported lifted operator in '{bin.Syntax}'.");
+
+        var left = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+        var right = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+        if (!_types.TryGetNullableInfo(left.Type, out _, out var leftId, out var inner) ||
+            !_types.TryGetNullableInfo(right.Type, out _, out var rightId, out _) || leftId != rightId ||
+            (inner!.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_Int64 or SpecialType.System_Decimal)
+                && !(equality && (inner.SpecialType == SpecialType.System_Boolean || inner.TypeKind == TypeKind.Enum))))
+            throw new ContractLoweringException($"Unsupported lifted operand types in '{bin.Syntax}'.");
+
+        // Datatype equality already compares the presence tag as well as the payload.
+        if (equality)
+            return LowerBinaryOperator(bin.OperatorKind, left, right, bin.Type, gamma, bin.Syntax.GetLocation(), emitObligations);
+
+        var cmp = LowerBinaryOperator(bin.OperatorKind,
+            new SmtTypedTerm($"(opt-val-{leftId} {left.Term})", inner),
+            new SmtTypedTerm($"(opt-val-{rightId} {right.Term})", inner), bin.Type, gamma, bin.Syntax.GetLocation(), emitObligations);
+        return new SmtTypedTerm($"(and (not {NullTest(left)}) (not {NullTest(right)}) {cmp.Term})", bin.Type);
     }
 
     private SmtTypedTerm LowerLiteralOperation(ILiteralOperation lit)
@@ -1768,9 +1885,9 @@ internal sealed class CfgSsaLowerer
                     throw new ContractLoweringException("Spec.Result<TResult>() can only be used inside Spec.Ensures(...).");
                 }
                 if (method.TypeArguments.Length == 1 &&
-                    !SymbolEqualityComparer.Default.Equals(method.TypeArguments[0], _method.ReturnType))
+                    !SymbolEqualityComparer.Default.Equals(method.TypeArguments[0], env.SpecResult.Type))
                 {
-                    throw new ContractLoweringException($"Spec.Result<{method.TypeArguments[0].Name}>() does not match method return type '{_method.ReturnType.Name}'.");
+                    throw new ContractLoweringException($"Spec.Result<{method.TypeArguments[0].Name}>() does not match method return type '{env.SpecResult.Type.Name}'.");
                 }
                 return env.SpecResult;
             }
@@ -1779,14 +1896,24 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
-        var argValues = new List<SmtTypedTerm>(inv.Arguments.Length);
+        var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
+
+        // The CFG for `nullable ?? fallback` extracts the present payload with this call.
+        if (recvTerm is not null && containing?.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
+            method.Name == "GetValueOrDefault" && inv.Arguments.Length == 0 &&
+            _types.TryGetNullableInfo(recvTerm.Type, out _, out var optId, out var payloadType))
+        {
+            return new SmtTypedTerm($"(ite {NullTest(recvTerm)} {_types.GetDefaultTerm(payloadType!)} (opt-val-{optId} {recvTerm.Term}))", payloadType!);
+        }
+        var evaluated = new List<(int Ordinal, SmtTypedTerm Value)>(inv.Arguments.Length);
         foreach (var arg in inv.Arguments)
         {
             var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
-            argValues.Add(_translator.ConvertTo(v, arg.Parameter?.Type ?? v.Type));
+            evaluated.Add((arg.Parameter?.Ordinal ?? evaluated.Count, _translator.ConvertTo(v, arg.Parameter?.Type ?? v.Type)));
         }
-
-        var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
+        // Roslyn supplies implicit default arguments as bound operations. Evaluate in
+        // C# order, but interpret the resulting values in formal parameter order.
+        var argValues = evaluated.OrderBy(a => a.Ordinal).Select(a => a.Value).ToList();
 
         // 1. Constrained [TypeAlias<T>] / [Refined<T>]: From(value) and IsValid(value)
         if (containing is not null && SmtTypeSystem.TryGetConstrainedUnderlying(containing, out var underlying))
@@ -1794,9 +1921,15 @@ internal sealed class CfgSsaLowerer
             if (method.Name == "From" && argValues.Count == 1 && _types.TryGetComposite(containing, out var refComp))
             {
                 var arg = _translator.ConvertTo(argValues[0], underlying!);
-                if (emitObligations)
+                if (!_expandingCalls.Add(method.OriginalDefinition))
+                    throw new ContractLoweringException($"Recursive specification expansion of '{method.Name}' is not supported.");
+                try
                 {
                     CheckMethodRequires(method, recvTerm, new[] { arg }, gamma, loc);
+                }
+                finally
+                {
+                    _expandingCalls.Remove(method.OriginalDefinition);
                 }
                 return BindSsaValue("ref_" + SmtTypeSystem.SanitizeName(containing.Name),
                     new SmtTypedTerm($"({refComp!.ConstructorName} {arg.Term})", containing));
@@ -1975,31 +2108,62 @@ internal sealed class CfgSsaLowerer
                 _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
-        if (method.Name == "Equals" && recvTerm is not null && argValues.Count == 1)
+        if (method.Name == "Equals" && recvTerm is not null && argValues.Count == 1 &&
+            (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
             return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
-        // Inline pure single-expression helper methods when inside a specification expression
-        if (!emitObligations)
+        if (!_expandingCalls.Add(method.OriginalDefinition))
         {
-            if (inlineDepth < 8 &&
-                SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var helperBody))
-            {
-                var helperEnv = new BlockEnv { ThisOverride = recvTerm };
-                for (var i = 0; i < method.Parameters.Length && i < argValues.Count; i++)
-                {
-                    helperEnv.Vars[method.Parameters[i]] = argValues[i];
-                }
-                return LowerExpression(helperBody!, gamma, helperEnv, emitObligations: false, inlineDepth + 1);
-            }
+            throw new ContractLoweringException($"Recursive specification expansion of '{method.Name}' is not supported.");
+        }
+        try
+        {
+            return LowerHelperCall(method, recvTerm, argValues, gamma, loc, emitObligations, inlineDepth);
+        }
+        finally
+        {
+            _expandingCalls.Remove(method.OriginalDefinition);
+        }
+    }
 
-            throw new ContractLoweringException($"Unsupported method call '{method.ContainingType?.Name}.{method.Name}' inside specification.");
+    private SmtTypedTerm LowerHelperCall(IMethodSymbol method, SmtTypedTerm? receiver, IReadOnlyList<SmtTypedTerm> args,
+        string gamma, Location loc, bool implementationCall, int inlineDepth)
+    {
+        var specs = ExtractMethodSpecs(_compilation, method, default);
+        _errors.AddRange(specs.Errors);
+        var calleeEnv = new BlockEnv { ThisOverride = receiver };
+        for (var i = 0; i < method.Parameters.Length && i < args.Count; i++)
+            calleeEnv.Vars[method.Parameters[i]] = args[i];
+
+        CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
+
+        var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
+            !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.GhostAttr);
+        SmtTypedTerm? definition = null;
+        if ((!implementationCall || definitional) && !method.ReturnsVoid &&
+            !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.PureAxiomAttr) &&
+            HasCheckedArithmetic(method) == _types.UseBitVec &&
+            !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
+            (!method.IsVirtual && !method.IsOverride || method.IsSealed || method.ContainingType.IsSealed) &&
+            !method.ReturnsByRef && !method.ReturnsByRefReadonly && method.Parameters.All(p => p.RefKind == RefKind.None) &&
+            inlineDepth < 8 && SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var body, allowLeadingContracts: true) &&
+            CanUseHelperBody(body!))
+        {
+            try
+            {
+                definition = _translator.ConvertTo(LowerExpression(body!, gamma, calleeEnv, emitObligations: false, inlineDepth + 1), method.ReturnType);
+            }
+            catch (ContractLoweringException) when (implementationCall)
+            {
+                // Non-definitional calls retain their usual modular interpretation.
+            }
         }
 
-        // 8. General [Verifiable] / [PureAxiom] modular call: check callee Spec.Requires, assume callee Spec.Ensures + return invariants
-        CheckMethodRequires(method, recvTerm, argValues, gamma, loc);
+        if (!implementationCall)
+            return definition ?? throw new ContractLoweringException($"Unsupported method call '{method.ContainingType?.Name}.{method.Name}' inside specification.");
 
         if (method.ReturnsVoid)
         {
@@ -2010,27 +2174,14 @@ internal sealed class CfgSsaLowerer
             new SmtTypedTerm(_types.GetDefaultTerm(method.ReturnType), method.ReturnType),
             isFreshFreeSymbol: true);
 
+        if (definition is not null)
+            AddAssertion($"(=> {gamma} (= {retTerm.Term} {definition.Term}))", "HelperBody", method.Name, loc);
         EmitTypeAssumptions(retTerm, loc);
 
-        var calleeSpecs = ExtractMethodSpecs(_compilation, method, default);
-        foreach (var err in calleeSpecs.Errors)
+        if (specs.Ensures.Count > 0)
         {
-            _errors.Add(err);
-        }
-
-        if (calleeSpecs.Ensures.Count > 0)
-        {
-            var calleeEnv = new BlockEnv
-            {
-                ThisOverride = recvTerm,
-                SpecResult = retTerm
-            };
-            for (var i = 0; i < method.Parameters.Length && i < argValues.Count; i++)
-            {
-                calleeEnv.Vars[method.Parameters[i]] = argValues[i];
-            }
-
-            foreach (var ens in calleeSpecs.Ensures)
+            calleeEnv.SpecResult = retTerm;
+            foreach (var ens in specs.Ensures)
             {
                 if (ens.LambdaParam is not null)
                 {
@@ -2039,10 +2190,10 @@ internal sealed class CfgSsaLowerer
 
                 try
                 {
-                    var ensTerm = LowerExpression(ens.BodyExpr, "true", calleeEnv, emitObligations: false);
+                    var ensTerm = LowerExpression(ens.BodyExpr, gamma, calleeEnv, emitObligations: false);
                     var ensLoc = ens.Location != Location.None ? ens.Location : loc;
                     AddAssertion(
-                        ensTerm.Term,
+                        $"(=> {gamma} {ensTerm.Term})",
                         "CalleeEnsures",
                         $"{method.ContainingType?.Name}.{method.Name}: {ens.DisplayText}",
                         ensLoc,
@@ -2058,6 +2209,32 @@ internal sealed class CfgSsaLowerer
         return retTerm;
     }
 
+    private bool CanUseHelperBody(IOperation body) =>
+        !body.DescendantsAndSelf().Any(op => op is IAssignmentOperation or IIncrementOrDecrementOperation
+            or ILocalReferenceOperation or IAnonymousFunctionOperation ||
+            op is IConversionOperation { OperatorMethod: not null } ||
+            op is IBinaryOperation { OperatorMethod: { } binary } && !IsBuiltInValueOperator(binary) ||
+            op is IUnaryOperation { OperatorMethod: { } unary } && !IsBuiltInValueOperator(unary) ||
+            op is IObjectCreationOperation obj && !IsPositionalProjection(obj));
+
+    private static bool IsBuiltInValueOperator(IMethodSymbol method) =>
+        method.ContainingType.SpecialType is SpecialType.System_Decimal or SpecialType.System_String ||
+        method.IsImplicitlyDeclared && method.ContainingType.IsRecord;
+
+    private bool IsPositionalProjection(IObjectCreationOperation obj)
+    {
+        // LowerObjectCreation maps arguments to stored fields by name. A user
+        // constructor or a redeclared positional property can transform the value.
+        if (obj.Initializer is not null || obj.Constructor is not { } ctor ||
+            ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not RecordDeclarationSyntax ||
+            ctor.ContainingType.BaseType?.IsRecord == true ||
+            !_types.TryGetComposite(ctor.ContainingType, out var composite))
+            return false;
+        return composite!.Fields.Count == ctor.Parameters.Length && ctor.Parameters.All(p =>
+            ctor.ContainingType.GetMembers(p.Name).OfType<IPropertySymbol>().Any(prop =>
+                prop.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ParameterSyntax));
+    }
+
     private void CheckMethodRequires(
         IMethodSymbol callee,
         SmtTypedTerm? recvTerm,
@@ -2066,10 +2243,7 @@ internal sealed class CfgSsaLowerer
         Location callLoc)
     {
         var calleeSpecs = ExtractMethodSpecs(_compilation, callee, default);
-        foreach (var err in calleeSpecs.Errors)
-        {
-            _errors.Add(err);
-        }
+        _errors.AddRange(calleeSpecs.Errors);
 
         if (calleeSpecs.Requires.Count == 0) return;
 
@@ -2079,6 +2253,11 @@ internal sealed class CfgSsaLowerer
             calleeEnv.Vars[callee.Parameters[i]] = args[i];
         }
 
+        CheckMethodRequires(callee, calleeSpecs, calleeEnv, gamma, callLoc);
+    }
+
+    private void CheckMethodRequires(IMethodSymbol callee, MethodSpecs calleeSpecs, BlockEnv calleeEnv, string gamma, Location callLoc)
+    {
         foreach (var req in calleeSpecs.Requires)
         {
             try

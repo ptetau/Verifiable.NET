@@ -4,6 +4,18 @@ This manual is organized around the concrete problems you run into while buildin
 
 ---
 
+### Bring your own Z3
+
+If build agents already provide Z3, reference `Verifiable.Contracts`,
+`Verifiable.Analyzers`, `Verifiable.Generators`, and `Verifiable.CodeFixes` at
+matching versions instead of `Verifiable.NET`. Use the component `.nupkg` files
+from the GitHub release assets (or pack this checkout) in your own feed.
+The component packages do not
+require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
+`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes both
+`VerifiableZ3Path` and `VerifiableAgent` to the compiler; no hand-written
+`CompilerVisibleProperty` entries are needed.
+
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
 
 **Problem:** Primitive types like `int`, `decimal`, `string`, and `Guid` let bad data (`0`, `-5m`, empty strings, `Guid.Empty`) walk through your entire system until something crashes later.
@@ -67,6 +79,13 @@ Both Z3 (at compile time) and generated `[InboundPort]` gates (at runtime) autom
 ---
 
 ## 3. Proving method behavior for all inputs (`Spec.*`)
+
+**Assembly boundary:** the prover reads helper bodies from the current compilation,
+not IL in referenced assemblies. Marking an external predicate `[Verifiable]`
+does not export its definition for use inside `Spec.Requires` or `Spec.Ensures`.
+For a shared range rule, publish its bounds as public constants and compare the
+input against those constants directly. This preserves the rule without
+suppressing VER101 or excluding additional inputs.
 
 **Problem:** You want to be 100% sure a method maintains invariants, never overflows, and handles every branch—without relying solely on example unit tests.
 
@@ -200,7 +219,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 1. Start with `[VerifiableCandidate]` at the assembly or class level. Every `VER001`–`VER006` rule reports as a **warning** instead of an error.
 2. Apply automated refactorings from `Verifiable.CodeFixes`:
    - `VER001` / `VER002`: Freeze mutable classes/collections into `readonly record struct` and `Immutable*` collections.
-   - `VER004`: Hoist `DateTime.UtcNow`, `DateTime.Now`, `Guid.NewGuid()`, and `Random` calls into explicit parameters.
+   - `VER004`: The code fix hoists an eager clock or GUID read in a private method only when all callers can be updated safely in the same document. For public APIs, optional parameters, or reads inside a loop or lambda, move the operation to the calling shell manually. Supply one value per item when the original operation ran once per item.
    - `VER005`: Convert `throw` statements into explicit `Result<T, TError>` returns.
    - `VER006`: Apply **Sandwich I/O splitting** to separate I/O at the edges from pure logic in the middle.
 3. Promote `[VerifiableCandidate]` to `[Verifiable]`, add `[TypeAlias<T>("...")]` types and `Spec.*` contracts, and let Z3 verify your core logic.

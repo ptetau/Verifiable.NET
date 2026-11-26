@@ -11,6 +11,23 @@ namespace Verifiable.Analyzers.Tests;
 public class GatekeeperTests
 {
     [Fact]
+    public async Task RecognizesPureSpecialTypeHelpersWithoutTrustingAllPrimitiveMethods()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+            [Verifiable] public static class Rules
+            {
+                public static bool Blank(string? s) => string.IsNullOrEmpty(s);
+                public static decimal Magnitude(decimal n) => decimal.Abs(n);
+                public static int CultureSensitive(string s) => int.Parse(s);
+            }
+            """;
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
+        var rejected = Assert.Single(diagnostics.Where(d => d.Id is "VER006" or "AD0001"));
+        Assert.Contains("Parse", rejected.GetMessage());
+    }
+
+    [Fact]
     public async Task CleanVerifiableCage_WithTypeAliasAndImmutableTypes_ProducesZeroDiagnostics()
     {
         const string source = """

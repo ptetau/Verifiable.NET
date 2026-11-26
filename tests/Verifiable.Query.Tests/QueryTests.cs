@@ -213,6 +213,26 @@ public sealed class QueryTests
         }
     }
 
+    [Theory]
+    [InlineData("x >= 0", 0)]
+    [InlineData("true", 2)]
+    [InlineData("Rules.Checked(x) >= 0", 2)]
+    public void QueryHelperPreconditionCannotBeProvedByTheAssumptionItGuards(string assume, int expected)
+    {
+        const string source = """
+            using Verifiable.Contracts;
+            [Verifiable] public static class Rules
+            {
+                public static int Checked(int x) { Spec.Requires(x >= 0); return x; }
+                public static int Keep(int x) => x;
+            }
+            """;
+        var (code, stdout, stderr) = RunCli(["ask", "--stdin", "--target", "Rules.Keep",
+            "--assert", "result == Rules.Checked(x)", "--assume", assume], source);
+        Assert.True(code == expected, stdout + stderr);
+        if (expected == 2) Assert.Contains("call precondition", stdout + stderr);
+    }
+
     [Fact]
     public void ContradictoryAssume_DetectsVacuousProofAndReportsJsonFlag()
     {

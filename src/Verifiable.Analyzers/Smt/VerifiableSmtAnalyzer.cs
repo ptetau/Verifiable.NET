@@ -63,7 +63,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
-                if (!MethodNeedsSmtCheck(method, opCtx.OperationBlocks))
+                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks))
                 {
                     return;
                 }
@@ -143,7 +143,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
-                            elmFail));
+                            $"{ob.Kind} of {method.ContainingType?.Name}.{method.Name} fails: " +
+                            OneLine(ob.Reason ?? ob.ContractText) + "; " + OneLine(ceSummary) +
+                            Environment.NewLine + elmFail));
                     }
                     else if (result.Status is SmtStatus.Unknown or SmtStatus.Error)
                     {
@@ -164,7 +166,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         });
     }
 
-    private static string BuildQueryScript(ProofObligation ob)
+    internal static string BuildQueryScript(ProofObligation ob)
     {
         var sb = new StringBuilder(ob.ScriptPreamble.Length + 256);
         sb.AppendLine(ob.ScriptPreamble);
@@ -176,7 +178,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return sb.ToString();
     }
 
-    private static bool MethodNeedsSmtCheck(IMethodSymbol method, ImmutableArray<IOperation> blocks)
+    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks)
     {
         if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
@@ -205,7 +207,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         return true;
                     }
 
-                    if (CfgSsaLowerer.MethodHasSpecRequires(inv.TargetMethod))
+                    if (CfgSsaLowerer.MethodHasSpecRequires(compilation, inv.TargetMethod))
                     {
                         return true;
                     }
@@ -260,6 +262,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             ? string.Join("\n    ", bindings)
             : "(solver found a violating assignment)";
     }
+
+    private static string OneLine(string text) =>
+        text.Replace("\n    ", ", ").Replace('\r', ' ').Replace('\n', ' ');
 
     private static string FormatKindLabel(string obligationKind) => obligationKind switch
     {

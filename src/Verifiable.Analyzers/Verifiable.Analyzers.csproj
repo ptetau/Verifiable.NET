@@ -32,6 +32,7 @@
 
   <ItemGroup>
     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="..\Verifiable.NET\build\Verifiable.NET.props" Pack="true" PackagePath="build\Verifiable.Analyzers.props;buildTransitive\Verifiable.Analyzers.props" Visible="false" />
     <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 

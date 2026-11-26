@@ -24,6 +24,24 @@ public class CodeFixTests
         ApplyCodeFixAsync(string source, string targetDiagnosticId, CodeFixProvider provider, int actionIndex = 0)
     {
         using var workspace = new AdhocWorkspace();
+        var (doc, actions) = await GetCodeActionsAsync(workspace, source, targetDiagnosticId, provider);
+        Assert.NotEmpty(actions);
+
+        var ops = await actions[actionIndex].GetOperationsAsync(CancellationToken.None);
+        var applyOp = ops.OfType<ApplyChangesOperation>().Single();
+        var newDoc = applyOp.ChangedSolution.GetDocument(doc.Id)!;
+        var updatedText = (await newDoc.GetTextAsync()).ToString();
+
+        var comp2 = (await newDoc.Project.GetCompilationAsync())!;
+        var compilerDiags = comp2.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToImmutableArray();
+        var analyzerDiags = await comp2.WithAnalyzers([new VerifiableGatekeeperAnalyzer()]).GetAnalyzerDiagnosticsAsync();
+
+        return (updatedText, analyzerDiags, compilerDiags);
+    }
+
+    private static async Task<(Document, List<CodeAction>)> GetCodeActionsAsync(AdhocWorkspace workspace,
+        string source, string targetDiagnosticId, CodeFixProvider provider, string? otherSource = null)
+    {
         var refs = AppDomain.CurrentDomain.GetAssemblies()
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .Select(a => MetadataReference.CreateFromFile(a.Location))
@@ -42,6 +60,8 @@ public class CodeFixTests
                 parseOptions: new CSharpParseOptions(LanguageVersion.Preview),
                 metadataReferences: refs));
 
+        if (otherSource is not null)
+            workspace.AddDocument(proj.Id, "Caller.cs", SourceText.From(otherSource));
         var doc = workspace.AddDocument(proj.Id, "Probe.cs", SourceText.From(source));
         var analyzer = new VerifiableGatekeeperAnalyzer();
 
@@ -58,18 +78,7 @@ public class CodeFixTests
             CancellationToken.None);
 
         await provider.RegisterCodeFixesAsync(ctx);
-        Assert.NotEmpty(actions);
-
-        var ops = await actions[actionIndex].GetOperationsAsync(CancellationToken.None);
-        var applyOp = ops.OfType<ApplyChangesOperation>().Single();
-        var newDoc = applyOp.ChangedSolution.GetDocument(doc.Id)!;
-        var updatedText = (await newDoc.GetTextAsync()).ToString();
-
-        var comp2 = (await newDoc.Project.GetCompilationAsync())!;
-        var compilerDiags = comp2.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToImmutableArray();
-        var analyzerDiags = await comp2.WithAnalyzers([analyzer]).GetAnalyzerDiagnosticsAsync();
-
-        return (updatedText, analyzerDiags, compilerDiags);
+        return (doc, actions);
     }
 
     [Fact]
@@ -84,7 +93,7 @@ public class CodeFixTests
             public static class Orders
             {
                 [VerifiableCandidate]
-                public static string Stamp(string name)
+                private static string Stamp(string name)
                 {
                     var ts = DateTimeOffset.UtcNow;
                     return $"{name}:{ts.ToUnixTimeSeconds()}";
@@ -110,7 +119,7 @@ public class CodeFixTests
             public static class Tokens
             {
                 [VerifiableCandidate]
-                public static Guid Next() => Guid.NewGuid();
+                private static Guid Next() => Guid.NewGuid();
 
                 public static Guid UseIt() => Next();
             }
@@ -121,6 +130,36 @@ public class CodeFixTests
         Assert.DoesNotContain(remG, d => d.Id == "VER004");
         Assert.Contains("Guid id", updatedG);
         Assert.Contains("Next(Guid.NewGuid())", updatedG);
+    }
+
+    [Theory]
+    [InlineData("public static DateTime Read() => DateTime.UtcNow;")]
+    [InlineData("private static DateTime Read() => DateTime.UtcNow;",
+        "partial class Probe { DateTime Use() => Read(); }")]
+    [InlineData("private static DateTime Read() => DateTime.UtcNow; Func<DateTime> use = Read;")]
+    [InlineData("private static DateTime Read(int n = 0) => DateTime.UtcNow;")]
+    [InlineData("private static DateTime Read(params int[] n) => DateTime.UtcNow;")]
+    [InlineData("private static Guid[] Create() => Enumerable.Range(0, 2).Select(_ => Guid.NewGuid()).ToArray();")]
+    [InlineData("private static void Create() { for (int i = 0; i < 2; i++) { var t = DateTime.UtcNow; } }")]
+    [InlineData("private static IEnumerable<Guid> Create() { var id = Guid.NewGuid(); yield return id; }")]
+    public async Task HoistAmbientAuthority_DeclinesUnsafeChanges(string members, string? otherSource = null)
+    {
+        using var workspace = new AdhocWorkspace();
+        var source = $$"""
+            using System;
+            using System.Linq;
+            using System.Collections.Generic;
+            using Verifiable.Contracts;
+            partial class Probe {
+                [VerifiableCandidate]
+                {{members}}
+            }
+            """;
+        var (doc, actions) = await GetCodeActionsAsync(workspace, source, "VER004",
+            new HoistAmbientAuthorityCodeFixProvider(), otherSource is null ? null : "using System; " + otherSource);
+        var compilation = (await doc.Project.GetCompilationAsync())!;
+        Assert.DoesNotContain(compilation.GetDiagnostics(), d => d.Severity == DiagnosticSeverity.Error);
+        Assert.Empty(actions);
     }
 
     [Fact]
