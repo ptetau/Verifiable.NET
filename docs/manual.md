@@ -145,6 +145,34 @@ Z3 checks four facts automatically:
 
 ---
 
+### Writing contracts with helpers
+
+A pure helper in the same compilation can describe its result with its body. For example, this projection needs no field-by-field postcondition on `Project`:
+
+```csharp
+public record OrderDto(int Id, int Extras);
+public readonly record struct OrderState(int Id, int Extras);
+
+[Verifiable]
+public static class Orders
+{
+    static OrderState Project(OrderDto dto, bool includeExtras = true) =>
+        new(dto.Id, includeExtras ? dto.Extras : 0);
+
+    public static OrderState Adapt(OrderDto dto)
+    {
+        Spec.Ensures<OrderState>(s => s.Extras == dto.Extras);
+        return Project(dto);
+    }
+}
+```
+
+`Adapt` calls `Project` with `includeExtras: true`; the default is **not** a precondition on `Project`. Explicit callers can still pass `false`. The verifier can expand a supported, statically resolved, non-generic helper with an expression body or a single return after leading `Spec.Requires` or `Spec.Ensures` statements. Recursive definitions are not expanded. Use `[Ghost]` for a helper intended only for specifications. A call inside a specification must still satisfy the helper's preconditions.
+
+Nullable expressions work in both the implementation and the contract. For `decimal? value`, `value >= 10m` is false when `value` is null, and `value ?? 0m` returns zero in that case. For a struct instance method, use a boolean postcondition such as `Spec.Ensures(Spec.Result<bool>() == (Left != 0 || Right != 0));` to avoid capturing `this` in a lambda.
+
+---
+
 ## 4. Reading Elm-style compiler errors
 
 When a rule breaks, Verifiable.NET formats compiler errors in an Elm-inspired layout so you can spot the problem in seconds:

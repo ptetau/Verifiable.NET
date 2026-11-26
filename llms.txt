@@ -81,7 +81,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER001` (`MUTABLE STATE`): class, non-readonly struct, settable prop, mutable field, `ref`/`out`. Fix: `readonly record struct` / immutable `record` + `with`.
 - `VER002` (`MUTABLE COLLECTION`): `List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `T[]`. Fix: `ImmutableList<T>`, `ImmutableDictionary<K,V>`, `ImmutableHashSet<T>`, `ImmutableArray<T>`.
 - `VER003` (`UNCHECKED INITIALIZATION`): `default(T)` / `new T()` on `[TypeAlias<T>]` or `[Invariant]` type. Fix: `T.From(...)`, `T.TryFrom(...)`, `[InboundPort]`.
-- `VER004` (`AMBIENT AUTHORITY`): `DateTime.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, `Environment.*`, mutable `static`. Fix: hoist into explicit parameters.
+- `VER004` (`AMBIENT AUTHORITY`): `DateTime.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, `Environment.*`, mutable `static`. Pass values from the shell. Automatic clock/GUID hoisting is limited to eligible eager reads in private methods with same-document callers; preserve one read or allocation per item in loops and lambdas.
 - `VER005` (`DISALLOWED CONTROL FLOW`): unannotated `while`/`foreach`, `throw`, `try/catch`, `async`/`await`, `lock`, `goto`. Fix: `LoopInvariant` + `Decreases` or `Result<T, TError>`.
 - `VER006` (`UNVERIFIED CALL`): unverified callee, reflection, `dynamic`, unanalyzed delegate. Fix: `[Verifiable]` / `[PureAxiom]` / Sandwich I/O split.
 - `VER007` (`UNCONSUMED OBLIGATION`): dropped, overwritten, discarded, or double-consumed `[MustConsume]` token. Fix: pass to `[ConsumesObligation]`, return, or `Obligation.Discard(...)`.

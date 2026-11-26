@@ -55,7 +55,8 @@ public static class LedgerEngine
 If you write a bug—say you forget the `Spec.Requires` check above—the build fails immediately with an **Elm-style error** that shows the exact line, reminds you *why* the rule exists, and gives concrete inputs that break it:
 
 ```text
-LedgerEngine.cs(12,9): error VER102: -- PROOF FAILED ------------------------------------------- LedgerEngine.cs
+LedgerEngine.cs(12,9): error VER102: Postcondition of LedgerEngine.Withdraw fails: Balances must stay non-negative after every withdrawal.; balance = 0.0, amount = 1.0
+-- PROOF FAILED ------------------------------------------- LedgerEngine.cs
 
 Z3 found inputs that break a postcondition in `LedgerEngine.Withdraw`.
 
@@ -76,7 +77,9 @@ Counterexample:
 Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...).
 ```
 
-Every `Spec.*` `because` string and `[Invariant("...")]` / `[TypeAlias<T>("...")]` `description` is optional, and when you provide it, it flows straight into compiler errors, JSON deserialization errors, and HTTP validation responses.
+`dotnet build` may show only the first line. To capture the full diagnostic and counterexample JSON, see the [agent guide](docs/agents.md#structured-counterexample-json-ver102--elm-output).
+
+For contracts that use `??`, call helpers, or project a DTO into a record, see [Writing contracts with helpers](docs/manual.md#writing-contracts-with-helpers). If your build agent already has Z3, see [Bring your own Z3](docs/manual.md#bring-your-own-z3).
 
 ---
 
@@ -131,7 +134,7 @@ Need an escape hatch for an I/O controller, logging, or SQLite adapter? Leave `[
 You do not have to rewrite everything at once:
 
 1. Add `[VerifiableCandidate]` to a class, method, or assembly. Violations appear as **warnings**, not build errors.
-2. Let `Verifiable.CodeFixes` apply automated refactorings for `VER001`–`VER006` (hoist `DateTime.UtcNow`/`Guid.NewGuid()` into parameters, freeze mutable types, extract pure logic with Sandwich I/O splitting, convert `throw` to `Result<T, TError>`).
+2. Apply the available `Verifiable.CodeFixes` for `VER001`–`VER006`. For `VER004`, the fix can move an eager clock or GUID read into a private method parameter when all callers can be updated in the same document. If a loop creates one GUID per item, keep that allocation per item; passing one GUID for the whole batch changes the result.
 3. Flip `[VerifiableCandidate]` to `[Verifiable]` when the warnings reach zero.
 
 ---

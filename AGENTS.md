@@ -57,7 +57,7 @@ Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=loa
 
 1. Annotate a legacy assembly, class, or method with `[VerifiableCandidate]` (emits Warnings, never breaks build).
 2. Fix `VER001`–`VER006` warnings mechanically (manually or via `Verifiable.CodeFixes`):
-   - `VER004` -> hoist `UtcNow`/`NewGuid()` into parameters
+   - `VER004` -> use the code fix for eligible eager reads in private methods; move per-item clock reads or GUID allocations to the calling shell without changing how often they run
    - `VER001`/`VER002` -> freeze to `readonly record struct` / `Immutable*` + `with`
    - `VER006`/`VER005` -> split pure logic via Sandwich I/O and replace `throw` with `Result<T, TError>`
 3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>("why")]` / `[Refined<T>("why")]` (`public static bool IsValid(...)`), add `[Invariant("why")]` bool methods/properties, and attach `Spec.Requires(..., "why")` / `Spec.Ensures<T>(..., "why")` / `Spec.LoopInvariant(..., "why")` / `Spec.Decreases(..., "why")` for Z3 verification.
