@@ -14,6 +14,11 @@ dotnet test Verifiable.NET.sln -c Release --no-build
 ```
 
 ### Structured Counterexample JSON (`VER102`) & Elm Output
+The first console line for VER102 includes the obligation, method, and counterexample.
+For the complete message and JSON when MSBuild truncates multiline diagnostics, run
+`dotnet build MyProject.csproj -p:VerifiableAgent=1 -p:ErrorLog=proof.sarif%2Cversion=2.1`
+and read the VER102 entry's `message.text` under `runs[].results[]` in `proof.sarif`.
+
 All diagnostics (`VER001`–`VER202`) use an Elm-style layout (`-- TITLE ---- File.cs`, numbered source excerpt with `^` caret underline, `"Why this rule exists:"`, and a concrete `Fix:` line).
 When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyzers` outputs:
 - Elm-style banner, source caret, optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, and `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`)

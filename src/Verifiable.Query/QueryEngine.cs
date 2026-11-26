@@ -370,6 +370,21 @@ internal static class QueryEngine
                 "Ensure the target method has at least one return path.");
         }
 
+        // Check against the premises available at the call, not the exit premises:
+        // those can include the callee postcondition or even the assumption being evaluated.
+        foreach (var req in outcome.Preconditions)
+        {
+            var check = Z3SolverRunner.Execute(VerifiableSmtAnalyzer.BuildQueryScript(req), z3Path,
+                req.Location.SourceTree?.FilePath, timeoutMs);
+            if (check.Status == SmtStatus.Unsat) continue;
+            return new MethodQueryResult(methodDisplay, returnTypeDisplay, assertText, assumeText, because,
+                check.Status == SmtStatus.SolverUnavailable ? QueryOutcomeStatus.Z3NotFound : QueryOutcomeStatus.Inconclusive,
+                false, outcome.Obligations.Count, check.QueryHash, req.Location,
+                Array.Empty<QueryReason>(), Array.Empty<QueryReason>(), Array.Empty<PathCounterexample>(),
+                $"Cannot prove call precondition: {req.ContractText} (Z3: {check.Status}). {check.ErrorMessage}".TrimEnd(),
+                "Guard the call or strengthen the input precondition before relying on the helper.");
+        }
+
         var coreReasons = new List<QueryReason>();
         var coreTraceSteps = new List<QueryReason>();
         var seenReasons = new HashSet<string>(StringComparer.Ordinal);

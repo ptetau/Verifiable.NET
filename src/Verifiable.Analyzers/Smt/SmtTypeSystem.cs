@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace Verifiable.Analyzers.Smt;
 
@@ -452,7 +453,8 @@ internal sealed class SmtTypeSystem
         Compilation compilation,
         ISymbol member,
         out IParameterSymbol? parameterSymbol,
-        out IOperation? returnOp)
+        out IOperation? returnOp,
+        bool allowLeadingContracts = false)
     {
         parameterSymbol = member is IMethodSymbol ms && ms.Parameters.Length == 1 ? ms.Parameters[0] : null;
 
@@ -467,17 +469,24 @@ internal sealed class SmtTypeSystem
             var model = compilation.GetSemanticModel(syn.SyntaxTree);
             if (syn is MethodDeclarationSyntax md)
             {
-                if (md.ExpressionBody?.Expression is { } arrowExpr)
+                if (md.ExpressionBody is { } arrow &&
+                    model.GetOperation(arrow) is IBlockOperation arrowBlock)
                 {
-                    returnOp = model.GetOperation(arrowExpr);
+                    returnOp = arrowBlock.Operations.OfType<IReturnOperation>().SingleOrDefault()?.ReturnedValue;
                     if (returnOp is not null) return true;
                 }
 
-                if (md.Body is { Statements.Count: 1 } body &&
-                    body.Statements[0] is ReturnStatementSyntax ret &&
-                    ret.Expression is { } retExpr)
+                if (md.Body is { Statements.Count: > 0 } body &&
+                    body.Statements.Last() is ReturnStatementSyntax ret &&
+                    (body.Statements.Count == 1 || (allowLeadingContracts &&
+                        body.Statements.Take(body.Statements.Count - 1).All(s =>
+                            s is ExpressionStatementSyntax stmt &&
+                            model.GetOperation(stmt.Expression) is IInvocationOperation inv &&
+                            (VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Requires") ||
+                             VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Ensures"))))) &&
+                    model.GetOperation(ret) is IReturnOperation returnOperation)
                 {
-                    returnOp = model.GetOperation(retExpr);
+                    returnOp = returnOperation.ReturnedValue;
                     if (returnOp is not null) return true;
                 }
             }

@@ -52,9 +52,9 @@ public sealed class ConsumesObligationAttribute : Attribute;
 public sealed class InboundPortAttribute : Attribute;
 
 /// <summary>
-/// Marks a proof-only specification property or field excluded from generated raw I/O DTOs.
+/// Marks a proof-only specification member. Ghost fields and properties are excluded from generated raw I/O DTOs.
 /// </summary>
-[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.Method)]
 public sealed class GhostAttribute : Attribute;
 
 /// <summary>

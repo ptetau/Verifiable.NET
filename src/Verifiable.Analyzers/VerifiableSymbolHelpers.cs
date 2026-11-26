@@ -266,6 +266,20 @@ internal static class VerifiableSymbolHelpers
         var ns = containingType.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var typeFull = containingType.OriginalDefinition.ToDisplayString();
 
+        // Default display names use C# aliases. Match pure helpers by symbol identity;
+        // trusting whole primitive types would also admit culture-sensitive and mutating APIs.
+        if (method.IsStatic && (containingType.SpecialType switch
+        {
+            SpecialType.System_String => method.Name is "IsNullOrEmpty" or "IsNullOrWhiteSpace",
+            SpecialType.System_Decimal or SpecialType.System_Int32 or SpecialType.System_Int64 or
+                SpecialType.System_UInt32 or SpecialType.System_UInt64 => method.Name is "Abs" or "Min" or "Max" or "Clamp" or "Sign",
+            SpecialType.System_Char => method.Name is "IsDigit" or "IsLetter" or "IsWhiteSpace",
+            _ => false
+        }))
+        {
+            return true;
+        }
+
         if (ns == "System.Collections.Immutable")
         {
             return true;
@@ -274,17 +288,8 @@ internal static class VerifiableSymbolHelpers
         if (typeFull is
             "System.Math" or
             "System.MathF" or
-            "System.Decimal" or
-            "System.String" or
-            "System.Int32" or
-            "System.Int64" or
-            "System.UInt32" or
-            "System.UInt64" or
-            "System.Boolean" or
-            "System.Char" or
             "System.Guid" or
             "System.Enum" or
-            "System.Object" or
             "System.ValueTuple" or
             "System.Linq.Enumerable" or
             "System.Collections.Generic.Comparer<T>" or
@@ -295,11 +300,6 @@ internal static class VerifiableSymbolHelpers
             "System.IEquatable<T>")
         {
             if (typeFull == "System.Guid" && method.Name == "NewGuid")
-            {
-                return false;
-            }
-
-            if (typeFull == "System.Object" && method.Name == "GetType")
             {
                 return false;
             }

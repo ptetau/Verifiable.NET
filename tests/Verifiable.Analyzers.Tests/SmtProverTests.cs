@@ -575,6 +575,10 @@ public class SmtProverTests
 
         var withdrawErr = Assert.Single(ver102s, d => d.GetMessage().Contains("Vault.Withdraw"));
         var wMsg = withdrawErr.GetMessage();
+        var firstLine = wMsg.Split('\n')[0];
+        Assert.Contains("Postcondition of Vault.Withdraw fails", firstLine);
+        Assert.Contains("Vault accounts do not allow overdrafts.", firstLine);
+        Assert.Contains("balance = ", firstLine);
         Assert.Contains("-- PROOF FAILED", wMsg);
         Assert.Contains("Why this rule exists:", wMsg);
         Assert.Contains("Vault accounts do not allow overdrafts.", wMsg);
