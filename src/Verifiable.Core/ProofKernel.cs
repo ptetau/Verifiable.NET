@@ -174,16 +174,15 @@ internal static class ProofKernel
     internal static string BuildRefutationQuery(string preamble, string pathCondition, string goal)
     {
         Spec.Ensures<string>(
-            r => r.StartsWith(preamble, System.StringComparison.Ordinal),
-            "Every premise of the obligation is part of the query, unchanged.");
-        Spec.Ensures<string>(
-            r => r.EndsWith("(assert (not " + goal + "))\n", System.StringComparison.Ordinal),
-            "The last assertion is the negation of the goal, so unsat means the goal itself holds.");
+            r => Spec.Implies(
+                pathCondition.Length == 0 || pathCondition == "true",
+                r == preamble + "\n(assert (not " + goal + "))\n"),
+            "With no path condition, the query is exactly the premises followed by the negated goal: nothing else can be assumed.");
         Spec.Ensures<string>(
             r => Spec.Implies(
                 pathCondition.Length > 0 && pathCondition != "true",
-                r.Contains("(assert " + pathCondition + ")\n")),
-            "A non-trivial path condition is asserted, so the goal is only checked on the path where it applies.");
+                r == preamble + "\n(assert " + pathCondition + ")\n(assert (not " + goal + "))\n"),
+            "Otherwise it is exactly the premises, the path condition and the negated goal: nothing else can be assumed, so unsat means the goal holds on that path.");
         Spec.Requires(
             preamble is not null && pathCondition is not null && goal is not null,
             "Query parts are produced by the lowerer and are never null.");

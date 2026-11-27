@@ -124,12 +124,12 @@ public class KernelBehaviourTests
          from goal in Gen.String().WithLengthBetween(1, 20)
          select (preamble, path, goal)).ForAll(x =>
         {
+            // Independent of Z3: the analyzer that proves the kernel is built from the kernel, so a bug that
+            // blinds the prover (for example an injected `(assert false)`) must be caught without it.
             var script = ProofKernel.BuildRefutationQuery(x.preamble, x.path, x.goal);
-            var pathAsserted = script.Contains("(assert " + x.path + ")\n", StringComparison.Ordinal);
             var pathMatters = x.path.Length > 0 && x.path != "true";
-            return script.StartsWith(x.preamble, StringComparison.Ordinal)
-                && script.EndsWith("(assert (not " + x.goal + "))\n", StringComparison.Ordinal)
-                && (!pathMatters || pathAsserted);
+            var expected = x.preamble + "\n" + (pathMatters ? "(assert " + x.path + ")\n" : "") + "(assert (not " + x.goal + "))\n";
+            return script == expected;
         });
 
     [Fact]
