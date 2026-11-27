@@ -56,6 +56,16 @@ public class KernelBehaviourTests
         }
     }
 
+    [Fact]
+    public void AcceptCachedAnswer_NeedsSignatureAndDefinitiveAnswer()
+    {
+        foreach (var status in AllStatuses)
+        {
+            Assert.False(ProofKernel.AcceptCachedAnswer(false, status));
+            Assert.Equal(status is SmtStatus.Unsat or SmtStatus.Sat, ProofKernel.AcceptCachedAnswer(true, status));
+        }
+    }
+
     [Property]
     public bool ClassifyStatusLine_ReadsOnlyExactTokens(string line)
     {

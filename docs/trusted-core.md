@@ -22,6 +22,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.ReadCheckSatAnswer` | `unsat` is only reported if Z3 printed exactly `unsat` and nothing before it was another verdict or an error. Empty output is an error. |
 | `ProofKernel.BlocksBuild` | Decides the severity of `VER104`: a missing solver stops the build unless the project explicitly opts out with `VerifiableAllowMissingZ3`. (Refuted and undecided obligations stop the build through the default Error severity of `VER102`/`VER103`, which a project can still lower in `.editorconfig`.) |
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
+| `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | When two paths merge, a `[MustConsume]` token that may be live on either path is still flagged, unless one side is a sink-method parameter (which may hold the token). A token counts as consumed only if it was consumed on both paths. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. Together with the per-block transfer rules (which are not proved), this is what lets the `VER007` analysis give the same answer in any visiting order. |
@@ -49,12 +50,12 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **The query CLI script.** `QueryEngine.BuildNamedQueryScript` assembles the premises, path conditions and `--assume` for `verifiable-query`. Only its final, negated-goal line comes from the core.
 - **The `VER007` transfer rules.** How each statement changes a token's state, and the check at method exit, live in `LinearObligationAnalyzer`. Only the merge rule is in the core.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query, returns the output lines it read, and computes the cache key (`BuildHashInput`).
+- **The disk cache** (`SignedAnswerCache`) signs each entry with a per-user key, binding it to its query. The folder is built owner-only before the key is written, and an existing folder or key that group or others could access, or that is a link, is never trusted. On Windows it relies on the default private ACL of `LocalApplicationData`. It is as safe as your user account: code running as you (or as root) can still forge entries.
 
 ## Known gaps found while drawing this line
 
 These are open, and are listed so they are not forgotten:
 
-- **Shared disk cache.** `Z3SolverRunner` caches answers in `verifiable-smt-cache-v1` under the system temp folder, keyed by a hash of the query. Entries are not signed, so anyone who can write to that folder can plant an `Unsat` answer. The cache now rejects any entry the kernel would not have cached (`IsCacheable`), but a planted `Unsat` still passes.
 - **Vacuous proofs in the analyzer.** If a method's premises contradict each other, every goal is "proved". `verifiable-query` detects this through the unsat core; the build-time analyzer does not.
 
 ## Rules for contributors
