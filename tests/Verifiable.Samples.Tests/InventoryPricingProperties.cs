@@ -110,4 +110,17 @@ public sealed class InventoryPricingProperties
         Assert.False(badBps.IsValid);
         Assert.Contains(badBps.Violations, v => v.Message.Contains("basis points"));
     }
+
+    [Property(Iterations = 25)]
+    public Property RemoveCartLine_PreservesOrderBeforeAndAfterRemovedIndex() =>
+        (from lines in GenCartLine().ListOf().WithCountBetween(1, 10)
+         from rawIdx in Gen.Int32().Between(0, 9)
+         select (arr: lines.ToImmutableArray(), idx: rawIdx % lines.Count)).ForAll(x =>
+        {
+            var updated = PricingEngine.RemoveCartLine(x.arr, x.idx);
+            return !updated.IsDefault
+                && updated.Length == x.arr.Length - 1
+                && Verifiable.Contracts.Spec.ForAll(0, x.idx, i => updated[i] == x.arr[i])
+                && Verifiable.Contracts.Spec.ForAll(x.idx, updated.Length, i => updated[i] == x.arr[i + 1]);
+        });
 }

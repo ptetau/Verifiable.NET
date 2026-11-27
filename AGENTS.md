@@ -45,13 +45,15 @@ Every Verifiable diagnostic uses an Elm-style layout (`-- TITLE ---- File.cs`, s
 ### GalaxyCheck Property Failure
 Every failing `[Property]` test includes a single-line `<galaxycheck-failure>` JSON block with `counterexample`, `csharp`, `replay`, `seed`, and an exact `rerun` command. See `docs/agents.md` and `external/GalaxyCheck/docs/agents.md` for full schemas.
 
-### Interactive Verification Query CLI (`Verifiable.Query`)
-Run pure .NET Core formal queries without modifying source files (`verifiable-query` or `dotnet run --project src/Verifiable.Query -c Release -- ...`):
+### Interactive Verification Query & Elm Check CLI (`Verifiable.Query`)
+Run pure .NET Core formal queries or full multi-line Elm checks without modifying source files (`verifiable-query` or `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- ...`):
 - `ask --project <p> --target <Type.Method|Type> --assert <expr> [--assume <expr>] [--because <text>]`
 - `check-invariant --project <p> --type <TypeName> --expr <lambda> [--assume <expr>]`
 - `list --project <p>` (or `--file` / `--stdin`)
+- `check (--project <p> | --file <f> | --stdin | --sarif <log.sarif>) [--color auto|always|never] [--no-warnings] [--format elm|json]`
+- `build <project-or-sln> [--color auto|always|never] [--no-warnings] [--format elm|json] [-- <extra dotnet build args>]`
 
-Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=load/bind error, `4`=Z3 missing). With `--format json`, pure JSON is emitted; with `--format elm` + `VERIFIABLE_AGENT=1`, Elm output includes a single-line `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` for `list`).
+Exit codes are deterministic (`0`=proved/passed, `1`=refuted/errors, `2`=inconclusive, `3`=load/bind error, `4`=Z3 missing). With `--format json`, pure JSON is emitted; with `--format elm` + `VERIFIABLE_AGENT=1`, ANSI colors are disabled and Elm output appends a single-line `<verifiable-query-result>{...}</verifiable-query-result>`, `<verifiable-symbols>{...}</verifiable-symbols>`, or `<verifiable-check-result>{...}</verifiable-check-result>`.
 
 ## 4. Incremental Migration Workflow (`[VerifiableCandidate]`)
 
@@ -60,8 +62,8 @@ Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=loa
    - `VER004` -> use the code fix for eligible eager reads in private methods; move per-item clock reads or GUID allocations to the calling shell without changing how often they run
    - `VER001`/`VER002` -> freeze to `readonly record struct` / `Immutable*` + `with`
    - `VER006`/`VER005` -> split pure logic via Sandwich I/O and replace `throw` with `Result<T, TError>`
-3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>("why")]` / `[Refined<T>("why")]` (`public static bool IsValid(...)`), add `[Invariant("why")]` bool methods/properties, and attach `Spec.Requires(..., "why")` / `Spec.Ensures<T>(..., "why")` / `Spec.LoopInvariant(..., "why")` / `Spec.Decreases(..., "why")` for Z3 verification.
-4. Keep I/O boundaries safe by exposing `[InboundPort]` and wiring `[MustConsume]` obligation tokens across UI -> API -> DB.
+3. Promote `[VerifiableCandidate]` -> `[Verifiable]` at the highest appropriate level (`[assembly: Verifiable]` or class/struct level; opt out boundary types/methods with `[Unverifiable]`). Push invariants into `[TypeAlias<T>("why")]` / `[Refined<T>("why")]` (`public static bool IsValid(...)`), add `[Invariant("why")]` bool methods/properties, annotate initialized `ImmutableArray<T>` values with `[NonDefault]` (or `<VerifiableNonDefaultImmutableArrays>true</VerifiableNonDefaultImmutableArrays>`), and attach `Spec.Requires` / `Spec.RequiresWhen` / `Spec.Ensures<T>` / `Spec.EnsuresWhen<T>` / `Spec.Implies` / `Spec.ForAll` / `Spec.Exists` / `Spec.LoopInvariant` / `Spec.Decreases` (all with `because` strings; `VER301`/`VER302` nudge on dense clauses or missing `because`, with a `VER301` split CodeFix).
+4. Keep I/O boundaries safe by exposing `[InboundPort]`, using `[MapTo]` for 1:1 DTO projections, and wiring `[MustConsume]` obligation tokens across UI -> API -> DB.
 
 ## 5. Documentation & Compact Reference
 

@@ -12,8 +12,9 @@ matching versions instead of `Verifiable.NET`. Use the component `.nupkg` files
 from the GitHub release assets (or pack this checkout) in your own feed.
 The component packages do not
 require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
-`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes both
-`VerifiableZ3Path` and `VerifiableAgent` to the compiler; no hand-written
+`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes `VerifiableZ3Path`, `VerifiableAgent`,
+`VerifiableClosedEnums`, `VerifiableNonDefaultImmutableArrays`, and
+`VerifiableMaxSpecClauses` to the compiler; no hand-written
 `CompilerVisibleProperty` entries are needed.
 
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
@@ -80,11 +81,11 @@ Both Z3 (at compile time) and generated `[InboundPort]` gates (at runtime) autom
 
 ## 3. Proving method behavior for all inputs (`Spec.*`)
 
-**Cross-assembly verification:** When a library is compiled with `Verifiable.Generators`, `ContractMetadataGenerator` automatically exports canonical `[assembly: VerifiableContractMetadata(...)]` metadata for externally accessible `[Verifiable]` / `[Ghost]` helpers, `Spec.Requires` / `Spec.Ensures` contracts, `[Invariant]` members, `[TypeAlias<T>]` predicates, and `[MapTo]` projections. Referencing compilations bind and verify these contracts across assembly boundaries with Z3 automatically. Helpers that rely on private non-constant implementation details (or assemblies built without `Verifiable.Generators`) fail closed with `VER101` rather than assuming unverified behavior.
+**Cross-assembly verification:** When a library is compiled with `Verifiable.Generators`, `ContractMetadataGenerator` automatically exports canonical `[assembly: VerifiableContractMetadata(...)]` metadata for externally accessible `[Verifiable]` / `[Ghost]` helpers, `Spec.Requires` / `Spec.RequiresWhen` / `Spec.Ensures` / `Spec.EnsuresWhen` contracts, `[Invariant]` members, `[TypeAlias<T>]` predicates, and `[MapTo]` projections. Referencing compilations bind and verify these contracts across assembly boundaries with Z3 automatically. Helpers that rely on private non-constant implementation details (or assemblies built without `Verifiable.Generators`) fail closed with `VER101` rather than assuming unverified behavior.
 
 **Problem:** You want to be 100% sure a method maintains invariants, never overflows, and handles every branch—without relying solely on example unit tests.
 
-**Solution:** Write standard C# assertions with `Spec.Requires`, `Spec.Ensures<T>`, `Spec.Ensures`, and `Spec.Result<T>()`. Passing a plain-English `because` message as the second argument documents *the spirit of the rule* and surfaces inside Z3 failure reports:
+**Solution:** Write standard C# assertions with `Spec.Requires`, `Spec.RequiresWhen`, `Spec.Ensures<T>`, `Spec.Ensures`, `Spec.EnsuresWhen<T>`, `Spec.Implies`, `Spec.ForAll`/`Spec.Exists`, and `Spec.Result<T>()`. Passing a plain-English `because` message as the trailing argument documents *the spirit of the rule* and surfaces inside Z3 failure reports:
 
 ```csharp
 public static LedgerState PostCheckedAssetTransfer(
@@ -96,8 +97,11 @@ public static LedgerState PostCheckedAssetTransfer(
     UnixTimestamp now)
 {
     Spec.Requires(
-        from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount,
-        "Transfers require two distinct existing accounts and enough balance in the source account to avoid overdraft.");
+        from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to),
+        "Transfers require two distinct existing accounts.");
+    Spec.Requires(
+        state.Accounts[from].Balance >= amount,
+        "The source account must have enough balance to avoid overdraft.");
     Spec.Ensures<LedgerState>(
         result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m,
         "After the transfer, the source account remains non-negative.");
@@ -108,7 +112,7 @@ public static LedgerState PostCheckedAssetTransfer(
 }
 ```
 
-All `Spec.*` methods carry `[Conditional("VERIFIABLE_SPEC")]`, so the compiler strips them completely from compiled IL—zero runtime overhead.
+All `void` `Spec.*` statements carry `[Conditional("VERIFIABLE_SPEC")]`, so the compiler strips them completely from compiled IL—zero runtime overhead. Boolean helpers (`Spec.Implies`, `Spec.ForAll`, `Spec.Exists`) also evaluate accurately at runtime in tests and `[InboundPort]` gates.
 
 ### Proving `while` loops (`Spec.LoopInvariant` & `Spec.Decreases`)
 
@@ -258,19 +262,20 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
    - `VER004`: The code fix hoists an eager clock or GUID read in a private method only when all callers can be updated safely in the same document. For public APIs, optional parameters, or reads inside a loop or lambda, move the operation to the calling shell manually. Supply one value per item when the original operation ran once per item.
    - `VER005`: Convert `throw` statements into explicit `Result<T, TError>` returns.
    - `VER006`: Apply **Sandwich I/O splitting** to separate I/O at the edges from pure logic in the middle.
+   - `VER301`: Split overly dense `Spec.Requires` / `Spec.RequiresWhen` / `Spec.Ensures` / `Spec.EnsuresWhen` `&&` conjunctions into separate, focused `Spec.*` statements.
 3. Promote `[VerifiableCandidate]` to `[Verifiable]`, add `[TypeAlias<T>("...")]` types and `Spec.*` contracts, and let Z3 verify your core logic.
 
 ---
 
-## 9. Asking Formal Questions (`Verifiable.Query` / `verifiable-query`)
+## 9. Asking Formal Questions & Full Elm Checks (`Verifiable.Query` / `verifiable-query`)
 
-**Problem:** You want to verify a domain hypothesis right now (for example *"does every ledger transition preserve `TotalDebits == TotalCredits`?"*), check why a property holds, or test a `--assume` hypothesis without modifying your source files.
+**Problem:** You want to verify a domain hypothesis right now (for example *"does every ledger transition preserve `TotalDebits == TotalCredits`?"*), inspect a build with full ANSI-colored multi-line Elm output, or test a `--assume` hypothesis without modifying your source files.
 
-**Solution:** Use `Verifiable.Query` (`verifiable-query`, a pure `.NET Core` CLI requiring only .NET + Z3):
+**Solution:** Use `Verifiable.Query` (`verifiable-query`, a pure `.NET Core` CLI targeting `net8.0`–`net11.0`, requiring only .NET + Z3):
 
 - **Check a single method (`ask`):**
   ```bash
-  dotnet run --project src/Verifiable.Query -c Release -- ask \
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- ask \
     --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj \
     --target LedgerEngine.PostTransfer \
     --assume "result.IsSuccess" \
@@ -278,29 +283,39 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
   ```
 - **Verify an invariant across every method returning a type (`check-invariant`):**
   ```bash
-  dotnet run --project src/Verifiable.Query -c Release -- check-invariant \
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check-invariant \
     --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj \
     --type LedgerState \
     --expr "s => s.TotalDebits == s.TotalCredits"
   ```
 - **Inspect available types, `[Invariant]` members, and `[Verifiable]` methods (`list`):**
   ```bash
-  dotnet run --project src/Verifiable.Query -c Release -- list \
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- list \
     --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj
+  ```
+- **Run full in-process Elm checks, SARIF presentation, or Elm-wrapped `dotnet build` (`check` / `build`):**
+  ```bash
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check \
+    --project samples/InventoryPricing/InventoryPricing.csproj [--color auto|always|never] [--no-warnings]
+
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check --sarif build.sarif
+
+  dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- build \
+    samples/InventoryPricing/InventoryPricing.csproj [-- <extra dotnet build args>]
   ```
 - **Query quick snippets from stdin (`--stdin`) or standalone `.cs` files (`--file`):**
   Pipe C# directly into `--stdin`, or pass `--file FileA.cs --file FileB.cs`.
 - **Exit codes & machine output:**
-  - `0` — Claim proved across all reachable paths (Z3 unsat core lists exact `[Invariant]` / `[TypeAlias<T>]` / `Spec.Requires` rules and spirit strings; flags vacuous proofs if premises are unreachable).
-  - `1` — Refuted (concrete counterexample + `file:line`).
+  - `0` — Claim proved across all reachable paths (or `check`/`build` passed with 0 errors). Z3 unsat core lists exact `[Invariant]` / `[TypeAlias<T>]` / `Spec.Requires` rules and spirit strings; flags vacuous proofs if premises are unreachable.
+  - `1` — Refuted (concrete counterexample + `file:line`) or `check`/`build` reported errors.
   - `2` — Inconclusive (solver timeout/unknown).
   - `3` — Input/compilation error or unbound query expression (lists variables and properties in scope).
   - `4` — Z3 binary not found (`VERIFIABLE_Z3_PATH` / `scripts/install-z3.*`).
-  Pass `--format json` for pure JSON, or set `VERIFIABLE_AGENT=1` with default `--format elm` to append `<verifiable-query-result>{...}</verifiable-query-result>`.
+  Pass `--format json` for pure JSON, or set `VERIFIABLE_AGENT=1` with default `--format elm` to append `<verifiable-query-result>{...}</verifiable-query-result>`, `<verifiable-symbols>{...}</verifiable-symbols>`, or `<verifiable-check-result>{...}</verifiable-check-result>`.
 
 ---
 
-## 10. Diagnostic Reference (`VER001`–`VER202`)
+## 10. Diagnostic Reference (`VER001`–`VER302`)
 
 | Code | Banner Title | What Happened & Typical Fix |
 | --- | --- | --- |
@@ -321,7 +336,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER301` | `COMPLEX CONTRACT` | `Spec.Requires` / `Spec.Ensures` packs more than 3 top-level `&&` clauses (configurable via `verifiable.max_spec_clauses` / `VerifiableMaxSpecClauses`, with an automatic split CodeFix) or uses nested ternaries. Default severity: `Info` (configurable via `.editorconfig`). |
 | `VER302` | `MISSING CONTRACT EXPLANATION` | A `[Verifiable]` `Spec.Requires` / `Spec.Ensures` call omits or leaves blank its plain-English `because` string. Default severity: `Info` (configurable via `.editorconfig`). |
 
-For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds.
+For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds. Inside `[Verifiable]` methods, `VerifiableNullabilitySuppressor` (`VER_SUP001`/`VER_SUP002`) also suppresses C# `CS8602`/`CS8604` nullable warnings whenever Z3 formally proves non-null along every reaching path.
 
 ---
 

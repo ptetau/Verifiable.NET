@@ -14,15 +14,15 @@ dotnet test Verifiable.NET.sln -c Release --no-build
 ```
 
 ### Structured Counterexample JSON (`VER102`) & Elm Output
-The first console line of every diagnostic (`VER001`–`VER203`) carries a concise, actionable summary (including the obligation, method, and counterexample for `VER102`, or the failing contract/reason for `VER101`–`VER103`), followed by the full Elm-style block.
-For the complete multiline message and JSON when MSBuild truncates diagnostics to one console line, run
+The first console line of every diagnostic (`VER001`–`VER302`) carries a concise, actionable summary (including the obligation, method, and counterexample for `VER102`, or the failing contract/reason for `VER101`–`VER103`), followed by the full Elm-style block.
+For the complete multiline message and JSON when MSBuild truncates diagnostics to one console line, either run `verifiable-query build MyProject.csproj` / `verifiable-query check --project MyProject.csproj` (or `verifiable-query check --sarif proof.sarif`), or run
 `dotnet build MyProject.csproj -p:VerifiableAgent=1 -p:ErrorLog=proof.sarif%2Cversion=2.1`
 and read the diagnostic entry's `message.text` under `runs[].results[]` in `proof.sarif`.
 
-All diagnostics (`VER001`–`VER203`) use an Elm-style layout (single-line console summary, `-- TITLE ---- File.cs` banner, numbered source excerpt with `^` caret underline, `"Why this rule exists:"`, and a concrete `Fix:` line).
+All diagnostics (`VER001`–`VER302`) use an Elm-style layout (single-line console summary, `-- TITLE ---- File.cs` banner, numbered source excerpt with `^` carets or multi-line `|>` gutter markers, `"Why this rule exists:"`, and a concrete `Fix:` line).
 When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyzers` outputs:
-- Single-line console summary, Elm-style banner, source caret, optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, and `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`)
-- A `Fix:` line naming the exact remediation
+- Single-line console summary, Elm-style banner, source caret (plus linked contract declaration snippet when applicable), optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`, `result = ...`), and failed-clause pinpointing with evaluated `Left`/`Right` values
+- A `Fix:` line naming the exact remediation (plus boundary/off-by-one hints when applicable)
 - A single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` payload containing:
   - `rule`: `"VER102"`
   - `symbol`: `"DeclaringType.Method"`
@@ -34,7 +34,7 @@ When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyz
   - `fix`: actionable fix string
 
 ### Every Diagnostic Ends With `Fix:`
-All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER203`) diagnostics include a single-line console summary, an Elm-style explanation, and a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
+All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), Source Generator (`VER201`–`VER203`), and Spec Quality (`VER301`–`VER302`, default `Info`) diagnostics include a single-line console summary, an Elm-style explanation, and a concrete `Fix:` guidance clause. Inside `[Verifiable]` methods, `VerifiableNullabilitySuppressor` (`VER_SUP001`/`VER_SUP002`) also suppresses redundant C# `CS8602`/`CS8604` warnings when Z3 proves non-null along every reaching path. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
 
 ## 2. Z3 Discovery & Caching
 
@@ -57,9 +57,14 @@ For full GalaxyCheck agent documentation, see `external/GalaxyCheck/docs/agents.
 
 ## 4. `Verifiable.Query` CLI Agent Schema
 
-`Verifiable.Query` (`verifiable-query`, pure .NET Core) exposes `ask`, `check-invariant`, and `list` over `--project`, `--file`, or `--stdin`.
+`Verifiable.Query` (`verifiable-query`, pure .NET Core `net8.0`–`net11.0`) exposes `ask`, `check-invariant`, `list`, `check` (over `--project`, `--file`, `--stdin`, or `--sarif`), and `build` (`<project-or-sln>`).
 
-- **Exit codes**: `0` proved, `1` refuted, `2` inconclusive, `3` usage/compilation/binding error, `4` Z3 not found.
-- **`--format json`** writes structured JSON to stdout; **`--format elm` + `VERIFIABLE_AGENT=1`** appends `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` on `list`):
-  - Top-level fields: `command`, `status` (`"proved" | "refuted" | "inconclusive" | "error" | "z3_not_found"`), `exitCode`, `claim`, optional `assume`, `because`, `targetType`, `error`, `fix`, and `results[]`.
-  - Per-method fields: `method`, `returnType`, `status`, `vacuous`, `pathsChecked`, `smtHash`, `reasons[]` (`{kind, label, spirit?, file?, line?}` from Z3 unsat core), `counterexamples[]` (`{file, line, values}`), optional `error`, `hint`.
+- **Exit codes**: `0` proved/passed, `1` refuted/check errors, `2` inconclusive, `3` usage/compilation/binding error, `4` Z3 not found.
+- **Color**: `--color auto|always|never` (ANSI color is automatically disabled under `VERIFIABLE_AGENT=1`, `NO_COLOR`, `--format json`, or redirected stdout).
+- **`--format json`** writes structured JSON to stdout; **`--format elm` + `VERIFIABLE_AGENT=1`** appends:
+  - `<verifiable-query-result>{...}</verifiable-query-result>` (`ask` / `check-invariant`):
+    - Top-level fields: `command`, `status` (`"proved" | "refuted" | "inconclusive" | "error" | "z3_not_found"`), `exitCode`, `claim`, optional `assume`, `because`, `targetType`, `error`, `fix`, and `results[]`.
+    - Per-method fields: `method`, `returnType`, `status`, `vacuous`, `pathsChecked`, `smtHash`, `reasons[]` (`{kind, label, spirit?, file?, line?}` from Z3 unsat core), `counterexamples[]` (`{file, line, values}`), optional `error`, `hint`.
+  - `<verifiable-symbols>{...}</verifiable-symbols>` (`list`): discovered `[Verifiable]` types, `[Invariant]` members, and methods with contract counts.
+  - `<verifiable-check-result>{...}</verifiable-check-result>` (`check` / `build`):
+    - Top-level fields: `command`, `errorCount`, `warningCount`, `suppressedNullableCount`, and `diagnostics[]` (`{id, severity, file, line, column, summary}`).

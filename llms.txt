@@ -1,6 +1,6 @@
 # Verifiable.NET — Compact LLM & Engineer Reference (`llms.txt`)
 
-Compile-time formal verification and boundary marshaling for standard C# (.NET 9 / .NET 10) via Roslyn Source Generators, Analyzers, CodeFixes, and Z3 SMT solving—zero runtime/Wasm payload overhead.
+Compile-time formal verification and boundary marshaling for standard C# (.NET 8–11) via Roslyn Source Generators, Analyzers, CodeFixes, and Z3 SMT solving—zero runtime/Wasm payload overhead.
 
 ## 1. Environment Variables (Always Set in Agent Runs)
 
@@ -106,22 +106,27 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
 - `VER301` (`COMPLEX CONTRACT`, default `Info`, configurable via `.editorconfig` / `VerifiableMaxSpecClauses`): `Spec.Requires`/`Spec.Ensures` exceeds max top-level `&&` clauses (default 3; includes CodeFix to split) or uses nested ternaries.
 - `VER302` (`MISSING CONTRACT EXPLANATION`, default `Info`): missing or blank `because` argument on `[Verifiable]` `Spec.Requires`/`Spec.Ensures` calls.
+- `VER_SUP001` / `VER_SUP002` (`VerifiableNullabilitySuppressor`): suppresses redundant C# `CS8602`/`CS8604` warnings inside `[Verifiable]` methods when Z3 proves non-null along every reaching path.
 
 ## 5. Packages
 
-- `Verifiable.Contracts` (`netstandard2.0`, `net9.0`, `net10.0`)
-- `Verifiable.Generators` (Roslyn source generator)
-- `Verifiable.Analyzers` (Gatekeeper, Linear Types, Z3 SMT prover)
-- `Verifiable.CodeFixes` (Incremental refactorings for `[VerifiableCandidate]`)
-- `Verifiable.Testing` (GalaxyCheck stateful & crash/replay harnesses)
-- `Verifiable.Query` (`net10.0` pure .NET Core CLI tool `verifiable-query`)
+- `Verifiable.NET` (`net8.0`–`net11.0` all-in-one package: contracts + generators + analyzers + code fixes + `Verifiable.Z3`)
+- `Verifiable.Z3` (`netstandard2.0` cross-platform bundled Z3 binaries)
+- `Verifiable.Contracts` (`net8.0`–`net11.0`)
+- `Verifiable.Generators` (`netstandard2.0` Roslyn source generator)
+- `Verifiable.Analyzers` (`netstandard2.0` Gatekeeper, Linear Types, Spec Quality, Z3 SMT prover, Nullability Suppressor)
+- `Verifiable.CodeFixes` (`netstandard2.0` Incremental refactorings for `[VerifiableCandidate]` & `VER301`)
+- `Verifiable.Testing` (`net10.0` GalaxyCheck stateful & crash/replay harnesses)
+- `Verifiable.Query` (`net8.0`–`net11.0` pure .NET Core CLI tool `verifiable-query`)
 
-## 6. Query CLI (`Verifiable.Query` / `verifiable-query`)
+## 6. Query & Elm Check CLI (`Verifiable.Query` / `verifiable-query`)
 
-Ask typed C# questions about `[Verifiable]` code and get Z3 unsat-core explanations ("why") or counterexamples ("why not"):
-- `dotnet run --project src/Verifiable.Query -c Release -- ask --project App.csproj --target Type.Method --assert "result.X == 0" [--assume "cond"] [--because "why"]`
-- `dotnet run --project src/Verifiable.Query -c Release -- check-invariant --project App.csproj --type StateType --expr "s => s.TotalDebits == s.TotalCredits"`
-- `dotnet run --project src/Verifiable.Query -c Release -- list --project App.csproj` (also supports `--file <a.cs>` and `--stdin`)
-- Flags: `--format elm|json`, `--timeout <ms>`, `--z3 <path>`, `--all`, `--verbose`
-- Exit codes: `0`=proved, `1`=refuted, `2`=inconclusive, `3`=error/unbound claim, `4`=Z3 missing
-- Under `VERIFIABLE_AGENT=1`, emits single-line `<verifiable-query-result>{...}</verifiable-query-result>` with `reasons[]` (unsat-core rules + spirit strings + `file:line`), `vacuous`, and `counterexamples[]`.
+Ask typed C# questions about `[Verifiable]` code, inspect SARIF logs, or run full ANSI-colored multi-line Elm checks/builds:
+- `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- ask --project App.csproj --target Type.Method --assert "result.X == 0" [--assume "cond"] [--because "why"]`
+- `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check-invariant --project App.csproj --type StateType --expr "s => s.TotalDebits == s.TotalCredits"`
+- `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- list --project App.csproj` (also supports `--file <a.cs>` and `--stdin`)
+- `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check (--project App.csproj | --file a.cs | --stdin | --sarif build.sarif) [--color auto|always|never] [--no-warnings]`
+- `dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- build App.csproj [--color auto|always|never] [--no-warnings] [-- <extra dotnet build args>]`
+- Flags: `--format elm|json`, `--color auto|always|never`, `--no-warnings`, `--timeout <ms>`, `--z3 <path>`, `--all`, `--verbose`
+- Exit codes: `0`=proved/passed, `1`=refuted/errors, `2`=inconclusive, `3`=error/unbound claim, `4`=Z3 missing
+- Under `VERIFIABLE_AGENT=1`, emits single-line `<verifiable-query-result>{...}</verifiable-query-result>` (with `reasons[]`, `vacuous`, `counterexamples[]`), `<verifiable-symbols>{...}</verifiable-symbols>`, or `<verifiable-check-result>{...}</verifiable-check-result>`.

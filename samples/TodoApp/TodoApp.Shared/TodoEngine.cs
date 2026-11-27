@@ -8,13 +8,13 @@ public static class TodoEngine
     public static TodoTransition Add(TodoBoard board, TodoTitle title, UnixTimestamp now)
     {
         Spec.Ensures<TodoTransition>(
-            result => !result.IsSuccess || (result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1),
+            result => Spec.Implies(result.IsSuccess, result.Board.NextId == board.NextId + 1 && result.Board.ActiveCount == board.ActiveCount + 1),
             "Adding a todo advances NextId by 1 and adds one active item.");
         Spec.Ensures<TodoTransition>(
-            result => !result.IsSuccess || (result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount),
+            result => Spec.Implies(result.IsSuccess, result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount),
             "Adding a new todo does not change completed or deleted counts.");
         Spec.Ensures<TodoTransition>(
-            result => result.IsSuccess || result.Board == board,
+            result => Spec.Implies(!result.IsSuccess, result.Board == board),
             "A rejected Add leaves the board completely unchanged.");
 
         if (board.Items.ContainsKey(board.NextId))
@@ -37,13 +37,15 @@ public static class TodoEngine
     public static TodoTransition Complete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
         Spec.Ensures<TodoTransition>(
-            result => result.IsSuccess || result.Board == board,
+            result => Spec.Implies(!result.IsSuccess, result.Board == board),
             "A failed Complete leaves the board unchanged.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Deleted,
+            result => !result.IsSuccess && result.Board == board,
             "A deleted todo cannot be resurrected by completing it.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Completed || (result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Completed,
+            result => result.IsSuccess && result.Board == board,
             "Completing an already-completed item is idempotent.");
 
         if (!board.Items.ContainsKey(id))
@@ -81,10 +83,11 @@ public static class TodoEngine
     public static TodoTransition Delete(TodoBoard board, TodoId id, UnixTimestamp now)
     {
         Spec.Ensures<TodoTransition>(
-            result => result.IsSuccess || result.Board == board,
+            result => Spec.Implies(!result.IsSuccess, result.Board == board),
             "A failed Delete leaves the board unchanged.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Deleted,
+            result => result.IsSuccess && result.Board == board,
             "Deleting an already-deleted item is idempotent.");
 
         if (!board.Items.ContainsKey(id))
@@ -133,20 +136,20 @@ public static class TodoEngine
     public static TodoTransition Rename(TodoBoard board, TodoId id, TodoTitle newTitle, UnixTimestamp now)
     {
         Spec.Ensures<TodoTransition>(
-            result => result.IsSuccess || result.Board == board,
+            result => Spec.Implies(!result.IsSuccess, result.Board == board),
             "A failed Rename leaves the board completely unchanged.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Deleted,
+            result => !result.IsSuccess && result.Board == board,
             "Deleted todo items cannot be renamed.");
         Spec.Ensures<TodoTransition>(
-            result => !result.IsSuccess || (
-                result.Board.NextId == board.NextId &&
-                result.Board.ActiveCount == board.ActiveCount &&
-                result.Board.CompletedCount == board.CompletedCount &&
-                result.Board.DeletedCount == board.DeletedCount),
-            "Renaming a todo preserves NextId and all status counts.");
+            result => Spec.Implies(result.IsSuccess, result.Board.NextId == board.NextId && result.Board.ActiveCount == board.ActiveCount),
+            "Renaming a todo preserves NextId and active item count.");
         Spec.Ensures<TodoTransition>(
-            result => !result.IsSuccess || (result.Board.Items.ContainsKey(id) && result.Board.Items[id].Title == newTitle),
+            result => Spec.Implies(result.IsSuccess, result.Board.CompletedCount == board.CompletedCount && result.Board.DeletedCount == board.DeletedCount),
+            "Renaming a todo preserves completed and deleted counts.");
+        Spec.Ensures<TodoTransition>(
+            result => Spec.Implies(result.IsSuccess, result.Board.Items.ContainsKey(id) && result.Board.Items[id].Title == newTitle),
             "A successful Rename stores the exact validated new title.");
 
         if (!board.Items.ContainsKey(id))
@@ -174,13 +177,15 @@ public static class TodoEngine
     public static TodoTransition Reopen(TodoBoard board, TodoId id, UnixTimestamp now)
     {
         Spec.Ensures<TodoTransition>(
-            result => result.IsSuccess || result.Board == board,
+            result => Spec.Implies(!result.IsSuccess, result.Board == board),
             "A failed Reopen leaves the board completely unchanged.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Deleted || (!result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Deleted,
+            result => !result.IsSuccess && result.Board == board,
             "Deleted todo items are terminal and cannot be reopened.");
-        Spec.Ensures<TodoTransition>(
-            result => !board.Items.ContainsKey(id) || board.Items[id].Status != TodoStatus.Active || (result.IsSuccess && result.Board == board),
+        Spec.EnsuresWhen<TodoTransition>(
+            board.Items.ContainsKey(id) && board.Items[id].Status == TodoStatus.Active,
+            result => result.IsSuccess && result.Board == board,
             "Reopening an already-active todo is idempotent.");
 
         if (!board.Items.ContainsKey(id))

@@ -12,7 +12,7 @@ public static class PricingEngine
         OrderQuantity requested)
     {
         Spec.Ensures<Result<StockCount, PricingError>>(
-            result => !result.IsSuccess || result.Value == current - requested,
+            result => Spec.Implies(result.IsSuccess, result.Value == current - requested),
             "Deducting requested units reduces stock by the exact quantity without underflow.");
 
         if (current < requested)
@@ -29,7 +29,7 @@ public static class PricingEngine
         OrderQuantity added)
     {
         Spec.Ensures<Result<StockCount, PricingError>>(
-            result => !result.IsSuccess || result.Value == current + added,
+            result => Spec.Implies(result.IsSuccess, result.Value == current + added),
             "Adding units increases stock up to 1,000,000 without 32-bit overflow.");
 
         if (current > 1_000_000 - added)
@@ -47,7 +47,8 @@ public static class PricingEngine
         OrderQuantity requested)
     {
         Spec.Ensures<Result<WarehouseInventory, PricingError>>(
-            result => !result.IsSuccess || (
+            result => Spec.Implies(
+                result.IsSuccess,
                 result.Value.Stock.ContainsKey(bin) &&
                 inventory.Stock.ContainsKey(bin) &&
                 result.Value.Stock[bin] == inventory.Stock[bin] - requested),
@@ -115,6 +116,27 @@ public static class PricingEngine
             "A basis-point share (0% to 100%) is non-negative and never exceeds the base amount.");
 
         return (amountCents * rateBps.Value) / 10_000L;
+    }
+
+    [return: NonDefault]
+    public static ImmutableArray<CartLine> RemoveCartLine(
+        [NonDefault] ImmutableArray<CartLine> lines,
+        int index)
+    {
+        Spec.Requires(
+            index >= 0 && index < lines.Length,
+            "Removed cart line index must be within the current cart bounds.");
+        Spec.Ensures<ImmutableArray<CartLine>>(
+            result => result.Length == lines.Length - 1,
+            "Removing a cart line decreases cart length by one.");
+        Spec.Ensures<ImmutableArray<CartLine>>(
+            result => Spec.ForAll(0, index, i => result[i] == lines[i]),
+            "Cart lines before the removed index stay in their original positions.");
+        Spec.Ensures<ImmutableArray<CartLine>>(
+            result => Spec.ForAll(index, result.Length, i => result[i] == lines[i + 1]),
+            "Cart lines after the removed index shift left by one.");
+
+        return lines.RemoveAt(index);
     }
 
     [InboundPort]

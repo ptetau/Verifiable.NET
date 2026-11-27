@@ -24,8 +24,11 @@ public static class LedgerEngine
         UnixTimestamp now)
     {
         Spec.Requires(
-            from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount,
-            "Transfers require two distinct existing accounts and enough balance in the source account to avoid overdraft.");
+            from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to),
+            "Transfers require two distinct existing accounts.");
+        Spec.Requires(
+            state.Accounts[from].Balance >= amount,
+            "The source account must have enough balance to avoid overdraft.");
         Spec.Ensures<LedgerState>(
             result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m,
             "After the transfer, the source account remains non-negative.");
@@ -80,10 +83,10 @@ public static class LedgerEngine
         bool allowOverdraft)
     {
         Spec.Ensures<LedgerTransition>(
-            result => !result.IsSuccess || (result.State.TotalDebits == state.TotalDebits && result.State.TotalCredits == state.TotalCredits),
+            result => Spec.Implies(result.IsSuccess, result.State.TotalDebits == state.TotalDebits && result.State.TotalCredits == state.TotalCredits),
             "Opening an account preserves total debits and credits.");
         Spec.Ensures<LedgerTransition>(
-            result => result.IsSuccess || result.State == state,
+            result => Spec.Implies(!result.IsSuccess, result.State == state),
             "A rejected OpenAccount leaves the ledger unchanged.");
 
         if (state.Accounts.ContainsKey(id))
@@ -109,10 +112,10 @@ public static class LedgerEngine
             result => result.State.TotalDebits == result.State.TotalCredits,
             "Every transfer keeps total debits equal to total credits.");
         Spec.Ensures<LedgerTransition>(
-            result => !result.IsSuccess || result.State.TotalDebits == state.TotalDebits + amount,
+            result => Spec.Implies(result.IsSuccess, result.State.TotalDebits == state.TotalDebits + amount),
             "A successful transfer increases total debits by the exact transfer amount.");
         Spec.Ensures<LedgerTransition>(
-            result => result.IsSuccess || result.State == state,
+            result => Spec.Implies(!result.IsSuccess, result.State == state),
             "A rejected transfer leaves the ledger completely unchanged.");
 
         if (from == to)
@@ -194,10 +197,10 @@ public static class LedgerEngine
             result => result.State.TotalDebits == result.State.TotalCredits,
             "Every 3-leg fee-split transfer keeps total debits equal to total credits.");
         Spec.Ensures<LedgerTransition>(
-            result => !result.IsSuccess || result.State.TotalDebits == state.TotalDebits + grossAmount,
+            result => Spec.Implies(result.IsSuccess, result.State.TotalDebits == state.TotalDebits + grossAmount),
             "A successful fee-split transfer increases total debits by the exact gross amount.");
         Spec.Ensures<LedgerTransition>(
-            result => result.IsSuccess || result.State == state,
+            result => Spec.Implies(!result.IsSuccess, result.State == state),
             "A rejected fee-split transfer leaves the ledger completely unchanged.");
 
         if (from == to || from == feeAccount || to == feeAccount)
@@ -383,7 +386,7 @@ public static class LedgerEngine
             result => result.State.TotalDebits == result.State.TotalCredits,
             "Any multi-line entry leaves total debits equal to total credits.");
         Spec.Ensures<LedgerTransition>(
-            result => result.IsSuccess || result.State == state,
+            result => Spec.Implies(!result.IsSuccess, result.State == state),
             "A rejected entry leaves the ledger completely unchanged.");
 
         if (lines.Count < 2)
@@ -480,7 +483,7 @@ public static class LedgerEngine
             result => result.State.TotalDebits == result.State.TotalCredits,
             "Reversing an entry keeps total debits equal to total credits.");
         Spec.Ensures<LedgerTransition>(
-            result => result.IsSuccess || result.State == state,
+            result => Spec.Implies(!result.IsSuccess, result.State == state),
             "A rejected reversal leaves the ledger completely unchanged.");
 
         var idx = FindJournalIndex(state.Journal, entryId);

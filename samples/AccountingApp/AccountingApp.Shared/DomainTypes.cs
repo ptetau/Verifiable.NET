@@ -90,13 +90,12 @@ public readonly record struct LedgerState(
 
     public static LedgerState CreateEmpty()
     {
-        Spec.Ensures<LedgerState>(result =>
-            result.TotalDebits == 0m
-            && result.TotalCredits == 0m
-            && result.NextEntryId == 1
-            && result.Accounts.Count == 0
-            && result.Journal.Count == 0,
-            "An empty ledger starts balanced at zero with no accounts or entries and NextEntryId = 1.");
+        Spec.Ensures<LedgerState>(
+            result => result.TotalDebits == 0m && result.TotalCredits == 0m && result.NextEntryId == 1,
+            "An empty ledger starts balanced at zero with NextEntryId = 1.");
+        Spec.Ensures<LedgerState>(
+            result => result.Accounts.Count == 0 && result.Journal.Count == 0,
+            "An empty ledger starts with no accounts or journal entries.");
 
         return new(
             ImmutableDictionary<AccountId, Account>.Empty,

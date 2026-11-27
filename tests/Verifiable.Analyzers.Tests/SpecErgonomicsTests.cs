@@ -301,6 +301,56 @@ public sealed class SpecErgonomicsTests
     }
 
     [Fact]
+    public async Task D22_ForAll_OverImmutableArrayOfConstrainedRecord_ScopesElementAssumptionsAndProvesCleanly()
+    {
+        const string source = """
+            using System.Collections.Immutable;
+            using Verifiable.Contracts;
+
+            namespace SampleD22ConstrainedElements;
+
+            [Verifiable]
+            public readonly record struct ConstrainedLine(int Qty, long UnitPriceCents)
+            {
+                [Invariant("Line quantity is positive and price is non-negative.")]
+                public bool IsValid() => Qty >= 1 && UnitPriceCents >= 0L;
+            }
+
+            [Verifiable]
+            public static class CartRules
+            {
+                [return: NonDefault]
+                public static ImmutableArray<ConstrainedLine> RemoveLine(
+                    [NonDefault] ImmutableArray<ConstrainedLine> lines,
+                    int index)
+                {
+                    Spec.Requires(index >= 0 && index < lines.Length, "Index is in bounds.");
+                    Spec.Ensures<ImmutableArray<ConstrainedLine>>(
+                        r => r.Length == lines.Length - 1,
+                        "Removing one line shrinks the cart by one.");
+                    Spec.Ensures<ImmutableArray<ConstrainedLine>>(
+                        r => Spec.ForAll(0, index, i => r[i] == lines[i]),
+                        "Lines before the removed index stay in place.");
+                    Spec.Ensures<ImmutableArray<ConstrainedLine>>(
+                        r => Spec.ForAll(index, r.Length, i => r[i] == lines[i + 1]),
+                        "Lines after the removed index shift left by one.");
+
+                    return lines.RemoveAt(index);
+                }
+            }
+            """;
+
+        var diags = await AnalyzerTestHarness.AnalyzeAsync(
+            source,
+            new VerifiableGatekeeperAnalyzer(),
+            new VerifiableSmtAnalyzer());
+
+        Assert.DoesNotContain(diags, d => d.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(diags, d => d.Id == "VER101" || d.Id == "VER102" || d.Id == "VER103");
+    }
+
+
+    [Fact]
     public void D20AndD22_RuntimeHelpers_EvaluateAccurately()
     {
         Assert.True(Spec.Implies(false, false));

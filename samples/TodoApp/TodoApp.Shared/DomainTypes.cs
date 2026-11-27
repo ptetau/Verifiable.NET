@@ -64,13 +64,12 @@ public readonly record struct TodoBoard(
 
     public static TodoBoard CreateEmpty()
     {
-        Spec.Ensures<TodoBoard>(result =>
-            result.NextId == 1
-            && result.Items.Count == 0
-            && result.ActiveCount == 0
-            && result.CompletedCount == 0
-            && result.DeletedCount == 0,
-            "A brand-new board starts at NextId = 1 with zero items in every bucket.");
+        Spec.Ensures<TodoBoard>(
+            result => result.NextId == 1 && result.Items.Count == 0,
+            "A brand-new board starts at NextId = 1 with no stored items.");
+        Spec.Ensures<TodoBoard>(
+            result => result.ActiveCount == 0 && result.CompletedCount == 0 && result.DeletedCount == 0,
+            "A brand-new board starts with zero items in every status bucket.");
 
         return new(
             TodoId.From(1),

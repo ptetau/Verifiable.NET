@@ -2,7 +2,7 @@
 
 **Write plain C#. Explain why your rules exist. Let the compiler prove they hold before the code ever runs.**
 
-Verifiable.NET adds compile-time verification and bug-free boundary validation to standard .NET 9 / .NET 10 C# solutions. You don't learn a new proof language, and you don't pay any runtime or WebAssembly payload overhead—just standard C# attributes and `Spec.*` contracts checked at build time by Roslyn and [Z3](https://github.com/Z3Prover/z3).
+Verifiable.NET adds compile-time verification and bug-free boundary validation to standard .NET 8 / 9 / 10 / 11 C# solutions. You don't learn a new proof language, and you don't pay any runtime or WebAssembly payload overhead—just standard C# attributes and `Spec.*` contracts checked at build time by Roslyn and [Z3](https://github.com/Z3Prover/z3).
 
 ---
 
@@ -32,7 +32,7 @@ Verifiable.NET generates `.From(...)`, `.TryFrom(...)`, `.TryMarshal(...)`, orde
 
 ### 2. "Prove a business rule holds for every possible input—not just 3 unit tests"
 
-Even good unit tests only check a handful of examples. Inside a `[Verifiable]` class or assembly, `Spec.Requires`, `Spec.Ensures`, and `[Invariant]` let the compiler check **all** valid execution paths using Z3:
+Even good unit tests only check a handful of examples. Inside a `[Verifiable]` class or assembly, `Spec.Requires`, `Spec.RequiresWhen`, `Spec.Ensures`, `Spec.EnsuresWhen`, `Spec.Implies`, `Spec.ForAll`/`Spec.Exists`, `[NonDefault]`, and `[Invariant]` let the compiler check **all** valid execution paths using Z3:
 
 ```csharp
 [Verifiable]
@@ -62,24 +62,37 @@ Z3 found inputs that break a postcondition in `LedgerEngine.Withdraw`.
 
    |
 12 |         return balance - amount;
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+   |                ^^^^^^^^^^^^^^^^
+
+The postcondition that failed is declared here (LedgerEngine.cs:7):
+
+   |
+ 7 |         Spec.Ensures<decimal>(result => result >= 0m, "Balances must stay non-negative after every withdrawal.");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Why this rule exists:
     Balances must stay non-negative after every withdrawal.
 
 Contract:
-    Postcondition: Spec.Ensures<decimal>(result => result >= 0m)
+    Postcondition: Spec.Ensures<decimal>(result => result >= 0m, "Balances must stay non-negative after every withdrawal.")
 
 Counterexample:
     balance = 0.0
     amount = 1.0
+    result = -1.0
 
-Fix: Strengthen Spec.Requires(...) preconditions or correct the return value to satisfy Spec.Ensures(...).
+Why the check failed for `result >= 0m`:
+    Left  (result): -1.0
+    Right (0m):     0.0
+    Expected `-1.0 >= 0.0`, which is false.
+
+Fix: Strengthen Spec.Requires(...) preconditions or correct the return value
+to satisfy Spec.Ensures(...).
 ```
 
-`dotnet build` may show only the first line. To capture the full diagnostic and counterexample JSON, see the [agent guide](docs/agents.md#structured-counterexample-json-ver102--elm-output).
+`dotnet build` may truncate diagnostics to the first line. For full ANSI-colored multi-line Elm output (plus Elm-rewritten `CS*` C# errors and Z3 nullability suppression summaries), run `verifiable-query check --project MyProject.csproj` or `verifiable-query build MyProject.csproj`; for CI/agent SARIF capture, see the [agent guide](docs/agents.md#structured-counterexample-json-ver102--elm-output).
 
-For contracts that use `??`, call helpers, or project a DTO into a record, see [Writing contracts with helpers](docs/manual.md#writing-contracts-with-helpers). If your build agent already has Z3, see [Bring your own Z3](docs/manual.md#bring-your-own-z3).
+For contracts that use `Spec.EnsuresWhen`, `Spec.ForAll`, `[NonDefault]`, `[MapTo]`, `??`, or pure helpers, see [Writing contracts with helpers](docs/manual.md#writing-contracts-with-helpers). If your build agent already has Z3, see [Bring your own Z3](docs/manual.md#bring-your-own-z3).
 
 ---
 
@@ -96,7 +109,7 @@ Verifiable.NET generates a matching wire DTO and `TryMarshal(...)` gate (`TodoEn
 
 1. Checks every `[TypeAlias<T>]` rule (using your plain-English description on failure),
 2. Checks every `[Invariant("...")]` on input records,
-3. Checks every leading `Spec.Requires(..., "...")`, and
+3. Checks every leading `Spec.Requires(..., "...")` / `Spec.RequiresWhen(..., "...")`, and
 4. Returns `MarshalResult<T>` with clean `ContractViolation` messages ready for a `400 BadRequest` response.
 
 ---
@@ -122,7 +135,7 @@ If any branch returns early, drops the return value, overwrites it, or discards 
 Inside `[Verifiable]`, the compiler enforces determinism (`VER001`–`VER006`) so proofs mean what they say and bugs are trivial to reproduce:
 
 - Pass clocks and IDs explicitly (`UnixTimestamp now`, `CommandId commandId`) instead of reading `DateTime.UtcNow` or `Guid.NewGuid()`.
-- Use `readonly record struct`, `ImmutableList<T>`, and `ImmutableDictionary<K, V>` instead of mutable classes or `List<T>`.
+- Use `readonly record struct`, `ImmutableList<T>`, `ImmutableArray<T>` (with `[NonDefault]` or `<VerifiableNonDefaultImmutableArrays>true</VerifiableNonDefaultImmutableArrays>`), and `ImmutableDictionary<K, V>` instead of mutable classes or `List<T>`.
 - Return explicit `Result<T, TError>` or transition values instead of throwing exceptions for domain errors.
 
 Need an escape hatch for an I/O controller, logging, or SQLite adapter? Leave `[Verifiable]` off the outer shell—or put `[assembly: Verifiable]` on your shared domain project and opt individual boundary helpers out with `[Unverifiable]`.
@@ -134,40 +147,57 @@ Need an escape hatch for an I/O controller, logging, or SQLite adapter? Leave `[
 You do not have to rewrite everything at once:
 
 1. Add `[VerifiableCandidate]` to a class, method, or assembly. Violations appear as **warnings**, not build errors.
-2. Apply the available `Verifiable.CodeFixes` for `VER001`–`VER006`. For `VER004`, the fix can move an eager clock or GUID read into a private method parameter when all callers can be updated in the same document. If a loop creates one GUID per item, keep that allocation per item; passing one GUID for the whole batch changes the result.
+2. Apply the available `Verifiable.CodeFixes` for `VER001`–`VER006` (and `VER301` to split dense `Spec.*` clauses). For `VER004`, the fix can move an eager clock or GUID read into a private method parameter when all callers can be updated in the same document. If a loop creates one GUID per item, keep that allocation per item; passing one GUID for the whole batch changes the result.
 3. Flip `[VerifiableCandidate]` to `[Verifiable]` when the warnings reach zero.
 
 ---
 
 ### 7. "Ask whether a business rule holds (e.g., credits == debits)—and see *why* or *why not*"
 
-Sometimes you want to ask an interactive question about your domain—without editing source files to add a new contract first. `Verifiable.Query` (`verifiable-query`) is a pure **.NET Core** CLI tool built on the same Roslyn + Z3 prover:
+Sometimes you want to ask an interactive question about your domain—without editing source files to add a new contract first—or run a full Elm-formatted check/build in the terminal. `Verifiable.Query` (`verifiable-query`) is a pure **.NET Core** CLI tool built on the same Roslyn + Z3 prover:
 
 ```powershell
 # Ask across every method producing LedgerState whether debits always equal credits
-dotnet run --project src/Verifiable.Query -c Release -- check-invariant `
+dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check-invariant `
   --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj `
   --type LedgerState `
   --expr "s => s.TotalDebits == s.TotalCredits"
 
 # Ask why a specific transfer preserves balance
-dotnet run --project src/Verifiable.Query -c Release -- ask `
+dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- ask `
   --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj `
   --target LedgerEngine.PostTransfer `
   --assert "result.State.TotalDebits == result.State.TotalCredits"
+
+# Run full ANSI-colored multi-line Elm check (or wrap `dotnet build` via SARIF)
+dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check `
+  --project samples/InventoryPricing/InventoryPricing.csproj
+dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- build `
+  samples/InventoryPricing/InventoryPricing.csproj
 ```
 
 - **If it holds:** Z3 returns the minimal proof core (`-- QUERY HOLDS`), listing the exact `[Invariant]`, `[TypeAlias<T>]`, and `Spec.*` rules responsible—along with their `file:line` and plain-English spirit strings.
-- **If it fails:** Z3 returns `-- QUERY REFUTED` with a concrete counterexample (`from = ...`, `amount = ...`, `result = ...`) and the exact `return` line where it happens.
-- **Agent-friendly:** Add `--format json` or set `VERIFIABLE_AGENT=1` for single-line `<verifiable-query-result>{...}</verifiable-query-result>` output and deterministic exit codes (`0` holds, `1` refuted, `2` inconclusive, `3` expression/load error, `4` Z3 missing).
+- **If it fails:** Z3 returns `-- QUERY REFUTED` with a concrete counterexample (`from = ...`, `amount = ...`, `result = ...`), failed-clause pinpointing, and the exact `return` line where it happens.
+- **Full Elm terminal diagnostics:** `check` and `build` render full multi-line Elm blocks, rewrite standard Roslyn `CS*` errors into Elm diagnostics, report Z3-suppressed nullable warnings (`CS8602`/`CS8604`), and support `--color auto|always|never` (honoring `NO_COLOR`).
+- **Agent-friendly:** Add `--format json` or set `VERIFIABLE_AGENT=1` for single-line `<verifiable-query-result>{...}</verifiable-query-result>` / `<verifiable-check-result>{...}</verifiable-check-result>` output and deterministic exit codes (`0` holds, `1` refuted, `2` inconclusive, `3` expression/load error, `4` Z3 missing).
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+### Install from NuGet (Recommended)
 
-- [.NET 9 or .NET 10 SDK](https://dotnet.microsoft.com/download)
+Add the all-in-one package to any `.NET 8`, `.NET 9`, `.NET 10`, or `.NET 11` project (bundles contracts, generators, analyzers, code fixes, and cross-platform Z3 via `Verifiable.Z3`):
+
+```bash
+dotnet add package Verifiable.NET
+```
+
+### Building This Repository From Source
+
+#### Prerequisites
+
+- [.NET 8, 9, 10, or 11 SDK](https://dotnet.microsoft.com/download)
 - [Z3 SMT Solver](https://github.com/Z3Prover/z3) (auto-discovered from `VERIFIABLE_Z3_PATH`, `.tools/z3/`, `~/.verifiable/z3/`, or `PATH`)
 
 Install Z3 in one command:
@@ -182,7 +212,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
 bash scripts/install-z3.sh
 ```
 
-### Build & Run All Tests
+#### Build & Run All Tests
 
 ```powershell
 # Windows
@@ -202,12 +232,14 @@ Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xu
 
 | Package | What it ships |
 | --- | --- |
-| `Verifiable.Contracts` | Zero-dependency attributes (`[Verifiable]`, `[TypeAlias<T>]`, `[Invariant]`, `[InboundPort]`, `[MapTo]`, `[MustConsume]`), `Spec.*` helpers (stripped from Release IL), `Result<T, TError>`, and `MarshalResult<T>`. |
-| `Verifiable.Generators` | Source generators that expand `[TypeAlias<T>]` / `[Refined<T>]` structs, JSON converters, `[InboundPort]` validation wrappers, `[MapTo]` verified projections, and cross-assembly contract metadata. |
-| `Verifiable.Analyzers` | Gatekeeper (`VER001`–`VER006`), linear obligation checker (`VER007`), and Z3 proof engine (`VER101`–`VER104`) with Elm-style diagnostics. |
-| `Verifiable.CodeFixes` | Automated IDE/Roslyn refactorings for `[VerifiableCandidate]` migration. |
+| `Verifiable.NET` | All-in-one meta-package (`net8.0`–`net11.0`) bundling `Verifiable.Contracts`, `Verifiable.Generators`, `Verifiable.Analyzers`, `Verifiable.CodeFixes`, `Verifiable.Z3`, and `llms.txt`. |
+| `Verifiable.Z3` | Cross-platform Z3 binary package (`win-x64`, `linux-x64`, `osx-x64`, `osx-arm64`) auto-discovered by the SMT analyzer. |
+| `Verifiable.Contracts` | Zero-dependency attributes (`[Verifiable]`, `[TypeAlias<T>]`, `[Invariant]`, `[InboundPort]`, `[MapTo]`, `[MustConsume]`, `[NonDefault]`, `[CheckedArithmetic]`), `Spec.*` helpers (`Requires`, `RequiresWhen`, `Ensures`, `EnsuresWhen`, `Implies`, `ForAll`, `Exists`, `LoopInvariant`, `Decreases`), `Result<T, TError>`, and `MarshalResult<T>`. |
+| `Verifiable.Generators` | Source generators that expand `[TypeAlias<T>]` / `[Refined<T>]` structs, JSON converters, `[InboundPort]` validation wrappers, `[MapTo]` verified projections, and cross-assembly `[VerifiableContractMetadata]`. |
+| `Verifiable.Analyzers` | Gatekeeper (`VER001`–`VER006`), linear obligation checker (`VER007`), Z3 proof engine (`VER101`–`VER104`), spec quality nudges (`VER301`–`VER302`), and Z3 nullability suppressor (`VER_SUP001`/`VER_SUP002` for `CS8602`/`CS8604`) with Elm-style diagnostics. |
+| `Verifiable.CodeFixes` | Automated IDE/Roslyn refactorings for `[VerifiableCandidate]` migration (`VER001`–`VER006`) and splitting dense `Spec.*` clauses (`VER301`). |
 | `Verifiable.Testing` | Deterministic state-machine drivers and fault-injected persistence test helpers. |
-| `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`) for asking ad-hoc `ask`, `check-invariant`, and `list` verification queries with Z3 unsat-core explanations. |
+| `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`, `net8.0`–`net11.0`) for `ask`, `check-invariant`, `list`, `check` (including `--sarif`), and `build` with Z3 unsat-core explanations and ANSI-colored Elm output. |
 
 ---
 
@@ -217,9 +249,9 @@ See [**`samples/README.md`**](samples/README.md) for a cross-sample pattern matr
 
 | Sample | Core Library | Client & Server | What It Demonstrates |
 | --- | --- | --- | --- |
-| [**TodoApp**](samples/TodoApp/README.md) | [`samples/TodoApp/TodoApp.Shared`](samples/TodoApp/TodoApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | `[assembly: Verifiable]`, constrained types with spirit messages, MVU state transitions, `[InboundPort]` validation (`Add`/`Complete`/`Delete`/`Rename`/`Reopen`), `Spec.LoopInvariant` + `Spec.Decreases`, `[MustConsume]` obligations, idempotent SQLite persistence. |
-| [**AccountingApp**](samples/AccountingApp/README.md) | [`samples/AccountingApp/AccountingApp.Shared`](samples/AccountingApp/AccountingApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | Double-entry ledger where `TotalDebits == TotalCredits` is proved by Z3 across multi-line entries (`Spec.LoopInvariant` / `Spec.Decreases`), 2-leg and 3-leg fee-split transfers, trial balance computation, and reversals. |
-| [**InventoryPricing**](samples/InventoryPricing/README.md) | [`samples/InventoryPricing`](samples/InventoryPricing) | Pure domain library | `[CheckedArithmetic]` 32-bit BitVec overflow/underflow proofs, `WarehouseBin.ReadUnchecked` fixed-buffer bounds, `BasisPoints` share bounds, and `Result<T, PricingError>` cart pricing loops. |
+| [**TodoApp**](samples/TodoApp/README.md) | [`samples/TodoApp/TodoApp.Shared`](samples/TodoApp/TodoApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | `[assembly: Verifiable]`, constrained types with spirit messages, `Spec.Implies` / `Spec.EnsuresWhen`, MVU state transitions, `[InboundPort]` validation (`Add`/`Complete`/`Delete`/`Rename`/`Reopen`), `Spec.LoopInvariant` + `Spec.Decreases`, `[MustConsume]` obligations, idempotent SQLite persistence. |
+| [**AccountingApp**](samples/AccountingApp/README.md) | [`samples/AccountingApp/AccountingApp.Shared`](samples/AccountingApp/AccountingApp.Shared) | Blazor Wasm + ASP.NET Core + SQLite | Type-level `[Verifiable]` double-entry ledger where `TotalDebits == TotalCredits` is proved by Z3 across multi-line entries (`Spec.LoopInvariant` / `Spec.Decreases`), `Spec.Implies`, 2-leg and 3-leg fee-split transfers, trial balance computation, and reversals. |
+| [**InventoryPricing**](samples/InventoryPricing/README.md) | [`samples/InventoryPricing`](samples/InventoryPricing) | Pure domain library | `[CheckedArithmetic]` 32-bit BitVec overflow/underflow proofs, `Spec.Implies`, `[NonDefault]` + `Spec.ForAll` order-preservation across `ImmutableArray<CartLine>.RemoveAt`, `WarehouseBin.ReadUnchecked` fixed-buffer bounds, `BasisPoints` share bounds, and `Result<T, PricingError>` cart pricing loops. |
 
 ---
 

@@ -2002,7 +2002,7 @@ internal sealed partial class CfgSsaLowerer
             }
             if (_types.TryGetSequenceInfo(recv.Type, out _, out var seqId, out var eType, out var isImmArr))
             {
-                if (isImmArr)
+                if (isImmArr && (emitObligations || _inQuantifierDepth > 0))
                 {
                     EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma);
                 }
@@ -2047,7 +2047,8 @@ internal sealed partial class CfgSsaLowerer
         else
         {
             var recv = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
-            if (_types.TryGetSequenceInfo(recv.Type, out _, out _, out _, out var isImmArr) &&
+            if ((emitObligations || _inQuantifierDepth > 0) &&
+                _types.TryGetSequenceInfo(recv.Type, out _, out _, out _, out var isImmArr) &&
                 isImmArr && prop.Name is "Length" or "Count" or "IsEmpty")
             {
                 EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
@@ -3069,7 +3070,7 @@ internal sealed partial class CfgSsaLowerer
         void Emit(string formula, string label)
         {
             var f = guardCond is null ? formula : $"(=> {guardCond} {formula})";
-            AddAssertion(f, "CalendarAxiom", label, loc);
+            AddScopedAssertion(f, "CalendarAxiom", label, loc);
         }
 
         switch (kind)
@@ -3099,21 +3100,39 @@ internal sealed partial class CfgSsaLowerer
         }
     }
 
+    private void AddScopedAssertion(string formula, string kind, string label, Location loc, string? reason = null)
+    {
+        if (_activeQuantifiers.Count > 0)
+        {
+            var binders = string.Join(" ", _activeQuantifiers.Select(q => $"({q.Var} {q.Sort})"));
+            AddAssertion($"(forall ({binders}) {formula})", kind, label, loc, reason);
+            return;
+        }
+
+        AddAssertion(formula, kind, label, loc, reason);
+    }
+
     private void EmitOnDemandElementAssumptions(string guardCond, SmtTypedTerm element, Location loc)
     {
+        // Never emit unquantified top-level assertions containing quantifier-bound variables.
+        if (_inQuantifierDepth > 0 && _activeQuantifiers.Count == 0)
+        {
+            return;
+        }
+
         var key = guardCond + "|" + element.Term;
         if (!_emittedOnDemandKeys.Add(key)) return;
 
         if (element.Type.TypeKind == TypeKind.Enum &&
             TryGetIntegralBounds(element.Type, out var eMin, out var eMax, out _, out _))
         {
-            AddAssertion(
+            AddScopedAssertion(
                 $"(=> {guardCond} (and (>= {element.Term} {CalendarArithmetic.FormatBigInt(eMin)}) (<= {element.Term} {CalendarArithmetic.FormatBigInt(eMax)})))",
                 "EnumRange", $"{element.Type.Name} underlying range", loc);
 
             if (IsClosedEnum(element.Type, out _, out var closedVals))
             {
-                AddAssertion($"(=> {guardCond} {BuildClosedEnumFormula(element.Term, closedVals)})",
+                AddScopedAssertion($"(=> {guardCond} {BuildClosedEnumFormula(element.Term, closedVals)})",
                     "ClosedEnum", $"{element.Type.Name} declared members", loc);
             }
             return;
@@ -3128,13 +3147,13 @@ internal sealed partial class CfgSsaLowerer
 
         if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out _, out var elIsImmArr) && elIsImmArr)
         {
-            AddAssertion($"(=> {guardCond} (>= (seq_count_{elSeqId} {element.Term}) 0))",
+            AddScopedAssertion($"(=> {guardCond} (>= (seq_count_{elSeqId} {element.Term}) 0))",
                 "CollectionAxiom", $"{element.Type.Name}.Count >= 0", loc);
-            AddAssertion($"(=> {guardCond} (=> (seq_is_default_{elSeqId} {element.Term}) (= (seq_count_{elSeqId} {element.Term}) 0)))",
+            AddScopedAssertion($"(=> {guardCond} (=> (seq_is_default_{elSeqId} {element.Term}) (= (seq_count_{elSeqId} {element.Term}) 0)))",
                 "CollectionAxiom", $"{element.Type.Name} default array has zero length", loc);
             if (_nonDefaultImmutableArrays)
             {
-                AddAssertion($"(=> {guardCond} (not (seq_is_default_{elSeqId} {element.Term})))",
+                AddScopedAssertion($"(=> {guardCond} (not (seq_is_default_{elSeqId} {element.Term})))",
                     "NonDefault", $"{element.Type.Name} is non-default", loc);
             }
         }
@@ -3150,7 +3169,7 @@ internal sealed partial class CfgSsaLowerer
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var invTerm = LowerExpression(isValidBody!, "true", valEnv, emitObligations: false);
                 var declLoc = isValidMethod!.Locations.FirstOrDefault() ?? loc;
-                AddAssertion($"(=> {guardCond} {invTerm.Term})", "TypeAlias", $"{element.Type.Name}.IsValid", declLoc, typeDesc);
+                AddScopedAssertion($"(=> {guardCond} {invTerm.Term})", "TypeAlias", $"{element.Type.Name}.IsValid", declLoc, typeDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -3174,7 +3193,7 @@ internal sealed partial class CfgSsaLowerer
                 var invEnv = new BlockEnv { ThisOverride = element };
                 var invTerm = LowerExpression(invBody!, "true", invEnv, emitObligations: false);
                 var invLoc = invMember.Locations.FirstOrDefault() ?? loc;
-                AddAssertion($"(=> {guardCond} {invTerm.Term})", "TypeInvariant", $"[Invariant] {element.Type.Name}.{invMember.Name}", invLoc, invDesc);
+                AddScopedAssertion($"(=> {guardCond} {invTerm.Term})", "TypeInvariant", $"[Invariant] {element.Type.Name}.{invMember.Name}", invLoc, invDesc);
             }
             catch (ContractLoweringException ex)
             {
@@ -3193,7 +3212,7 @@ internal sealed partial class CfgSsaLowerer
                     _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
                     fIsImmArr)
                 {
-                    AddAssertion($"(=> {guardCond} (not (seq_is_default_{fSeqId} {fieldTerm.Term})))",
+                    AddScopedAssertion($"(=> {guardCond} (not (seq_is_default_{fSeqId} {fieldTerm.Term})))",
                         "NonDefault", $"[NonDefault] field '{element.Type.Name}.{f.Name}'", loc);
                 }
             }

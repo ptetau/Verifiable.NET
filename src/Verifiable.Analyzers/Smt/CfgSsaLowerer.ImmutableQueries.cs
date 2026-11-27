@@ -12,6 +12,7 @@ internal sealed partial class CfgSsaLowerer
     private int _quantifierCounter;
     private int _inQuantifierDepth;
     private List<string>? _quantifierObligations;
+    private readonly List<(string Var, string Sort)> _activeQuantifiers = new();
     private readonly Dictionary<string, string> _memoizedCountTerms = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IReadOnlyList<SmtTypedTerm>> _knownConcreteSequences = new(StringComparer.Ordinal);
 
@@ -672,7 +673,17 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var idxTyped = new SmtTypedTerm(idxVar, intType);
-        var (pTerm, obligations) = LowerLambdaInQuantifier(idxParam!, predBody!, idxTyped, CombineAnd(gamma, inRange), env, inlineDepth);
+        _activeQuantifiers.Add((idxVar, idxSort));
+        SmtTypedTerm pTerm;
+        List<string> obligations;
+        try
+        {
+            (pTerm, obligations) = LowerLambdaInQuantifier(idxParam!, predBody!, idxTyped, CombineAnd(gamma, inRange), env, inlineDepth);
+        }
+        finally
+        {
+            _activeQuantifiers.RemoveAt(_activeQuantifiers.Count - 1);
+        }
         if (emitObligations || _inQuantifierDepth > 0)
         {
             EmitQuantifiedLambdaObligations(idxVar, inRange, obligations, loc, gamma, idxSort);

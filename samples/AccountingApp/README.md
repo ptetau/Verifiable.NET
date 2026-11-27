@@ -4,7 +4,7 @@ A full-stack double-entry accounting application (`AccountingApp.Shared` + Blazo
 
 ## The Domain & Rules
 
-[`samples/AccountingApp/AccountingApp.Shared`](AccountingApp.Shared) compiles under `[assembly: Verifiable]`:
+[`samples/AccountingApp/AccountingApp.Shared`](AccountingApp.Shared) marks its domain types (`Account`, `JournalLine`, `PostedJournalEntry`, `LedgerState`, `LedgerTransition`) and engines (`LedgerEngine`, `LedgerUiEngine`) with type-level `[Verifiable]`, leaving serialization and HTTP/SQLite adapters cleanly outside the verified core:
 
 - **Constrained value types (`[TypeAlias<T>]` with spirit messages)** in [DomainTypes.cs](AccountingApp.Shared/DomainTypes.cs):
   - `AccountId` (`int`, `value >= 1`) and `JournalEntryId` (`int`, `value >= 1`) — positive nominal identifiers.
@@ -13,7 +13,7 @@ A full-stack double-entry accounting application (`AccountingApp.Shared` + Blazo
 - **Type `[Invariant]`s:**
   - `PostedJournalEntry.IsBalanced`: every posted entry has at least two lines and `TotalDebits == TotalCredits`.
   - `LedgerState.IsBalanced`: across the entire ledger, `TotalDebits == TotalCredits` always holds (*"Across the entire ledger, total debits must always equal total credits."*).
-- **Verified operations in [LedgerEngine.cs](AccountingApp.Shared/LedgerEngine.cs):**
+- **Verified operations in [LedgerEngine.cs](AccountingApp.Shared/LedgerEngine.cs)** (using `Spec.Implies` for conditional transition rules):
   - `OpenAccount` (`[InboundPort]`): initializes an account with zero balance.
   - `PostTransfer` (`[InboundPort]`): debits destination and credits source while enforcing currency match and overdraft rules.
   - `PostFeeSplitTransfer` (`[InboundPort]`): 3-leg split entry — credits source by `grossAmount`, debits destination by `grossAmount - feeAmount`, and debits fee account by `feeAmount`, conserving `TotalDebits == TotalCredits`.
@@ -50,7 +50,7 @@ dotnet test tests/Verifiable.Samples.Tests/Verifiable.Samples.Tests.csproj -c Re
 Check whether **every** method in `AccountingApp.Shared` returning `LedgerState` preserves `TotalDebits == TotalCredits`:
 
 ```powershell
-dotnet run --project src/Verifiable.Query -c Release -- check-invariant `
+dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- check-invariant `
   --project samples/AccountingApp/AccountingApp.Shared/AccountingApp.Shared.csproj `
   --type LedgerState `
   --expr "s => s.TotalDebits == s.TotalCredits"
@@ -69,8 +69,8 @@ Claim: s => s.TotalDebits == s.TotalCredits
 [HOLDS] LedgerEngine.OpenAccount  (2 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]
 [HOLDS] LedgerEngine.PostTransfer  (6 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]
 [HOLDS] LedgerEngine.PostFeeSplitTransfer  (7 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]
-[HOLDS] LedgerEngine.PostBalancedEntry  (5 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]; branch condition reaching return (LedgerEngine.cs:432) [LedgerEngine.cs:432]
-[HOLDS] LedgerEngine.ReverseEntry  (6 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]; LedgerEngine.FindJournalIndex: Spec.Ensures<int>(result => result >= -1 && result < journal.Count, "Returns either -1 (not found) or a valid index into the journal list.") ("Returns either -1 (not found) or a valid index into the journal list.") [LedgerEngine.cs:437]; [Invariant] PostedJournalEntry.IsBalanced ("Every posted journal entry must have equal debits and credits across at least two lines.") [DomainTypes.cs:77]; branch condition reaching return (LedgerEngine.cs:500) [LedgerEngine.cs:500]; branch condition reaching return (LedgerEngine.cs:540) [LedgerEngine.cs:540]
+[HOLDS] LedgerEngine.PostBalancedEntry  (5 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]; branch condition reaching return (LedgerEngine.cs:435) [LedgerEngine.cs:435]
+[HOLDS] LedgerEngine.ReverseEntry  (6 paths)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]; LedgerEngine.FindJournalIndex: Spec.Ensures<int>(result => result >= -1 && result < journal.Count, "Returns either -1 (not found) or a valid index into the journal list.") ("Returns either -1 (not found) or a valid index into the journal list.") [LedgerEngine.cs:440]; [Invariant] PostedJournalEntry.IsBalanced ("Every posted journal entry must have equal debits and credits across at least two lines.") [DomainTypes.cs:77]; branch condition reaching return (LedgerEngine.cs:503) [LedgerEngine.cs:503]; branch condition reaching return (LedgerEngine.cs:543) [LedgerEngine.cs:543]
 [HOLDS] LedgerUiEngine.OnCommitConfirmed  (1 path)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]
 [HOLDS] LedgerUiEngine.OnCommitFailed  (1 path)  -- because: [Invariant] LedgerState.IsBalanced ("Across the entire ledger, total debits must always equal total credits.") [DomainTypes.cs:89]
 
@@ -84,7 +84,7 @@ Suppose someone writes a 3-leg fee split and forgets to subtract `fee` from `net
 ```powershell
 @'
 using Verifiable.Contracts; [assembly: Verifiable] public readonly record struct Ledger(decimal Debits, decimal Credits) { public static Ledger SplitFeeBug(Ledger s, decimal gross, decimal fee) { Spec.Requires(s.Debits == s.Credits && gross > 0m && fee > 0m && fee < gross); var net = gross; return new Ledger(s.Debits + net + fee, s.Credits + gross); } }
-'@ | dotnet run --project src/Verifiable.Query -c Release -- ask --stdin --target Ledger.SplitFeeBug --assert "result.Debits == result.Credits" --because "3-leg fee splits must keep debits equal to credits."
+'@ | dotnet run --project src/Verifiable.Query -f net10.0 -c Release -- ask --stdin --target Ledger.SplitFeeBug --assert "result.Debits == result.Credits" --because "3-leg fee splits must keep debits equal to credits."
 ```
 
 Actual counterexample from Z3 (exit code `1`):
