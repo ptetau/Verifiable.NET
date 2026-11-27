@@ -9,6 +9,16 @@ internal sealed partial class CfgSsaLowerer
 {
     private bool _whitespaceDeclared;
     private bool _trimDeclared;
+    private readonly HashSet<string> _stringLiterals = new(System.StringComparer.Ordinal);
+    private readonly HashSet<string> _trimReceivers = new(System.StringComparer.Ordinal);
+
+    // Give congruence closure the exact value at known literals. Otherwise
+    // even s == "..." can require an expensive regex/concatenation search.
+    private void AddLiteralTrimEquation(string literal)
+    {
+        _decls.Add($"(assert (= (dotnet_trim {ContractExpressionTranslator.EscapeSmtString(literal)}) " +
+            $"{ContractExpressionTranslator.EscapeSmtString(literal.Trim())}))");
+    }
 
     // Unicode White_Space, as tested by .NET Char.IsWhiteSpace(char).
     private void DeclareWhitespace()
@@ -81,10 +91,14 @@ internal sealed partial class CfgSsaLowerer
             {
                 _trimDeclared = true;
                 _decls.Add("(declare-fun dotnet_trim (String) String)");
+                foreach (var literal in _stringLiterals)
+                    AddLiteralTrimEquation(literal);
             }
             // Whitespace-only edges and a core with no whitespace at either
             // end determine precisely one trimmed result (including empty).
             var core = $"(dotnet_trim {text})";
+            if (!_trimReceivers.Add(text))
+                return new SmtTypedTerm($"(str-val {core})", method.ReturnType);
             var left = $"trim_left_{++_ssaCounter}";
             var right = $"trim_right_{++_ssaCounter}";
             _decls.Add($"(declare-const {left} String)");

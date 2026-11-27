@@ -74,7 +74,7 @@ public class InitializerProjectionTests
 
     [Theory]
     [InlineData("state", "", null)]
-    [InlineData("new State(ImmutableList<int>.Empty.Add(1))", "", "VER101")]
+    [InlineData("new State(ImmutableList<int>.Empty.Add(1))", "", "VER102")]
     [InlineData("state", "public bool Equals(State other) => false;", "VER101")]
     public async Task LedgerRejectionRequiresTheForwardedState(string rejected, string equals, string? failure)
     {

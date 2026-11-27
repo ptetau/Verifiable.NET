@@ -1464,7 +1464,11 @@ internal sealed partial class CfgSsaLowerer
         if (val is decimal dv)
             return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), type);
         if (val is string sv)
+        {
+            if (_stringLiterals.Add(sv) && _trimDeclared)
+                AddLiteralTrimEquation(sv);
             return new SmtTypedTerm($"(str-val {ContractExpressionTranslator.EscapeSmtString(sv)})", type);
+        }
         if (val is ulong ul)
             return new SmtTypedTerm(ul.ToString(CultureInfo.InvariantCulture), type);
         return new SmtTypedTerm(Convert.ToInt64(val, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture), type);
