@@ -226,6 +226,9 @@ internal sealed partial class CfgSsaLowerer
         }
     }
 
+    /// <summary>Named premises recorded so far (only when constructed with <c>trackProofPremises: true</c>).</summary>
+    internal IReadOnlyList<NamedPremise> Premises => _premises;
+
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
         try

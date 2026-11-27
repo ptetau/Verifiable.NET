@@ -27,7 +27,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             VerifiableDescriptors.InvalidContractExpression,
             VerifiableDescriptors.ProofObligationFailed,
             VerifiableDescriptors.SmtSolverUnknown,
-            VerifiableDescriptors.Z3SolverUnavailable
+            VerifiableDescriptors.Z3SolverUnavailable,
+            VerifiableDescriptors.ContradictoryPremises
         ];
 
     /// <inheritdoc />
@@ -125,6 +126,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 var reportedFailures = new HashSet<(int Start, int Length, string Kind, string Contract)>();
+                var anyRefuted = false;
 
                 foreach (var ob in allObligations)
                 {
@@ -159,6 +161,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                     if (verdict == ObligationVerdict.Refuted)
                     {
+                        anyRefuted = true;
                         var dedupKey = (ob.Location.SourceSpan.Start, ob.Location.SourceSpan.Length, ob.Kind, ob.ContractText);
                         if (!reportedFailures.Add(dedupKey))
                         {
@@ -223,8 +226,84 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             elmUnknown));
                     }
                 }
+
+                // Vacuity: if the premises themselves contradict, every goal above was "proved" without meaning
+                // anything. A refuted goal already shows the premises are satisfiable, so the check is skipped then.
+                // Assertions only accumulate, so the longest preamble contains every premise of the method.
+                if (!anyRefuted && allObligations.Count > 0)
+                {
+                    var allPremises = allObligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
+                    var premiseCheck = Z3SolverRunner.Execute(allPremises, msbuildZ3Path, sourceTree?.FilePath);
+                    if (ProofKernel.PremisesContradict(premiseCheck.Status))
+                    {
+                        ReportContradictoryPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceTree?.FilePath);
+                    }
+                }
             });
         });
+    }
+
+    private static void ReportContradictoryPremises(
+        OperationBlockAnalysisContext opCtx,
+        IMethodSymbol method,
+        bool closedEnums,
+        bool nonDefaultImmArr,
+        string? msbuildZ3Path,
+        string? sourceFilePath)
+    {
+        // Lower again with named premises so the unsat core can say which assumptions clash.
+        var tracking = new CfgSsaLowerer(
+            opCtx.Compilation,
+            method,
+            trackProofPremises: true,
+            closedEnums: closedEnums,
+            nonDefaultImmutableArrays: nonDefaultImmArr);
+
+        var obligations = new List<ProofObligation>();
+        foreach (var block in opCtx.OperationBlocks)
+        {
+            if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
+            {
+                obligations.AddRange(tracking.Lower(opCtx.GetControlFlowGraph(block), opCtx.OperationBlocks).Obligations);
+            }
+        }
+
+        var lines = new List<string>();
+        if (obligations.Count > 0)
+        {
+            var namedPremises = obligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
+            var core = Z3SolverRunner.ExecuteWithUnsatCore(namedPremises, msbuildZ3Path, sourceFilePath);
+            if (core.Status == SmtStatus.Unsat)
+            {
+                var byId = tracking.Premises.ToDictionary(p => p.Id, StringComparer.Ordinal);
+                foreach (var id in core.UnsatCore)
+                {
+                    if (!byId.TryGetValue(id, out var premise) || premise.Kind == "SsaBinding") continue;
+                    var where = premise.FilePath is null
+                        ? string.Empty
+                        : $" ({System.IO.Path.GetFileName(premise.FilePath)}:{premise.Line})";
+                    var why = string.IsNullOrWhiteSpace(premise.Reason) || premise.Label.Contains(premise.Reason!.Trim())
+                        ? string.Empty
+                        : $" — {premise.Reason!.Trim()}";
+                    lines.Add($"- {premise.Kind}: {premise.Label}{where}{why}");
+                }
+            }
+        }
+
+        var display = $"{method.ContainingType?.Name}.{method.Name}";
+        var loc = method.Locations.FirstOrDefault() ?? Location.None;
+        var conflict = lines.Count > 0
+            ? "These assumptions cannot all hold at once:\n    " + string.Join("\n    ", lines)
+            : "Z3 could not narrow the conflict down to named assumptions.";
+        var elm = ElmDiagnosticFormatter.Format(
+            "CONTRADICTORY PREMISES",
+            loc,
+            $"No input satisfies the assumptions of `{display}`, so Z3 would \"prove\" any contract here, true or false. Its proofs have been rejected.",
+            explanation: conflict,
+            fixHint: "Fix: Correct the conflicting `Spec.Requires`, `[Invariant]` or `[TypeAlias<T>]` rules so that at least one input satisfies them all.",
+            summary: $"Premises of {display} contradict each other, so its proofs are vacuous" +
+                     (lines.Count > 0 ? ": " + OneLine(string.Join("; ", lines)) : "."));
+        opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, loc, elm));
     }
 
     internal static string BuildQueryScript(ProofObligation ob) =>

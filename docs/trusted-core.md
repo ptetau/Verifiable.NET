@@ -21,6 +21,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code. Z3 checks it
 | `ProofKernel.ClassifyStatusLine` | Only the exact token `unsat` reads as a proof. An `(error ...)` line is never ignored. |
 | `ProofKernel.ReadCheckSatAnswer` | `unsat` is only reported if Z3 printed exactly `unsat` and nothing before it was another verdict or an error. Empty output is an error. |
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
+| `ProofKernel.PremisesContradict` / `IsGenuinelyProved` | A goal counts as proved only if its premises are not themselves contradictory; only an `unsat` premise check counts as a contradiction. The analyzer reports `VER105` when they are. |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | A `[MustConsume]` token that may be live on either path is still flagged after the paths merge. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound, so the `VER007` analysis reaches the same answer in any order and always stops. |
@@ -50,7 +51,6 @@ These are open, and are listed so they are not forgotten:
 
 - **Shared disk cache.** `Z3SolverRunner` caches answers in `verifiable-smt-cache-v1` under the system temp folder, keyed by a hash of the query. Entries are not signed, so anyone who can write to that folder can plant an `Unsat` answer. The cache now rejects any entry the kernel would not have cached (`IsCacheable`), but a planted `Unsat` still passes.
 - **No solver, no failure.** `VER104` (Z3 not found) is a warning. A build without Z3 succeeds with no proofs checked.
-- **Vacuous proofs in the analyzer.** If a method's premises contradict each other, every goal is "proved". `verifiable-query` detects this through the unsat core; the build-time analyzer does not.
 
 ## Rules for contributors
 

@@ -34,6 +34,8 @@ public class KernelSelfVerificationTests
         { "ProofKernel.cs", "if (line == \"unsat\") return SolverLine.Unsat;", "if (line.Contains(\"unsat\")) return SolverLine.Unsat;", "ProofKernel.ClassifyStatusLine" },
         { "ProofKernel.cs", "if (kind != SolverLine.Noise)", "if (kind == SolverLine.Unsat || kind == SolverLine.Sat)", "ProofKernel.ReadCheckSatAnswer" },
         { "ProofKernel.cs", "return preamble + \"\\n(assert (not \" + goal + \"))\\n\";", "return preamble + \"\\n(assert \" + goal + \")\\n\";", "ProofKernel.BuildRefutationQuery" },
+        { "ProofKernel.cs", "return premiseCheck == SmtStatus.Unsat;", "return premiseCheck != SmtStatus.Sat;", "ProofKernel.PremisesContradict" },
+        { "ProofKernel.cs", "return Decide(goalCheck) == ObligationVerdict.Proved && !PremisesContradict(premiseCheck);", "return Decide(goalCheck) == ObligationVerdict.Proved;", "ProofKernel.IsGenuinelyProved" },
         { "QueryVerdicts.cs", "if (undecided > 0) return QueryVerdict.Inconclusive;", "", "QueryKernel.Aggregate" },
         { "ObligationLattice.cs", ": ObligationState.MaybeLive);", ": ObligationState.Consumed);", "ObligationLattice.Join" },
         { "ObligationLattice.cs", "        a == b\n            ? a", "        a == b || b == ObligationState.Consumed\n            ? a", "LatticeLaws.JoinIsCommutative" },

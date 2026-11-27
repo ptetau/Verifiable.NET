@@ -68,6 +68,32 @@ internal static class ProofKernel
     }
 
     /// <summary>
+    /// Whether a satisfiability check of an obligation's premises (with no goal) shows they contradict
+    /// each other. If they do, every goal checked against them is "proved" without meaning anything.
+    /// </summary>
+    internal static bool PremisesContradict(SmtStatus premiseCheck)
+    {
+        Spec.Ensures<bool>(
+            r => r == (premiseCheck == SmtStatus.Unsat),
+            "Premises are called contradictory only when Z3 shows no input satisfies them; an undecided check is not evidence either way.");
+
+        return premiseCheck == SmtStatus.Unsat;
+    }
+
+    /// <summary>
+    /// Whether a goal is genuinely proved: Z3 refuted its negation, and did not find the premises themselves
+    /// contradictory.
+    /// </summary>
+    internal static bool IsGenuinelyProved(SmtStatus goalCheck, SmtStatus premiseCheck)
+    {
+        Spec.Ensures<bool>(
+            r => r == (goalCheck == SmtStatus.Unsat && premiseCheck != SmtStatus.Unsat),
+            "A proof only counts when the goal was needed: unsat premises would make every goal unsat, true or not.");
+
+        return Decide(goalCheck) == ObligationVerdict.Proved && !PremisesContradict(premiseCheck);
+    }
+
+    /// <summary>
     /// Classifies one trimmed line of Z3 output.
     /// </summary>
     internal static SolverLine ClassifyStatusLine(string line)
