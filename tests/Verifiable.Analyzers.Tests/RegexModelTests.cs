@@ -114,15 +114,17 @@ public class RegexModelTests
         Assert.Contains(ds, d => d.Id == "VER101");
     }
 
-    [Fact]
-    public async Task UnguardedNullableInputFailsEvenWithoutAContract()
+    [Theory]
+    [InlineData("return Regex.IsMatch(value!, \"^x$\");")]
+    [InlineData("Spec.Ensures<bool>(r => r == Regex.IsMatch(value!, \"\")); return true;")]
+    public async Task UnguardedNullableInputFailsInBodyOrContract(string body)
     {
-        const string source = """
+        var source = $$"""
             using System.Text.RegularExpressions;
             using Verifiable.Contracts;
             [Verifiable] public static class C
             {
-                public static bool Check(string? value) => Regex.IsMatch(value!, "^x$");
+                public static bool Check(string? value) { {{body}} }
             }
             """;
         _ = typeof(Regex).Assembly;

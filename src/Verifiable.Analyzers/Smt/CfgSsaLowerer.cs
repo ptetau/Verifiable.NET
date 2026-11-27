@@ -2009,8 +2009,7 @@ internal sealed partial class CfgSsaLowerer
         {
             var (input, regex) = RegexModel.Describe(inv, _compilation);
             var value = LowerExpression(input, gamma, env, emitObligations, inlineDepth);
-            if (emitObligations)
-                AddObligation("Precondition", "Regex.IsMatch input must not be null", loc, gamma, $"(not (= {value.Term} str-null))");
+            AddObligation("Precondition", "Regex.IsMatch input must not be null", loc, gamma, $"(not (= {value.Term} str-null))");
             return new SmtTypedTerm($"(str.in_re (str-text {value.Term}) {regex})", method.ReturnType);
         }
 
