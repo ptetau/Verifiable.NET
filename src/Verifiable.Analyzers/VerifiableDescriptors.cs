@@ -83,6 +83,14 @@ internal static class VerifiableDescriptors
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor ContradictoryPremises = new(
+        id: "VER105",
+        title: "Contract premises contradict each other, so proofs would be vacuous",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor SmtSolverUnknown = new(
         id: "VER103",
         title: "SMT solver returned unknown or timed out",

@@ -40,6 +40,7 @@ public class KernelSelfVerificationTests
         { "ProofKernel.cs", "return preamble + \"\\n(assert \" + pathCondition + \")\\n(assert (not \" + goal + \"))\\n\";", "return preamble + \"\\n(assert \" + pathCondition + \")\\n(assert false)\\n(assert (not \" + goal + \"))\\n\";", "ProofKernel.BuildRefutationQuery" },
         { "ProofKernel.cs", "return preamble + \"\\n(assert \" + pathCondition + \")\\n(assert (not \" + goal + \"))\\n\";", "return preamble + \"\\n(assert (not \" + goal + \"))\\n\";", "ProofKernel.BuildRefutationQuery" },
         { "ProofKernel.cs", "return \"(assert (! (not \" + goal + \") :named \" + NegatedGoalName + \"))\\n\";", "return \"(assert (! \" + goal + \" :named \" + NegatedGoalName + \"))\\n\";", "ProofKernel.NamedNegatedGoal" },
+        { "ProofKernel.cs", "return premiseCheck == SmtStatus.Unsat;", "return premiseCheck != SmtStatus.Sat;", "ProofKernel.PremisesContradict" },
         { "QueryVerdicts.cs", "if (undecided > 0) return QueryVerdict.Inconclusive;", "", "QueryKernel.Aggregate" },
         { "QueryVerdicts.cs", "if (provedReachable == 0 && provedUnreachable > 0) return QueryVerdict.ProvedVacuously;", "", "QueryKernel.Aggregate" },
         { "ObligationLattice.cs", "if (present == ObligationState.SinkParameter) return ObligationState.SinkParameter;\n        return ObligationState.MaybeLive;", "if (present == ObligationState.SinkParameter) return ObligationState.SinkParameter;\n        return ObligationState.Consumed;", "ObligationLattice.JoinWithUntracked" },

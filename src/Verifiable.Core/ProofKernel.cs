@@ -223,4 +223,17 @@ internal static class ProofKernel
 
         return "(assert (! (not " + goal + ") :named " + NegatedGoalName + "))\n";
     }
+
+    /// <summary>
+    /// Whether a satisfiability check of an obligation's premises (with no goal) shows they contradict
+    /// each other. If they do, every goal checked against them is "proved" without meaning anything.
+    /// </summary>
+    internal static bool PremisesContradict(SmtStatus premiseCheck)
+    {
+        Spec.Ensures<bool>(
+            r => r == (premiseCheck == SmtStatus.Unsat),
+            "Premises are called contradictory only when Z3 shows no input satisfies them; an undecided check is not evidence either way.");
+
+        return premiseCheck == SmtStatus.Unsat;
+    }
 }

@@ -145,6 +145,15 @@ public class KernelBehaviourTests
         });
 
     [Fact]
+    public void Vacuity_OnlyUnsatPremisesContradict()
+    {
+        foreach (var premises in AllStatuses)
+        {
+            Assert.Equal(premises == SmtStatus.Unsat, ProofKernel.PremisesContradict(premises));
+        }
+    }
+
+    [Fact]
     public void NamedNegatedGoal_IsTheNegatedGoal()
     {
         Assert.Equal("(assert (! (not (> x 0)) :named query_negated_goal))\n", ProofKernel.NamedNegatedGoal("(> x 0)"));

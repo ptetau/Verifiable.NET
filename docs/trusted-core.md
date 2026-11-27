@@ -23,6 +23,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.BlocksBuild` | Decides the severity of `VER104`: a missing solver stops the build unless the project explicitly opts out with `VerifiableAllowMissingZ3`. (Refuted and undecided obligations stop the build through the default Error severity of `VER102`/`VER103`, which a project can still lower in `.editorconfig`.) |
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
 | `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
+| `ProofKernel.PremisesContradict` | Premises are called contradictory only when Z3 answers `unsat` to them alone; an undecided check is not evidence either way. When they contradict, the analyzer rejects the method's proofs with `VER105`. |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | When two paths merge, a `[MustConsume]` token that may be live on either path is still flagged, unless one side is a sink-method parameter (which may hold the token). A token counts as consumed only if it was consumed on both paths. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. Together with the per-block transfer rules (which are not proved), this is what lets the `VER007` analysis give the same answer in any visiting order. |
@@ -56,7 +57,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 
 These are open, and are listed so they are not forgotten:
 
-- **Vacuous proofs in the analyzer.** If a method's premises contradict each other, every goal is "proved". `verifiable-query` detects this through the unsat core; the build-time analyzer does not.
+- **Vacuous proofs on one path.** `VER105` catches premises that contradict for the whole method. It does not catch a contradiction that only appears on one branch, for example a callee guarantee or `[PureAxiom]` that is impossible but only used inside an `if`: goals on that branch are still "proved". It also stays silent when Z3 cannot decide whether the premises can hold. `verifiable-query` reports per-path vacuity through its unsat core.
 
 ## Rules for contributors
 
