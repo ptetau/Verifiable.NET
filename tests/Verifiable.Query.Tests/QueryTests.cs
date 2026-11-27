@@ -402,4 +402,28 @@ public sealed class QueryTests
             r => r.GetProperty("method").GetString() == "PricingEngine.PriceCart"
               && r.GetProperty("status").GetString() == "proved");
     }
+
+    [Fact]
+    public void CheckedEnumCastOverflow_MakesQueryInconclusiveInsteadOfProving()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+            public enum ByteEnum : byte { A = 1, B = 2 }
+            [Verifiable]
+            public static class CastProbe
+            {
+                public static ByteEnum CastChecked(int n) => checked((ByteEnum)n);
+            }
+            """;
+
+        var (code, stdout, stderr) = RunCli([
+            "ask", "--stdin",
+            "--target", "CastProbe.CastChecked",
+            "--assume", "n == 258",
+            "--assert", "result == (ByteEnum)2"
+        ], source);
+
+        Assert.Equal(2, code);
+        Assert.Contains("Checked cast", stdout + stderr);
+    }
 }

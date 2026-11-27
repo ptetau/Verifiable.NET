@@ -417,7 +417,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 else if (VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.GhostAttr)
                     ? !IsSpecificationUse(inv, context.OwningSymbol)
-                    : !VerifiableSymbolHelpers.IsTrustedPureMethod(inv.TargetMethod))
+                    : !IsTrustedInvocation(inv))
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.UnverifiedCallOrDynamic,
@@ -609,4 +609,72 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
     }
 
     private static bool IsDirectLinqCallbackInvocation(IInvocationOperation inv) => false;
+
+    private static bool IsTrustedInvocation(IInvocationOperation inv)
+    {
+        var method = inv.TargetMethod;
+        if (method.ContainingType?.SpecialType == SpecialType.System_String)
+        {
+            return StringIntrinsics.IsTrustedStringInvocation(inv);
+        }
+
+        if (method.ContainingType?.OriginalDefinition.ToDisplayString() == "System.Text.RegularExpressions.Regex")
+        {
+            return IsSupportedRegexIsMatch(inv);
+        }
+
+        return VerifiableSymbolHelpers.IsTrustedPureMethod(method);
+    }
+
+    private static bool IsSupportedRegexIsMatch(IInvocationOperation inv)
+    {
+        var method = inv.TargetMethod;
+        if (method.Name != "IsMatch")
+        {
+            return false;
+        }
+
+        if (method.IsStatic)
+        {
+            if (method.Parameters.Length is < 2 or > 3)
+            {
+                return false;
+            }
+            if (method.Parameters[0].Type.SpecialType != SpecialType.System_String ||
+                method.Parameters[1].Type.SpecialType != SpecialType.System_String)
+            {
+                return false;
+            }
+            if (method.Parameters.Length == 3 &&
+                method.Parameters[2].Type.ToDisplayString() != "System.Text.RegularExpressions.RegexOptions")
+            {
+                return false;
+            }
+            return true;
+        }
+
+        if (method.Parameters.Length == 1 &&
+            method.Parameters[0].Type.SpecialType == SpecialType.System_String &&
+            inv.Instance is not null)
+        {
+            if (inv.Instance is IInvocationOperation factoryInv &&
+                VerifiableSymbolHelpers.TryGetGeneratedRegexAttribute(factoryInv.TargetMethod, out _, out _))
+            {
+                return true;
+            }
+
+            if (inv.Instance is IPropertyReferenceOperation propRef &&
+                VerifiableSymbolHelpers.TryGetGeneratedRegexAttribute(propRef.Property, out _, out _))
+            {
+                return true;
+            }
+
+            if (inv.Instance is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

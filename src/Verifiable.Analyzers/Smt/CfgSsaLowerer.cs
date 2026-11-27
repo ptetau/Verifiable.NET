@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
+using System.Numerics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -52,11 +53,12 @@ internal sealed record LoweringOutcome(
     IReadOnlyList<ProofObligation> Obligations,
     IReadOnlyList<(string Contract, Location Location, string Error)> Errors);
 
-internal sealed class CfgSsaLowerer
+internal sealed partial class CfgSsaLowerer
 {
     private readonly Compilation _compilation;
     private readonly IMethodSymbol _method;
     private readonly bool _trackProofPremises;
+    private readonly bool _closedEnums;
     private readonly SmtTypeSystem _types;
     private readonly ContractExpressionTranslator _translator;
 
@@ -131,11 +133,12 @@ internal sealed class CfgSsaLowerer
     private readonly Dictionary<ISymbol, SmtTypedTerm> _entryParamVars = new(SymbolEqualityComparer.Default);
     private SmtTypedTerm? _entryThis;
 
-    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false)
+    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false, bool closedEnums = false)
     {
         _compilation = compilation;
         _method = method;
         _trackProofPremises = trackProofPremises;
+        _closedEnums = closedEnums;
         var useBitVec = HasCheckedArithmetic(method);
         _types = new SmtTypeSystem(useBitVec);
         _translator = new ContractExpressionTranslator(compilation, _types);
@@ -168,7 +171,7 @@ internal sealed class CfgSsaLowerer
         _queryAssertOp = null;
         _queryAssumeOp = null;
         return new QueryLoweringOutcome(_queryObligations.ToList(),
-            _obligations.Where(ob => ob.Kind == "Precondition").ToList(), _errors.ToList());
+            _obligations.Where(ob => ob.Kind is "Precondition" or "Overflow" or "DivisionByZero" or "CollectionBounds").ToList(), _errors.ToList());
     }
 
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
@@ -1038,11 +1041,30 @@ internal sealed class CfgSsaLowerer
             }
         }
 
+        if (IsClosedEnum(value.Type, out var enumType, out var enumVals))
+        {
+            var domainFormula = BuildClosedEnumFormula(value.Term, enumVals);
+            AddObligation("TypeInvariant", $"Closed enum domain for '{enumType!.Name}'", loc, gamma, domainFormula,
+                $"Values of closed enum '{enumType.Name}' must be one of its declared members.");
+            return;
+        }
+
+        if (_types.TryGetNullableInfo(value.Type, out _, out var optId, out var optInner) &&
+            IsClosedEnum(optInner!, out var optEnumType, out var optEnumVals))
+        {
+            var domainFormula = BuildClosedEnumFormula($"(opt-val-{optId} {value.Term})", optEnumVals);
+            AddObligation("TypeInvariant", $"Closed enum domain for '{optEnumType!.Name}'", loc,
+                CombineAnd(gamma, $"(not (= {value.Term} opt-none-{optId}))"),
+                domainFormula,
+                $"Values of closed enum '{optEnumType.Name}' must be one of its declared members.");
+            return;
+        }
+
         if (_types.TryGetComposite(value.Type, out var comp) && !SmtTypeSystem.TryGetConstrainedUnderlying(value.Type, out _))
         {
             foreach (var f in comp!.Fields)
             {
-                if (SmtTypeSystem.HasAnyInvariants(f.Type))
+                if (SmtTypeSystem.HasAnyInvariants(f.Type) || HasAnyClosedEnum(f.Type))
                 {
                     EmitValueInvariantObligations(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), gamma, loc);
                 }
@@ -1143,17 +1165,52 @@ internal sealed class CfgSsaLowerer
                     }
                 }
                 var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
-                if (conv.Type is { } target && !SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
-                    _types.TryGetNullableInfo(inner.Type, out _, out var srcId, out var srcType) &&
-                    _types.TryGetNullableInfo(target, out _, out var dstId, out var dstType))
+                if (conv.Type is { } target)
                 {
-                    var payload = new SmtTypedTerm($"(opt-val-{srcId} {inner.Term})", srcType!);
-                    var converted = ConvertNullableValue(payload, dstType!);
-                    return new SmtTypedTerm($"(ite (= {inner.Term} opt-none-{srcId}) opt-none-{dstId} (opt-some-{dstId} {converted.Term}))", target);
+                    var convChecked = IsConversionChecked(conv, _compilation);
+                    if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                        _types.TryGetNullableInfo(inner.Type, out _, out var srcId, out var srcType) &&
+                        _types.TryGetNullableInfo(target, out _, out var dstId, out var dstType))
+                    {
+                        var payload = new SmtTypedTerm($"(opt-val-{srcId} {inner.Term})", srcType!);
+                        var nonNullGamma = CombineAnd(gamma, $"(not (= {inner.Term} opt-none-{srcId}))");
+                        SmtTypedTerm converted;
+                        if (TryLowerIntegralOrEnumConversion(payload, dstType!, convChecked, nonNullGamma, conv.Syntax.GetLocation(), out var convPayload))
+                        {
+                            converted = convPayload;
+                        }
+                        else if (inCoalesce && conv.IsImplicit)
+                        {
+                            converted = ConvertNullableValue(payload, dstType!);
+                        }
+                        else
+                        {
+                            converted = _translator.ConvertTo(payload, dstType!);
+                        }
+                        return new SmtTypedTerm($"(ite (= {inner.Term} opt-none-{srcId}) opt-none-{dstId} (opt-some-{dstId} {converted.Term}))", target);
+                    }
+
+                    if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                        !_types.TryGetNullableInfo(inner.Type, out _, out _, out _) &&
+                        _types.TryGetNullableInfo(target, out _, out var targetOptId, out var targetInner) &&
+                        TryLowerIntegralOrEnumConversion(inner, targetInner!, convChecked, gamma, conv.Syntax.GetLocation(), out var innerConverted))
+                    {
+                        return new SmtTypedTerm($"(opt-some-{targetOptId} {innerConverted.Term})", target);
+                    }
+
+                    if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                        !_types.TryGetNullableInfo(inner.Type, out _, out _, out _) &&
+                        !_types.TryGetNullableInfo(target, out _, out _, out _) &&
+                        TryLowerIntegralOrEnumConversion(inner, target, convChecked, gamma, conv.Syntax.GetLocation(), out var directConverted))
+                    {
+                        return directConverted;
+                    }
+
+                    if (inCoalesce && conv.IsImplicit)
+                        return ConvertNullableValue(inner, target);
+                    return _translator.ConvertTo(inner, target);
                 }
-                if (inCoalesce && conv.IsImplicit && conv.Type is not null)
-                    return ConvertNullableValue(inner, conv.Type);
-                return conv.Type is not null ? _translator.ConvertTo(inner, conv.Type) : inner;
+                return inner;
 
             case IParenthesizedOperation paren:
                 return LowerExpression(paren.Operand, gamma, env, emitObligations, inlineDepth);
@@ -1226,6 +1283,13 @@ internal sealed class CfgSsaLowerer
                     return new SmtTypedTerm($"(not {uOp.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 if (un.OperatorKind == UnaryOperatorKind.Minus)
                 {
+                    if (CalendarArithmetic.Classify(uOp.Type) == CalendarTypeKind.TimeSpan)
+                    {
+                        EmitSafetyObligation("Overflow", $"TimeSpan unary negation overflow on TimeSpan.MinValue in '{un.Syntax}'",
+                            un.Syntax.GetLocation(), gamma,
+                            $"(not (= {uOp.Term} {CalendarArithmetic.FormatLongInt(CalendarArithmetic.TimeSpanMinTicks)}))");
+                        return new SmtTypedTerm($"(- {uOp.Term})", uOp.Type);
+                    }
                     uOp = _translator.UnwrapRefinedIfApplicable(uOp);
                     var sort = _types.GetSort(uOp.Type);
                     if (_types.UseBitVec && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
@@ -1233,7 +1297,7 @@ internal sealed class CfgSsaLowerer
                         if (emitObligations)
                         {
                             var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
-                            AddObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
+                            EmitSafetyObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
                         }
                         return new SmtTypedTerm($"(bvneg {uOp.Term})", uOp.Type);
                     }
@@ -1342,8 +1406,8 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm($"(opt-some-{id} {payload.Term})", target);
         }
         if ((value.Type.SpecialType, target.SpecialType) is
-            (SpecialType.System_Int32, SpecialType.System_Int64 or SpecialType.System_Decimal) or
-            (SpecialType.System_Int64, SpecialType.System_Decimal))
+            (SpecialType.System_Int32, SpecialType.System_Int64 or SpecialType.System_Decimal or SpecialType.System_Double) or
+            (SpecialType.System_Int64, SpecialType.System_Decimal or SpecialType.System_Double))
             return _translator.ConvertTo(value, target);
         throw new ContractLoweringException($"Unsupported nullable conversion from '{value.Type}' to '{target}'.");
     }
@@ -1354,24 +1418,38 @@ internal sealed class CfgSsaLowerer
         if (bin.Type?.SpecialType != SpecialType.System_Boolean ||
             (!equality && bin.OperatorKind is not (BinaryOperatorKind.LessThan or BinaryOperatorKind.LessThanOrEqual or
                 BinaryOperatorKind.GreaterThan or BinaryOperatorKind.GreaterThanOrEqual)) ||
-            (bin.OperatorMethod is { } method && method.ContainingType.SpecialType != SpecialType.System_Decimal))
+            (bin.OperatorMethod is { } method &&
+             method.ContainingType.SpecialType != SpecialType.System_Decimal &&
+             CalendarArithmetic.Classify(method.ContainingType) == CalendarTypeKind.None))
             throw new ContractLoweringException($"Unsupported lifted operator in '{bin.Syntax}'.");
 
         var left = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
         var right = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
         if (!_types.TryGetNullableInfo(left.Type, out _, out var leftId, out var inner) ||
             !_types.TryGetNullableInfo(right.Type, out _, out var rightId, out _) || leftId != rightId ||
-            (inner!.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_Int64 or SpecialType.System_Decimal)
+            (inner!.SpecialType is not (SpecialType.System_Int32 or SpecialType.System_Int64 or SpecialType.System_Decimal or SpecialType.System_Double)
+                && CalendarArithmetic.Classify(inner) == CalendarTypeKind.None
                 && !(equality && (inner.SpecialType == SpecialType.System_Boolean || inner.TypeKind == TypeKind.Enum))))
             throw new ContractLoweringException($"Unsupported lifted operand types in '{bin.Syntax}'.");
 
-        // Datatype equality already compares the presence tag as well as the payload.
-        if (equality)
+        // Datatype equality already compares the presence tag as well as the payload
+        // (except DateTimeOffset which compares UtcTicks).
+        if (equality && CalendarArithmetic.Classify(inner) != CalendarTypeKind.DateTimeOffset)
             return LowerBinaryOperator(bin.OperatorKind, left, right, bin.Type, gamma, bin.Syntax.GetLocation(), emitObligations);
 
         var cmp = LowerBinaryOperator(bin.OperatorKind,
             new SmtTypedTerm($"(opt-val-{leftId} {left.Term})", inner),
             new SmtTypedTerm($"(opt-val-{rightId} {right.Term})", inner), bin.Type, gamma, bin.Syntax.GetLocation(), emitObligations);
+
+        if (equality)
+        {
+            var bothNull = $"(and {NullTest(left)} {NullTest(right)})";
+            var bothPresentEq = $"(and (not {NullTest(left)}) (not {NullTest(right)}) {cmp.Term})";
+            return bin.OperatorKind == BinaryOperatorKind.Equals
+                ? new SmtTypedTerm($"(or {bothNull} {bothPresentEq})", bin.Type)
+                : new SmtTypedTerm($"(not (or {bothNull} (and (not {NullTest(left)}) (not {NullTest(right)}) (not {cmp.Term}))))", bin.Type);
+        }
+
         return new SmtTypedTerm($"(and (not {NullTest(left)}) (not {NullTest(right)}) {cmp.Term})", bin.Type);
     }
 
@@ -1381,12 +1459,21 @@ internal sealed class CfgSsaLowerer
         if (!lit.ConstantValue.HasValue)
             return new SmtTypedTerm("str-null", type);
 
-        var val = lit.ConstantValue.Value;
+        return FormatConstantScalarValue(lit.ConstantValue.Value, type);
+    }
+
+    private SmtTypedTerm FormatConstantScalarValue(object? val, ITypeSymbol type)
+    {
         if (val is null)
         {
             if (_types.TryGetNullableInfo(type, out _, out var optId, out _))
                 return new SmtTypedTerm($"opt-none-{optId}", type);
             return new SmtTypedTerm("str-null", _compilation.GetSpecialType(SpecialType.System_String));
+        }
+        if (type.TypeKind == TypeKind.Enum)
+        {
+            var bi = ConvertToBigInteger(val);
+            return new SmtTypedTerm(CalendarArithmetic.FormatBigInt(bi), type);
         }
         if (val is bool b)
             return new SmtTypedTerm(b ? "true" : "false", type);
@@ -1394,17 +1481,21 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm(_translator.FormatIntLiteral(iv, 32), type);
         if (val is long lv)
             return new SmtTypedTerm(_translator.FormatLongLiteral(lv), type);
+        if (val is ulong ulv)
+            return new SmtTypedTerm(ulv.ToString(CultureInfo.InvariantCulture), type);
         if (val is decimal dv)
             return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), type);
+        if (val is double dbl)
+            return new SmtTypedTerm(ContractExpressionTranslator.FormatDoubleLiteral(dbl), type);
+        if (val is float flt)
+            return new SmtTypedTerm(ContractExpressionTranslator.FormatDoubleLiteral(flt), type);
         if (val is string sv)
             return new SmtTypedTerm($"(str-val {ContractExpressionTranslator.EscapeSmtString(sv)})", type);
-        if (type.TypeKind == TypeKind.Enum)
-        {
-            var num = Convert.ToInt64(val, CultureInfo.InvariantCulture);
-            return new SmtTypedTerm(num < 0 ? $"(- {-num})" : num.ToString(CultureInfo.InvariantCulture), type);
-        }
+        if (val is char ch)
+            return new SmtTypedTerm(((int)ch).ToString(CultureInfo.InvariantCulture), type);
 
-        return new SmtTypedTerm(Convert.ToInt64(val, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture), type);
+        var num = ConvertToBigInteger(val);
+        return new SmtTypedTerm(CalendarArithmetic.FormatBigInt(num), type);
     }
 
     private SmtTypedTerm LowerBinaryOperator(
@@ -1416,11 +1507,22 @@ internal sealed class CfgSsaLowerer
         Location loc,
         bool emitObligations = true)
     {
+        if (TryLowerCalendarBinaryOperator(kind, left, right, resultType, gamma, loc, out var calRes))
+        {
+            return calRes;
+        }
+
         if (kind == BinaryOperatorKind.Add &&
             (resultType.SpecialType == SpecialType.System_String ||
              left.Type.SpecialType == SpecialType.System_String ||
              right.Type.SpecialType == SpecialType.System_String))
         {
+            if (left.Type.SpecialType == SpecialType.System_String && right.Type.SpecialType == SpecialType.System_String)
+            {
+                var lStr = $"(ite (= {left.Term} str-null) \"\" (str-text {left.Term}))";
+                var rStr = $"(ite (= {right.Term} str-null) \"\" (str-text {right.Term}))";
+                return new SmtTypedTerm($"(str-val (str.++ {lStr} {rStr}))", _compilation.GetSpecialType(SpecialType.System_String));
+            }
             var strType = _compilation.GetSpecialType(SpecialType.System_String);
             var strSsa = BindSsaValue("strcat", new SmtTypedTerm("str-null", strType), isFreshFreeSymbol: true);
             AddAssertion($"(not (= {strSsa.Term} str-null))", "StringAxiom", "concatenation non-null", loc);
@@ -1429,6 +1531,12 @@ internal sealed class CfgSsaLowerer
 
         if (kind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals)
         {
+            if (InitializerProjection.UsesReferenceEquality(left.Type) || InitializerProjection.UsesReferenceEquality(right.Type))
+            {
+                var refName = InitializerProjection.UsesReferenceEquality(left.Type) ? left.Type.Name : right.Type.Name;
+                throw new ContractLoweringException(
+                    $"Reference equality on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
+            }
             var (lEq, rEq, _) = _translator.UnifyForComparison(left, right);
             var eq = $"(= {lEq} {rEq})";
             return new SmtTypedTerm(kind == BinaryOperatorKind.Equals ? eq : $"(not {eq})", _compilation.GetSpecialType(SpecialType.System_Boolean));
@@ -1444,13 +1552,15 @@ internal sealed class CfgSsaLowerer
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
         }
 
-        if (emitObligations && kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && !isBv && sort != "Real")
+        if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && !isBv && sort != "Real")
         {
-            AddObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
+            if (emitObligations || _inQuantifierDepth > 0)
+                EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
         }
-        else if (emitObligations && kind == BinaryOperatorKind.Divide && sort == "Real")
+        else if (kind == BinaryOperatorKind.Divide && sort == "Real")
         {
-            AddObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0.0))");
+            if (emitObligations || _inQuantifierDepth > 0)
+                EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0.0))");
         }
 
         return kind switch
@@ -1629,22 +1739,26 @@ internal sealed class CfgSsaLowerer
             if (_types.TryGetDictionaryInfo(recv.Type, out _, out var dictId, out var kType, out var vType))
             {
                 var kConv = _translator.ConvertTo(arg, kType!);
-                if (emitObligations)
+                if (emitObligations || _inQuantifierDepth > 0)
                 {
-                    AddObligation("CollectionBounds", $"Dictionary key exists for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma,
+                    EmitSafetyObligation("CollectionBounds", $"Dictionary key exists for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma,
                         $"(select (map_has_{dictId} {recv.Term}) {kConv.Term})");
                 }
                 var valTerm = new SmtTypedTerm($"(select (map_data_{dictId} {recv.Term}) {kConv.Term})", vType!);
                 EmitOnDemandElementAssumptions($"(select (map_has_{dictId} {recv.Term}) {kConv.Term})", valTerm, propRef.Syntax.GetLocation());
                 return valTerm;
             }
-            if (_types.TryGetSequenceInfo(recv.Type, out _, out var seqId, out var eType))
+            if (_types.TryGetSequenceInfo(recv.Type, out _, out var seqId, out var eType, out var isImmArr))
             {
+                if (isImmArr)
+                {
+                    EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for indexer '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma);
+                }
                 var idxTerm = _translator.IntTermForIndex(arg);
                 var boundsCond = $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recv.Term})))";
-                if (emitObligations)
+                if (emitObligations || _inQuantifierDepth > 0)
                 {
-                    AddObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma, boundsCond);
+                    EmitSafetyObligation("CollectionBounds", $"Sequence index within bounds for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma, boundsCond);
                 }
                 var elemVal = new SmtTypedTerm($"(select (seq_elems_{seqId} {recv.Term}) {idxTerm})", eType!);
                 EmitOnDemandElementAssumptions(boundsCond, elemVal, propRef.Syntax.GetLocation());
@@ -1654,10 +1768,20 @@ internal sealed class CfgSsaLowerer
 
         if (propRef.Instance is null)
         {
+            if (prop.ContainingType is not null &&
+                TryLowerCalendarStaticMember(prop.ContainingType, prop.Name, prop.Type, out var calStatic))
+            {
+                return calStatic;
+            }
             var containing = prop.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
             if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && prop.Name == "Empty")
             {
-                return new SmtTypedTerm(_types.GetDefaultTerm(prop.Type), prop.Type);
+                var empty = new SmtTypedTerm(_types.GetEmptySequenceTerm(prop.Type), prop.Type);
+                if (_types.TryGetSequenceInfo(prop.Type, out _, out _, out _, out _))
+                {
+                    _knownConcreteSequences[empty.Term] = Array.Empty<SmtTypedTerm>();
+                }
+                return empty;
             }
             if (containing == "System.String" && prop.Name == "Empty")
             {
@@ -1671,6 +1795,11 @@ internal sealed class CfgSsaLowerer
         else
         {
             var recv = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
+            if (_types.TryGetSequenceInfo(recv.Type, out _, out _, out _, out var isImmArr) &&
+                isImmArr && prop.Name is "Length" or "Count" or "IsEmpty")
+            {
+                EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
+            }
             return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth);
         }
 
@@ -1689,25 +1818,28 @@ internal sealed class CfgSsaLowerer
         var field = fieldRef.Field;
         if (fieldRef.Instance is null)
         {
+            if (field.ContainingType is not null &&
+                TryLowerCalendarStaticMember(field.ContainingType, field.Name, field.Type, out var calStatic))
+            {
+                return calStatic;
+            }
             var containing = field.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
             if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && field.Name == "Empty")
             {
-                return new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type);
+                var empty = new SmtTypedTerm(_types.GetEmptySequenceTerm(field.Type), field.Type);
+                if (_types.TryGetSequenceInfo(field.Type, out _, out _, out _, out _))
+                {
+                    _knownConcreteSequences[empty.Term] = Array.Empty<SmtTypedTerm>();
+                }
+                return empty;
             }
             if (field.ContainingType?.ToDisplayString() == "System.Guid" && field.Name == "Empty")
             {
                 return new SmtTypedTerm("0", field.Type);
             }
-            if (field.HasConstantValue && field.ConstantValue is not null)
+            if (field.HasConstantValue)
             {
-                if (field.Type.TypeKind == TypeKind.Enum)
-                {
-                    var num = Convert.ToInt64(field.ConstantValue, CultureInfo.InvariantCulture);
-                    return new SmtTypedTerm(num < 0 ? $"(- {-num})" : num.ToString(CultureInfo.InvariantCulture), field.Type);
-                }
-                if (field.ConstantValue is int iv) return new SmtTypedTerm(_translator.FormatIntLiteral(iv, 32), field.Type);
-                if (field.ConstantValue is long lv) return new SmtTypedTerm(_translator.FormatLongLiteral(lv), field.Type);
-                if (field.ConstantValue is decimal dv) return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), field.Type);
+                return FormatConstantScalarValue(field.ConstantValue, field.Type);
             }
             if (field.ContainingType?.OriginalDefinition.ToDisplayString() == "Verifiable.Contracts.Unit" && field.Name == "Value")
             {
@@ -1785,10 +1917,24 @@ internal sealed class CfgSsaLowerer
 
     private SmtTypedTerm LowerObjectCreation(IObjectCreationOperation objCreate, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
+        if (TryLowerCalendarObjectCreation(objCreate, gamma, env, emitObligations, inlineDepth, out var calObj))
+        {
+            return calObj;
+        }
+
         var targetType = objCreate.Type!;
         if (!_types.TryGetComposite(targetType, out var comp))
         {
             return new SmtTypedTerm(_types.GetDefaultTerm(targetType), targetType);
+        }
+
+        if (!InitializerProjection.IsSupportedProjection(objCreate, _types, out var projErr))
+        {
+            // Keep compatibility with existing constrained-struct/internal constructors when not a custom DTO projection
+            if (objCreate.Initializer is not null || InitializerProjection.UsesReferenceEquality(targetType))
+            {
+                throw new ContractLoweringException(projErr!);
+            }
         }
 
         var argMap = new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
@@ -1846,19 +1992,27 @@ internal sealed class CfgSsaLowerer
     private SmtTypedTerm LowerCollectionExpression(ICollectionExpressionOperation colExpr, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
         var t = colExpr.Type!;
-        if (_types.TryGetSequenceInfo(t, out var seqSort, out var seqId, out var elemType))
+        if (_types.TryGetSequenceInfo(t, out var seqSort, out var seqId, out var elemType, out var isImmArr))
         {
-            var cur = new SmtTypedTerm(_types.GetDefaultTerm(t), t);
+            var cur = new SmtTypedTerm(_types.GetEmptySequenceTerm(t), t);
+            var concrete = new List<SmtTypedTerm>(colExpr.Elements.Length);
             var i = 0;
             foreach (var elemOp in colExpr.Elements)
             {
+                if (elemOp is ISpreadOperation)
+                {
+                    throw new ContractLoweringException($"Spread element in collection expression '{colExpr.Syntax}' is not supported.");
+                }
                 var ev = _translator.ConvertTo(LowerExpression(elemOp, gamma, env, emitObligations, inlineDepth), elemType!);
+                concrete.Add(ev);
                 cur = new SmtTypedTerm(
-                    $"(mk-{seqSort} (store (seq_elems_{seqId} {cur.Term}) {i} {ev.Term}) {i + 1})",
+                    _types.BuildSequenceTerm(seqSort, $"(store (seq_elems_{seqId} {cur.Term}) {i} {ev.Term})", (i + 1).ToString(CultureInfo.InvariantCulture), isImmArr, isDefault: false),
                     t);
                 i++;
             }
-            return BindSsaValue("seq", cur);
+            var bound = BindSsaValue("seq", cur);
+            _knownConcreteSequences[bound.Term] = concrete;
+            return bound;
         }
 
         return new SmtTypedTerm(_types.GetDefaultTerm(t), t);
@@ -1896,6 +2050,58 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
+        // 0a. Regex.IsMatch (must intercept BEFORE eagerly lowering inv.Instance so [GeneratedRegex] factory isn't treated as a helper call)
+        if (TryLowerRegexIsMatch(inv, gamma, env, emitObligations, inlineDepth, out var regexResult))
+        {
+            return regexResult;
+        }
+
+        // 0b. Pure LINQ over immutable sequences (must intercept BEFORE eagerly lowering lambda arguments)
+        if (TryLowerLinqInvocation(inv, gamma, env, emitObligations, inlineDepth, out var linqResult))
+        {
+            return linqResult;
+        }
+
+        // 0c. String intrinsics (intercept before eager arg lowering so string.Join params arrays/spans are handled cleanly)
+        if (containing?.SpecialType == SpecialType.System_String)
+        {
+            var strRecv = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
+            if (TryLowerStringIntrinsic(inv, strRecv, gamma, env, emitObligations, inlineDepth, out var strResult))
+            {
+                return strResult;
+            }
+        }
+
+        // 0d. ImmutableList.Create / ImmutableArray.Create with params elements
+        if (containing?.OriginalDefinition.ToDisplayString() is
+            "System.Collections.Immutable.ImmutableList" or "System.Collections.Immutable.ImmutableArray" &&
+            method.Name == "Create" &&
+            _types.TryGetSequenceInfo(method.ReturnType, out var createSeqSort, out var createSeqId, out var createElemType, out var createIsImmArr))
+        {
+            if (inv.Arguments.Length == 0)
+            {
+                var empty = new SmtTypedTerm(_types.GetEmptySequenceTerm(method.ReturnType), method.ReturnType);
+                _knownConcreteSequences[empty.Term] = Array.Empty<SmtTypedTerm>();
+                return empty;
+            }
+            if (TryExtractImmutableCreateElements(inv, out var createOps))
+            {
+                var cur = new SmtTypedTerm(_types.GetEmptySequenceTerm(method.ReturnType), method.ReturnType);
+                var concrete = new List<SmtTypedTerm>(createOps.Count);
+                for (var i = 0; i < createOps.Count; i++)
+                {
+                    var ev = _translator.ConvertTo(LowerExpression(createOps[i], gamma, env, emitObligations, inlineDepth), createElemType!);
+                    concrete.Add(ev);
+                    cur = new SmtTypedTerm(
+                        _types.BuildSequenceTerm(createSeqSort, $"(store (seq_elems_{createSeqId} {cur.Term}) {i} {ev.Term})", (i + 1).ToString(CultureInfo.InvariantCulture), createIsImmArr, isDefault: false),
+                        method.ReturnType);
+                }
+                var bound = BindSsaValue("seqCreate", cur);
+                _knownConcreteSequences[bound.Term] = concrete;
+                return bound;
+            }
+        }
+
         var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
 
         // The CFG for `nullable ?? fallback` extracts the present payload with this call.
@@ -1905,6 +2111,7 @@ internal sealed class CfgSsaLowerer
         {
             return new SmtTypedTerm($"(ite {NullTest(recvTerm)} {_types.GetDefaultTerm(payloadType!)} (opt-val-{optId} {recvTerm.Term}))", payloadType!);
         }
+
         var evaluated = new List<(int Ordinal, SmtTypedTerm Value)>(inv.Arguments.Length);
         foreach (var arg in inv.Arguments)
         {
@@ -1981,9 +2188,9 @@ internal sealed class CfgSsaLowerer
             {
                 var k = _translator.ConvertTo(argValues[0], kType!);
                 var v = _translator.ConvertTo(argValues[1], vType!);
-                if (emitObligations)
+                if (emitObligations || _inQuantifierDepth > 0)
                 {
-                    AddObligation("CollectionBounds", "Key not already present before ImmutableDictionary.Add", loc, gamma,
+                    EmitSafetyObligation("CollectionBounds", "Key not already present before ImmutableDictionary.Add", loc, gamma,
                         $"(not (select (map_has_{dictId} {recvTerm.Term}) {k.Term}))");
                 }
                 var updated = new SmtTypedTerm(
@@ -2011,27 +2218,43 @@ internal sealed class CfgSsaLowerer
         }
 
         // 4. ImmutableList<T> / ImmutableArray<T> methods
-        if (recvTerm is not null && _types.TryGetSequenceInfo(recvTerm.Type, out var seqSort, out var seqId, out var seqElemType))
+        if (recvTerm is not null && _types.TryGetSequenceInfo(recvTerm.Type, out var seqSort, out var seqId, out var seqElemType, out var seqIsImmArr))
         {
             if (method.Name == "Add" && argValues.Count == 1)
             {
+                if (seqIsImmArr)
+                {
+                    EmitImmutableArrayNonDefaultObligation(recvTerm, $"ImmutableArray must not be default before Add in '{inv.Syntax}'", loc, gamma);
+                }
                 var v = _translator.ConvertTo(argValues[0], seqElemType!);
                 var updated = new SmtTypedTerm(
-                    $"(mk-{seqSort} (store (seq_elems_{seqId} {recvTerm.Term}) (seq_count_{seqId} {recvTerm.Term}) {v.Term}) (+ (seq_count_{seqId} {recvTerm.Term}) 1))",
+                    _types.BuildSequenceTerm(seqSort, $"(store (seq_elems_{seqId} {recvTerm.Term}) (seq_count_{seqId} {recvTerm.Term}) {v.Term})", $"(+ (seq_count_{seqId} {recvTerm.Term}) 1)", seqIsImmArr, isDefault: false),
                     recvTerm.Type);
-                return BindSsaValue("seqAdd", updated);
+                var bound = BindSsaValue("seqAdd", updated);
+                if (_knownConcreteSequences.TryGetValue(recvTerm.Term, out var prevElems))
+                {
+                    var nextElems = new List<SmtTypedTerm>(prevElems.Count + 1);
+                    nextElems.AddRange(prevElems);
+                    nextElems.Add(v);
+                    _knownConcreteSequences[bound.Term] = nextElems;
+                }
+                return bound;
             }
             if (method.Name == "SetItem" && argValues.Count == 2)
             {
+                if (seqIsImmArr)
+                {
+                    EmitImmutableArrayNonDefaultObligation(recvTerm, $"ImmutableArray must not be default before SetItem in '{inv.Syntax}'", loc, gamma);
+                }
                 var idxTerm = _translator.IntTermForIndex(argValues[0]);
                 var v = _translator.ConvertTo(argValues[1], seqElemType!);
-                if (emitObligations)
+                if (emitObligations || _inQuantifierDepth > 0)
                 {
-                    AddObligation("CollectionBounds", "Sequence index within bounds for SetItem", loc, gamma,
+                    EmitSafetyObligation("CollectionBounds", "Sequence index within bounds for SetItem", loc, gamma,
                         $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recvTerm.Term})))");
                 }
                 var updated = new SmtTypedTerm(
-                    $"(mk-{seqSort} (store (seq_elems_{seqId} {recvTerm.Term}) {idxTerm} {v.Term}) (seq_count_{seqId} {recvTerm.Term}))",
+                    _types.BuildSequenceTerm(seqSort, $"(store (seq_elems_{seqId} {recvTerm.Term}) {idxTerm} {v.Term})", $"(seq_count_{seqId} {recvTerm.Term})", seqIsImmArr, isDefault: false),
                     recvTerm.Type);
                 return BindSsaValue("seqSet", updated);
             }
@@ -2065,8 +2288,6 @@ internal sealed class CfgSsaLowerer
 
         // 6. Immutable collection static Create()
         if (containing?.OriginalDefinition.ToDisplayString() is
-            "System.Collections.Immutable.ImmutableList" or
-            "System.Collections.Immutable.ImmutableArray" or
             "System.Collections.Immutable.ImmutableDictionary" or
             "System.Collections.Immutable.ImmutableHashSet" &&
             method.Name == "Create" && argValues.Count == 0)
@@ -2074,7 +2295,18 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm(_types.GetDefaultTerm(method.ReturnType), method.ReturnType);
         }
 
-        // 7. Math / decimal / string helpers
+        // 7. Decimal rounding & Calendar arithmetic
+        if (TryLowerDecimalRounding(inv, argValues, loc, out var roundResult))
+        {
+            return roundResult;
+        }
+
+        if (TryLowerCalendarInvocation(inv, recvTerm, argValues, gamma, env, emitObligations, inlineDepth, out var calResult))
+        {
+            return calResult;
+        }
+
+        // 8. Math / decimal helpers
         if (containing?.SpecialType is SpecialType.System_Decimal || containing?.ToDisplayString() == "System.Math")
         {
             if (method.Name == "Abs" && argValues.Count == 1)
@@ -2100,17 +2332,15 @@ internal sealed class CfgSsaLowerer
             }
         }
 
-        if (containing?.SpecialType == SpecialType.System_String && method.Name == "IsNullOrEmpty" && argValues.Count == 1)
-        {
-            var s = _translator.UnwrapRefinedIfApplicable(argValues[0]);
-            return new SmtTypedTerm(
-                $"(or (= {s.Term} str-null) (= (str.len (str-text {s.Term})) 0))",
-                _compilation.GetSpecialType(SpecialType.System_Boolean));
-        }
-
         if (method.Name == "Equals" && recvTerm is not null && argValues.Count == 1 &&
             (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
+            if (InitializerProjection.UsesReferenceEquality(recvTerm.Type) || InitializerProjection.UsesReferenceEquality(argValues[0].Type))
+            {
+                var refName = InitializerProjection.UsesReferenceEquality(recvTerm.Type) ? recvTerm.Type.Name : argValues[0].Type.Name;
+                throw new ContractLoweringException(
+                    $"Reference equality via Equals on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
+            }
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
             return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
@@ -2136,7 +2366,16 @@ internal sealed class CfgSsaLowerer
         _errors.AddRange(specs.Errors);
         var calleeEnv = new BlockEnv { ThisOverride = receiver };
         for (var i = 0; i < method.Parameters.Length && i < args.Count; i++)
+        {
             calleeEnv.Vars[method.Parameters[i]] = args[i];
+            if (IsClosedEnum(method.Parameters[i].Type, out var paramEnum, out var paramEnumVals))
+            {
+                EmitSafetyObligation("Precondition",
+                    $"Closed enum argument '{method.Parameters[i].Name}' for '{method.ContainingType?.Name}.{method.Name}'",
+                    loc, gamma, BuildClosedEnumFormula(args[i].Term, paramEnumVals),
+                    $"Argument passed to closed enum parameter '{paramEnum!.Name}' must be a declared member.");
+            }
+        }
 
         CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
@@ -2146,7 +2385,7 @@ internal sealed class CfgSsaLowerer
         if ((!implementationCall || definitional) && !method.ReturnsVoid &&
             !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.PureAxiomAttr) &&
             HasCheckedArithmetic(method) == _types.UseBitVec &&
-            !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
+            !method.IsGenericMethod && method.ContainingType is { IsGenericType: false } &&
             (!method.IsVirtual && !method.IsOverride || method.IsSealed || method.ContainingType.IsSealed) &&
             !method.ReturnsByRef && !method.ReturnsByRefReadonly && method.Parameters.All(p => p.RefKind == RefKind.None) &&
             inlineDepth < 8 && SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var body, allowLeadingContracts: true) &&
@@ -2210,30 +2449,42 @@ internal sealed class CfgSsaLowerer
     }
 
     private bool CanUseHelperBody(IOperation body) =>
-        !body.DescendantsAndSelf().Any(op => op is IAssignmentOperation or IIncrementOrDecrementOperation
-            or ILocalReferenceOperation or IAnonymousFunctionOperation ||
+        !body.DescendantsAndSelf().Any(op =>
+            (op is IAssignmentOperation assign && !IsObjectOrWithInitializerAssignment(assign)) ||
+            op is IIncrementOrDecrementOperation ||
+            op is ILocalReferenceOperation ||
+            (op is IAnonymousFunctionOperation anon && !IsLinqCallbackAnonymousFunction(anon)) ||
             op is IConversionOperation { OperatorMethod: not null } ||
             op is IBinaryOperation { OperatorMethod: { } binary } && !IsBuiltInValueOperator(binary) ||
             op is IUnaryOperation { OperatorMethod: { } unary } && !IsBuiltInValueOperator(unary) ||
-            op is IObjectCreationOperation obj && !IsPositionalProjection(obj));
+            op is IObjectCreationOperation obj &&
+                CalendarArithmetic.Classify(obj.Type) == CalendarTypeKind.None &&
+                !InitializerProjection.IsSupportedProjection(obj, _types, out _));
+
+    private static bool IsObjectOrWithInitializerAssignment(IAssignmentOperation assign) =>
+        assign is ISimpleAssignmentOperation && assign.Parent is IObjectOrCollectionInitializerOperation;
+
+    private static bool IsLinqCallbackAnonymousFunction(IAnonymousFunctionOperation anon)
+    {
+        for (var cur = anon.Parent; cur is not null; cur = cur.Parent)
+        {
+            if (cur is IArgumentOperation arg && arg.Parent is IInvocationOperation inv)
+            {
+                var orig = inv.TargetMethod.ContainingType?.OriginalDefinition.ToDisplayString();
+                return orig is "System.Linq.Enumerable" or "System.Linq.ImmutableArrayExtensions";
+            }
+            if (cur is not (IDelegateCreationOperation or IConversionOperation))
+            {
+                return false;
+            }
+        }
+        return false;
+    }
 
     private static bool IsBuiltInValueOperator(IMethodSymbol method) =>
         method.ContainingType.SpecialType is SpecialType.System_Decimal or SpecialType.System_String ||
+        CalendarArithmetic.Classify(method.ContainingType) != CalendarTypeKind.None ||
         method.IsImplicitlyDeclared && method.ContainingType.IsRecord;
-
-    private bool IsPositionalProjection(IObjectCreationOperation obj)
-    {
-        // LowerObjectCreation maps arguments to stored fields by name. A user
-        // constructor or a redeclared positional property can transform the value.
-        if (obj.Initializer is not null || obj.Constructor is not { } ctor ||
-            ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not RecordDeclarationSyntax ||
-            ctor.ContainingType.BaseType?.IsRecord == true ||
-            !_types.TryGetComposite(ctor.ContainingType, out var composite))
-            return false;
-        return composite!.Fields.Count == ctor.Parameters.Length && ctor.Parameters.All(p =>
-            ctor.ContainingType.GetMembers(p.Name).OfType<IPropertySymbol>().Any(prop =>
-                prop.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ParameterSyntax));
-    }
 
     private void CheckMethodRequires(
         IMethodSymbol callee,
@@ -2274,15 +2525,51 @@ internal sealed class CfgSsaLowerer
 
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (value.Type.TypeKind == TypeKind.Enum &&
+            TryGetIntegralBounds(value.Type, out var eMin, out var eMax, out _, out _))
+        {
+            AddAssertion(
+                $"(and (>= {value.Term} {CalendarArithmetic.FormatBigInt(eMin)}) (<= {value.Term} {CalendarArithmetic.FormatBigInt(eMax)}))",
+                "EnumRange", $"{value.Type.Name} underlying range", loc);
+
+            if (IsClosedEnum(value.Type, out _, out var closedVals))
+            {
+                AddAssertion(BuildClosedEnumFormula(value.Term, closedVals),
+                    "ClosedEnum", $"{value.Type.Name} declared members", loc);
+            }
+            return;
+        }
+
+        var calKind = CalendarArithmetic.Classify(value.Type);
+        if (calKind != CalendarTypeKind.None)
+        {
+            EmitCalendarAssumptions(value.Term, calKind, guardCond: null, loc);
+            return;
+        }
+
+        if (_types.TryGetNullableInfo(value.Type, out _, out var optId, out var optInner))
+        {
+            EmitOnDemandElementAssumptions(
+                $"(not (= {value.Term} opt-none-{optId}))",
+                new SmtTypedTerm($"(opt-val-{optId} {value.Term})", optInner!),
+                loc);
+            return;
+        }
+
         if (_types.TryGetDictionaryInfo(value.Type, out _, out var dictId, out var kType, out _))
         {
             var kSort = _types.GetSort(kType!);
             AddAssertion($"(>= (map_count_{dictId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
             AddAssertion($"(= (= (map_count_{dictId} {value.Term}) 0) (= (map_has_{dictId} {value.Term}) ((as const (Array {kSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
-        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out _))
+        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out _, out var isImmArr))
         {
             AddAssertion($"(>= (seq_count_{seqId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            if (isImmArr)
+            {
+                AddAssertion($"(=> (seq_is_default_{seqId} {value.Term}) (= (seq_count_{seqId} {value.Term}) 0))",
+                    "CollectionAxiom", $"{value.Type.Name} default array has zero length", loc);
+            }
         }
         else if (_types.TryGetSetInfo(value.Type, out _, out var setId, out var setElem))
         {
@@ -2354,10 +2641,67 @@ internal sealed class CfgSsaLowerer
         }
     }
 
+    private void EmitCalendarAssumptions(string term, CalendarTypeKind kind, string? guardCond, Location loc)
+    {
+        void Emit(string formula, string label)
+        {
+            var f = guardCond is null ? formula : $"(=> {guardCond} {formula})";
+            AddAssertion(f, "CalendarAxiom", label, loc);
+        }
+
+        switch (kind)
+        {
+            case CalendarTypeKind.DateOnly:
+                Emit($"(and (>= {term} {CalendarArithmetic.DateOnlyMinDayNumber}) (<= {term} {CalendarArithmetic.DateOnlyMaxDayNumber}))",
+                    "DateOnly valid range");
+                break;
+            case CalendarTypeKind.DateTime:
+                Emit($"(and (>= {term} {CalendarArithmetic.DateTimeMinTicks}) (<= {term} {CalendarArithmetic.DateTimeMaxTicks}))",
+                    "DateTime valid tick range");
+                break;
+            case CalendarTypeKind.TimeSpan:
+                Emit($"(and (>= {term} {CalendarArithmetic.FormatLongInt(CalendarArithmetic.TimeSpanMinTicks)}) (<= {term} {CalendarArithmetic.FormatLongInt(CalendarArithmetic.TimeSpanMaxTicks)}))",
+                    "TimeSpan valid tick range");
+                break;
+            case CalendarTypeKind.DateTimeOffset:
+                var utc = $"(dto_utc_ticks {term})";
+                var off = $"(dto_offset_ticks {term})";
+                Emit($"(and (>= {utc} {CalendarArithmetic.DateTimeMinTicks}) (<= {utc} {CalendarArithmetic.DateTimeMaxTicks}))",
+                    "DateTimeOffset UTC tick range");
+                Emit($"(and (>= {off} {CalendarArithmetic.FormatLongInt(-CalendarArithmetic.MaxOffsetTicks)}) (<= {off} {CalendarArithmetic.FormatLongInt(CalendarArithmetic.MaxOffsetTicks)}) (= (mod {off} {CalendarArithmetic.TicksPerMinute}) 0))",
+                    "DateTimeOffset offset bounds");
+                Emit($"(and (>= (+ {utc} {off}) {CalendarArithmetic.DateTimeMinTicks}) (<= (+ {utc} {off}) {CalendarArithmetic.DateTimeMaxTicks}))",
+                    "DateTimeOffset local tick range");
+                break;
+        }
+    }
+
     private void EmitOnDemandElementAssumptions(string guardCond, SmtTypedTerm element, Location loc)
     {
         var key = guardCond + "|" + element.Term;
         if (!_emittedOnDemandKeys.Add(key)) return;
+
+        if (element.Type.TypeKind == TypeKind.Enum &&
+            TryGetIntegralBounds(element.Type, out var eMin, out var eMax, out _, out _))
+        {
+            AddAssertion(
+                $"(=> {guardCond} (and (>= {element.Term} {CalendarArithmetic.FormatBigInt(eMin)}) (<= {element.Term} {CalendarArithmetic.FormatBigInt(eMax)})))",
+                "EnumRange", $"{element.Type.Name} underlying range", loc);
+
+            if (IsClosedEnum(element.Type, out _, out var closedVals))
+            {
+                AddAssertion($"(=> {guardCond} {BuildClosedEnumFormula(element.Term, closedVals)})",
+                    "ClosedEnum", $"{element.Type.Name} declared members", loc);
+            }
+            return;
+        }
+
+        var calKind = CalendarArithmetic.Classify(element.Type);
+        if (calKind != CalendarTypeKind.None)
+        {
+            EmitCalendarAssumptions(element.Term, calKind, guardCond, loc);
+            return;
+        }
 
         if (SmtTypeSystem.TryGetIsValidMethod(element.Type, out var isValidMethod) &&
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
@@ -2567,6 +2911,15 @@ internal sealed class CfgSsaLowerer
 
     private SmtTypedTerm BindSsaValue(string prefix, SmtTypedTerm value, bool isFreshFreeSymbol = false)
     {
+        if (_inQuantifierDepth > 0)
+        {
+            if (isFreshFreeSymbol)
+            {
+                throw new ContractLoweringException($"Unsupported non-pure expression '{prefix}' inside a quantified LINQ predicate.");
+            }
+            return value;
+        }
+
         var sort = _types.GetSort(value.Type);
         var name = $"ssa_{++_ssaCounter}_{prefix}";
         _decls.Add($"(declare-const {name} {sort})");
@@ -2575,6 +2928,359 @@ internal sealed class CfgSsaLowerer
             AddAssertion($"(= {name} {value.Term})", "SsaBinding", name, Location.None);
         }
         return new SmtTypedTerm(name, value.Type);
+    }
+
+    private void EmitSafetyObligation(string kind, string description, Location location, string gamma, string goalTerm, string? reason = null)
+    {
+        if (_inQuantifierDepth > 0 && _quantifierObligations is not null)
+        {
+            _quantifierObligations.Add(gamma == "true" ? goalTerm : $"(=> {gamma} {goalTerm})");
+            return;
+        }
+
+        AddObligation(kind, description, location, gamma, goalTerm, reason);
+    }
+
+    internal static bool IsConversionChecked(IConversionOperation conv, Compilation compilation)
+    {
+        if (conv.IsChecked) return true;
+        for (var node = conv.Syntax; node is not null; node = node.Parent)
+        {
+            if (node is CheckedExpressionSyntax ce)
+            {
+                return ce.IsKind(SyntaxKind.CheckedExpression);
+            }
+            if (node is CheckedStatementSyntax cs)
+            {
+                return cs.IsKind(SyntaxKind.CheckedStatement);
+            }
+            if (node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax or BaseMethodDeclarationSyntax)
+            {
+                break;
+            }
+        }
+        return compilation.Options.CheckOverflow;
+    }
+
+    private bool TryLowerIntegralOrEnumConversion(
+        SmtTypedTerm inner,
+        ITypeSymbol target,
+        bool isChecked,
+        string gamma,
+        Location loc,
+        out SmtTypedTerm converted)
+    {
+        converted = default!;
+        // Never treat Real (decimal/double/float) as an integral-width destination (preserves enum-to-decimal!).
+        if (!TryGetIntegralBounds(inner.Type, out var srcMin, out var srcMax, out _, out _) ||
+            !TryGetIntegralBounds(target, out var dstMin, out var dstMax, out var dstBits, out var dstSigned))
+        {
+            return false;
+        }
+
+        var involvesEnum = inner.Type.TypeKind == TypeKind.Enum || target.TypeKind == TypeKind.Enum;
+        if (!involvesEnum && !isChecked)
+        {
+            return false;
+        }
+
+        var srcInt = _translator.IntTermForIndex(inner);
+        var canOverflow = srcMin < dstMin || srcMax > dstMax;
+
+        if (isChecked && canOverflow)
+        {
+            var rangeGoal = $"(and (>= {srcInt} {CalendarArithmetic.FormatBigInt(dstMin)}) (<= {srcInt} {CalendarArithmetic.FormatBigInt(dstMax)}))";
+            EmitSafetyObligation("Overflow", $"Checked cast to '{target.Name}' must stay within target range", loc, gamma, rangeGoal);
+        }
+
+        string resultInt;
+        if (!isChecked && canOverflow)
+        {
+            // Exact two's-complement wrap modulo 2^dstBits
+            var modulus = BigInteger.One << dstBits;
+            if (!dstSigned)
+            {
+                resultInt = $"(mod {srcInt} {CalendarArithmetic.FormatBigInt(modulus)})";
+            }
+            else
+            {
+                var half = BigInteger.One << (dstBits - 1);
+                var halfStr = CalendarArithmetic.FormatBigInt(half);
+                var modStr = CalendarArithmetic.FormatBigInt(modulus);
+                resultInt = $"(- (mod (+ {srcInt} {halfStr}) {modStr}) {halfStr})";
+            }
+        }
+        else
+        {
+            resultInt = srcInt;
+        }
+
+        var dstSort = _types.GetSort(target);
+        var finalTerm = dstSort switch
+        {
+            "(_ BitVec 32)" => $"((_ int2bv 32) {resultInt})",
+            "(_ BitVec 64)" => $"((_ int2bv 64) {resultInt})",
+            _ => resultInt
+        };
+        converted = new SmtTypedTerm(finalTerm, target);
+        return true;
+    }
+
+    private bool IsClosedEnum(ITypeSymbol type, out INamedTypeSymbol? enumType, out IReadOnlyList<BigInteger> distinctValues)
+    {
+        enumType = null;
+        distinctValues = Array.Empty<BigInteger>();
+        if (type is not INamedTypeSymbol nt || nt.TypeKind != TypeKind.Enum)
+        {
+            return false;
+        }
+
+        if (nt.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "System.FlagsAttribute"))
+        {
+            return false;
+        }
+
+        if (!_closedEnums && !VerifiableSymbolHelpers.HasAttribute(nt, VerifiableSymbolHelpers.VerifiableAttr))
+        {
+            return false;
+        }
+
+        var seen = new HashSet<BigInteger>();
+        var list = new List<BigInteger>();
+        foreach (var f in nt.GetMembers().OfType<IFieldSymbol>())
+        {
+            if (f.IsConst && f.HasConstantValue && f.ConstantValue is not null)
+            {
+                var bi = ConvertToBigInteger(f.ConstantValue);
+                if (seen.Add(bi))
+                {
+                    list.Add(bi);
+                }
+            }
+        }
+
+        if (list.Count == 0)
+        {
+            return false;
+        }
+
+        enumType = nt;
+        distinctValues = list;
+        return true;
+    }
+
+    private bool HasAnyClosedEnum(ITypeSymbol type, HashSet<ITypeSymbol>? visited = null)
+    {
+        visited ??= new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        if (!visited.Add(type)) return false;
+        if (IsClosedEnum(type, out _, out _)) return true;
+        if (_types.TryGetNullableInfo(type, out _, out _, out var inner) && IsClosedEnum(inner!, out _, out _))
+            return true;
+        if (type is INamedTypeSymbol nt && !nt.IsGenericType)
+        {
+            foreach (var p in nt.GetMembers().OfType<IPropertySymbol>())
+            {
+                if (!p.IsStatic && !p.IsIndexer && p.Name != "EqualityContract" && HasAnyClosedEnum(p.Type, visited))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static string BuildClosedEnumFormula(string term, IReadOnlyList<BigInteger> values)
+    {
+        if (values.Count == 1)
+        {
+            return $"(= {term} {CalendarArithmetic.FormatBigInt(values[0])})";
+        }
+        return "(or " + string.Join(" ", values.Select(v => $"(= {term} {CalendarArithmetic.FormatBigInt(v)})")) + ")";
+    }
+
+    private static bool TryGetIntegralBounds(
+        ITypeSymbol type,
+        out BigInteger min,
+        out BigInteger max,
+        out int bitWidth,
+        out bool isSigned)
+    {
+        var effective = type is INamedTypeSymbol { TypeKind: TypeKind.Enum, EnumUnderlyingType: { } u } ? u : type;
+        switch (effective.SpecialType)
+        {
+            case SpecialType.System_SByte:
+                min = sbyte.MinValue; max = sbyte.MaxValue; bitWidth = 8; isSigned = true; return true;
+            case SpecialType.System_Byte:
+                min = byte.MinValue; max = byte.MaxValue; bitWidth = 8; isSigned = false; return true;
+            case SpecialType.System_Int16:
+                min = short.MinValue; max = short.MaxValue; bitWidth = 16; isSigned = true; return true;
+            case SpecialType.System_UInt16:
+                min = ushort.MinValue; max = ushort.MaxValue; bitWidth = 16; isSigned = false; return true;
+            case SpecialType.System_Char:
+                min = char.MinValue; max = char.MaxValue; bitWidth = 16; isSigned = false; return true;
+            case SpecialType.System_Int32:
+                min = int.MinValue; max = int.MaxValue; bitWidth = 32; isSigned = true; return true;
+            case SpecialType.System_UInt32:
+                min = uint.MinValue; max = uint.MaxValue; bitWidth = 32; isSigned = false; return true;
+            case SpecialType.System_Int64:
+                min = long.MinValue; max = long.MaxValue; bitWidth = 64; isSigned = true; return true;
+            case SpecialType.System_UInt64:
+                min = ulong.MinValue; max = ulong.MaxValue; bitWidth = 64; isSigned = false; return true;
+            default:
+                min = 0; max = 0; bitWidth = 0; isSigned = false; return false;
+        }
+    }
+
+    private static BigInteger ConvertToBigInteger(object value) => value switch
+    {
+        sbyte v => new BigInteger(v),
+        byte v => new BigInteger(v),
+        short v => new BigInteger(v),
+        ushort v => new BigInteger(v),
+        char v => new BigInteger(v),
+        int v => new BigInteger(v),
+        uint v => new BigInteger(v),
+        long v => new BigInteger(v),
+        ulong v => new BigInteger(v),
+        _ => new BigInteger(Convert.ToInt64(value, CultureInfo.InvariantCulture))
+    };
+
+    private bool TryLowerRegexIsMatch(
+        IInvocationOperation inv,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth,
+        out SmtTypedTerm result)
+    {
+        result = default!;
+        var method = inv.TargetMethod;
+        if (method.ContainingType?.OriginalDefinition.ToDisplayString() != "System.Text.RegularExpressions.Regex" ||
+            method.Name != "IsMatch")
+        {
+            return false;
+        }
+
+        var loc = inv.Syntax.GetLocation();
+        string pattern;
+        int options = RegexModel.OptNone;
+        IOperation inputOp;
+
+        if (method.IsStatic)
+        {
+            if (inv.Arguments.Length is < 2 or > 3)
+            {
+                throw new ContractLoweringException($"Unsupported Regex.IsMatch overload '{inv.Syntax}'.");
+            }
+            inputOp = GetOrderedArgOp(inv, 0);
+            var patStr = ExtractConstantStringArg(GetOrderedArgOp(inv, 1));
+            if (patStr is null)
+            {
+                throw new ContractLoweringException($"Regex.IsMatch pattern must be a compile-time constant string in '{inv.Syntax}'.");
+            }
+            pattern = patStr;
+            if (inv.Arguments.Length == 3)
+            {
+                if (!TryGetConstantInt(GetOrderedArgOp(inv, 2), out options))
+                {
+                    throw new ContractLoweringException($"Regex.IsMatch options must be a compile-time constant in '{inv.Syntax}'.");
+                }
+            }
+        }
+        else
+        {
+            if (inv.Instance is null || inv.Arguments.Length != 1)
+            {
+                throw new ContractLoweringException($"Unsupported Regex.IsMatch overload '{inv.Syntax}'.");
+            }
+            inputOp = GetOrderedArgOp(inv, 0);
+            if (!TryExtractRegexSpecFromInstance(inv.Instance, out pattern, out options, out var instErr))
+            {
+                throw new ContractLoweringException(instErr ?? $"Unsupported Regex receiver in '{inv.Syntax}'.");
+            }
+        }
+
+        if (!RegexModel.TryTranslate(pattern, options, out var smtRe, out var reErr))
+        {
+            throw new ContractLoweringException(reErr!);
+        }
+
+        var inputTerm = _translator.UnwrapRefinedIfApplicable(LowerExpression(inputOp, gamma, env, emitObligations, inlineDepth));
+        // Always emit path-guarded non-null check in all modes (implementation, spec, query, helper).
+        EmitStringNonNullObligation(inputTerm, $"Input must be non-null for Regex.IsMatch in '{inv.Syntax}'", loc, gamma);
+
+        result = new SmtTypedTerm(
+            $"(str.in_re (str-text {inputTerm.Term}) {smtRe})",
+            _compilation.GetSpecialType(SpecialType.System_Boolean));
+        return true;
+    }
+
+    private bool TryExtractRegexSpecFromInstance(IOperation instance, out string pattern, out int options, out string? error)
+    {
+        pattern = string.Empty;
+        options = RegexModel.OptNone;
+        error = null;
+
+        var cur = instance;
+        while (cur is IConversionOperation c) cur = c.Operand;
+
+        if (cur is IInvocationOperation factoryInv &&
+            VerifiableSymbolHelpers.TryGetGeneratedRegexAttribute(factoryInv.TargetMethod, out pattern, out options))
+        {
+            return true;
+        }
+
+        if (cur is IPropertyReferenceOperation propRef &&
+            VerifiableSymbolHelpers.TryGetGeneratedRegexAttribute(propRef.Property, out pattern, out options))
+        {
+            return true;
+        }
+
+        if (cur is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } field })
+        {
+            foreach (var synRef in field.DeclaringSyntaxReferences)
+            {
+                var syn = synRef.GetSyntax();
+                if (!_compilation.SyntaxTrees.Contains(syn.SyntaxTree)) continue;
+                var model = _compilation.GetSemanticModel(syn.SyntaxTree);
+                if (syn is VariableDeclaratorSyntax { Initializer.Value: { } initExpr } &&
+                    model.GetOperation(initExpr) is IObjectCreationOperation obj &&
+                    obj.Type?.OriginalDefinition.ToDisplayString() == "System.Text.RegularExpressions.Regex" &&
+                    obj.Arguments.Length is 1 or 2)
+                {
+                    var pat = ExtractConstantStringArg(obj.Arguments[0].Value);
+                    if (pat is null)
+                    {
+                        error = $"Static Regex field '{field.Name}' pattern must be a compile-time constant string.";
+                        return false;
+                    }
+                    pattern = pat;
+                    if (obj.Arguments.Length == 2 && !TryGetConstantInt(obj.Arguments[1].Value, out options))
+                    {
+                        error = $"Static Regex field '{field.Name}' options must be a compile-time constant.";
+                        return false;
+                    }
+                    return true;
+                }
+            }
+        }
+
+        error = "Instance Regex.IsMatch requires a [GeneratedRegex] method/property or a static readonly Regex field initialized with a constant pattern.";
+        return false;
+    }
+
+    private static bool TryExtractImmutableCreateElements(IInvocationOperation inv, out List<IOperation> elements)
+    {
+        elements = new List<IOperation>();
+        if (inv.Arguments.Length == 1 && inv.Arguments[0].Parameter?.IsParams == true)
+        {
+            return TryExtractBoundedJoinElements(inv.Arguments[0].Value, out elements, out _);
+        }
+
+        // Fixed-arity overloads: ImmutableArray.Create(a), Create(a, b), Create(a, b, c), Create(a, b, c, d)
+        foreach (var arg in inv.Arguments.OrderBy(a => a.Parameter?.Ordinal ?? 0))
+        {
+            elements.Add(arg.Value);
+        }
+        return true;
     }
 
     private void AddAssertion(string smtFormula, string kind, string label, Location loc, string? reason = null)
@@ -2637,7 +3343,11 @@ internal sealed class CfgSsaLowerer
                         var ch = s[i];
                         if (inStr)
                         {
-                            if (ch == '"' && s[i - 1] != '\\') inStr = false;
+                            if (ch == '"')
+                            {
+                                if (i + 1 < limit && s[i + 1] == '"') { i += 2; continue; }
+                                inStr = false;
+                            }
                         }
                         else if (ch == '"') inStr = true;
                         else if (ch == '(') depth++;

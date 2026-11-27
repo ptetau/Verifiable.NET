@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Text;
 using Microsoft.CodeAnalysis;
 
 namespace Verifiable.Analyzers.Smt;
@@ -45,9 +46,24 @@ internal sealed class ContractExpressionTranslator
             return new SmtTypedTerm($"(map_count_{dictId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
-        if (_types.TryGetSequenceInfo(receiver.Type, out _, out var seqId, out _) && memberName is "Count" or "Length")
+        if (_types.TryGetSequenceInfo(receiver.Type, out _, out var seqId, out _, out var isImmArr))
         {
-            return new SmtTypedTerm($"(seq_count_{seqId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Int32));
+            if (memberName is "Count" or "Length")
+            {
+                return new SmtTypedTerm($"(seq_count_{seqId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Int32));
+            }
+            if (isImmArr && memberName == "IsDefault")
+            {
+                return new SmtTypedTerm($"(seq_is_default_{seqId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            }
+            if (isImmArr && memberName == "IsDefaultOrEmpty")
+            {
+                return new SmtTypedTerm($"(or (seq_is_default_{seqId} {receiver.Term}) (= (seq_count_{seqId} {receiver.Term}) 0))", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            }
+            if (memberName == "IsEmpty")
+            {
+                return new SmtTypedTerm($"(= (seq_count_{seqId} {receiver.Term}) 0)", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            }
         }
 
         if (_types.TryGetSetInfo(receiver.Type, out _, out var setId, out _) && memberName == "Count")
@@ -63,6 +79,16 @@ internal sealed class ContractExpressionTranslator
                 return new SmtTypedTerm($"(opt-val-{optId} {receiver.Term})", innerType!);
         }
 
+        var calKind = CalendarArithmetic.Classify(receiver.Type);
+        if (calKind != CalendarTypeKind.None)
+        {
+            var calTerm = TryTranslateCalendarMember(receiver, calKind, memberName);
+            if (calTerm is not null)
+            {
+                return calTerm;
+            }
+        }
+
         if (_types.TryGetComposite(receiver.Type, out var comp))
         {
             var field = comp!.Fields.FirstOrDefault(f => f.Name == memberName);
@@ -74,6 +100,88 @@ internal sealed class ContractExpressionTranslator
 
         return null;
     }
+
+    private SmtTypedTerm? TryTranslateCalendarMember(SmtTypedTerm receiver, CalendarTypeKind kind, string memberName)
+    {
+        var intType = _compilation.GetSpecialType(SpecialType.System_Int32);
+        var longType = _compilation.GetSpecialType(SpecialType.System_Int64);
+        var doubleType = _compilation.GetSpecialType(SpecialType.System_Double);
+        var dayOfWeekType = _compilation.GetTypeByMetadataName("System.DayOfWeek") ?? (ITypeSymbol)intType;
+        var timeSpanType = _compilation.GetTypeByMetadataName("System.TimeSpan") ?? (ITypeSymbol)longType;
+
+        switch (kind)
+        {
+            case CalendarTypeKind.DateOnly:
+                if (memberName == "DayNumber")
+                    return new SmtTypedTerm(IntToTargetInt(receiver.Term, intType), intType);
+                if (memberName == "DayOfWeek")
+                    return new SmtTypedTerm($"(mod (+ {receiver.Term} 1) 7)", dayOfWeekType);
+                break;
+
+            case CalendarTypeKind.DateTime:
+                if (memberName == "Ticks")
+                    return new SmtTypedTerm(IntToTargetInt(receiver.Term, longType), longType);
+                if (memberName == "Date")
+                    return new SmtTypedTerm($"(* (div {receiver.Term} {CalendarArithmetic.TicksPerDay}) {CalendarArithmetic.TicksPerDay})", receiver.Type);
+                if (memberName == "TimeOfDay")
+                    return new SmtTypedTerm($"(mod {receiver.Term} {CalendarArithmetic.TicksPerDay})", timeSpanType);
+                if (memberName == "DayOfWeek")
+                    return new SmtTypedTerm($"(mod (+ (div {receiver.Term} {CalendarArithmetic.TicksPerDay}) 1) 7)", dayOfWeekType);
+                break;
+
+            case CalendarTypeKind.DateTimeOffset:
+                if (memberName == "UtcTicks")
+                    return new SmtTypedTerm(IntToTargetInt($"(dto_utc_ticks {receiver.Term})", longType), longType);
+                if (memberName == "Offset")
+                    return new SmtTypedTerm($"(dto_offset_ticks {receiver.Term})", timeSpanType);
+                if (memberName == "Ticks")
+                    return new SmtTypedTerm(IntToTargetInt($"(+ (dto_utc_ticks {receiver.Term}) (dto_offset_ticks {receiver.Term}))", longType), longType);
+                if (memberName == "DayOfWeek")
+                    return new SmtTypedTerm($"(mod (+ (div (+ (dto_utc_ticks {receiver.Term}) (dto_offset_ticks {receiver.Term})) {CalendarArithmetic.TicksPerDay}) 1) 7)", dayOfWeekType);
+                break;
+
+            case CalendarTypeKind.TimeSpan:
+                if (memberName == "Ticks")
+                    return new SmtTypedTerm(IntToTargetInt(receiver.Term, longType), longType);
+                if (memberName == "Days")
+                    return new SmtTypedTerm(IntToTargetInt(SmtTruncDiv(receiver.Term, CalendarArithmetic.TicksPerDay), intType), intType);
+                if (memberName == "Hours")
+                    return new SmtTypedTerm(IntToTargetInt(SmtTruncRem(SmtTruncDiv(receiver.Term, CalendarArithmetic.TicksPerHour), 24), intType), intType);
+                if (memberName == "Minutes")
+                    return new SmtTypedTerm(IntToTargetInt(SmtTruncRem(SmtTruncDiv(receiver.Term, CalendarArithmetic.TicksPerMinute), 60), intType), intType);
+                if (memberName == "Seconds")
+                    return new SmtTypedTerm(IntToTargetInt(SmtTruncRem(SmtTruncDiv(receiver.Term, CalendarArithmetic.TicksPerSecond), 60), intType), intType);
+                if (memberName == "Milliseconds")
+                    return new SmtTypedTerm(IntToTargetInt(SmtTruncRem(SmtTruncDiv(receiver.Term, CalendarArithmetic.TicksPerMillisecond), 1000), intType), intType);
+                if (memberName == "TotalDays")
+                    return new SmtTypedTerm($"(/ (to_real {receiver.Term}) {CalendarArithmetic.TicksPerDay}.0)", doubleType);
+                if (memberName == "TotalHours")
+                    return new SmtTypedTerm($"(/ (to_real {receiver.Term}) {CalendarArithmetic.TicksPerHour}.0)", doubleType);
+                if (memberName == "TotalMinutes")
+                    return new SmtTypedTerm($"(/ (to_real {receiver.Term}) {CalendarArithmetic.TicksPerMinute}.0)", doubleType);
+                if (memberName == "TotalSeconds")
+                    return new SmtTypedTerm($"(/ (to_real {receiver.Term}) {CalendarArithmetic.TicksPerSecond}.0)", doubleType);
+                if (memberName == "TotalMilliseconds")
+                    return new SmtTypedTerm($"(/ (to_real {receiver.Term}) {CalendarArithmetic.TicksPerMillisecond}.0)", doubleType);
+                break;
+        }
+
+        return null;
+    }
+
+    private string IntToTargetInt(string intTerm, ITypeSymbol targetType)
+    {
+        var sort = _types.GetSort(targetType);
+        if (sort == "(_ BitVec 32)") return $"((_ int2bv 32) {intTerm})";
+        if (sort == "(_ BitVec 64)") return $"((_ int2bv 64) {intTerm})";
+        return intTerm;
+    }
+
+    private static string SmtTruncDiv(string x, long divisor) =>
+        $"(ite (< {x} 0) (- (div (- {x}) {divisor})) (div {x} {divisor}))";
+
+    private static string SmtTruncRem(string x, long divisor) =>
+        $"(- {x} (* {divisor} {SmtTruncDiv(x, divisor)}))";
 
     public SmtTypedTerm UnwrapRefinedIfApplicable(SmtTypedTerm term)
     {
@@ -141,9 +249,20 @@ internal sealed class ContractExpressionTranslator
                 return new SmtTypedTerm($"(to_int {value.Term})", targetType);
         }
 
-        if (dstSort == "(_ BitVec 64)" && srcSort == "(_ BitVec 32)")
+        if (dstSort == "(_ BitVec 32)")
         {
-            return new SmtTypedTerm($"((_ sign_extend 32) {value.Term})", targetType);
+            if (srcSort == "Int")
+                return new SmtTypedTerm($"((_ int2bv 32) {value.Term})", targetType);
+            if (srcSort == "(_ BitVec 64)")
+                return new SmtTypedTerm($"((_ extract 31 0) {value.Term})", targetType);
+        }
+
+        if (dstSort == "(_ BitVec 64)")
+        {
+            if (srcSort == "(_ BitVec 32)")
+                return new SmtTypedTerm($"((_ sign_extend 32) {value.Term})", targetType);
+            if (srcSort == "Int")
+                return new SmtTypedTerm($"((_ int2bv 64) {value.Term})", targetType);
         }
 
         return new SmtTypedTerm(value.Term, targetType);
@@ -163,7 +282,9 @@ internal sealed class ContractExpressionTranslator
 
         if (ls == "Real" || rs == "Real")
         {
-            var decType = _compilation.GetSpecialType(SpecialType.System_Decimal);
+            var decType = left.Type.SpecialType == SpecialType.System_Decimal || right.Type.SpecialType == SpecialType.System_Decimal
+                ? _compilation.GetSpecialType(SpecialType.System_Decimal)
+                : _compilation.GetSpecialType(SpecialType.System_Double);
             return (ConvertTo(left, decType).Term, ConvertTo(right, decType).Term, decType);
         }
 
@@ -279,8 +400,85 @@ internal sealed class ContractExpressionTranslator
         return isNeg ? $"(- {term})" : term;
     }
 
-    public static string EscapeSmtString(string text) =>
-        "\"" + text.Replace("\"", "\"\"") + "\"";
+    public static string FormatDoubleLiteral(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            throw new ContractLoweringException("Non-finite floating-point literals (NaN/Infinity) are not supported in SMT.");
+        }
+        if (value == 0.0) return "0.0";
+
+        // Format via exact round-trip decimal string -> exact SMT rational
+        var s = value.ToString("R", CultureInfo.InvariantCulture);
+        if (decimal.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var dec))
+        {
+            return FormatDecimalLiteral(dec);
+        }
+
+        // Fallback for very small/large doubles via binary exponent exact representation
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        var isNeg = bits < 0;
+        var expBits = (int)((bits >> 52) & 0x7FFL);
+        var fracBits = bits & 0x000FFFFFFFFFFFFFL;
+        BigInteger mantissa;
+        int exp;
+        if (expBits == 0)
+        {
+            mantissa = fracBits;
+            exp = -1074;
+        }
+        else
+        {
+            mantissa = (1L << 52) | fracBits;
+            exp = expBits - 1075;
+        }
+
+        string term;
+        if (exp >= 0)
+        {
+            var num = mantissa << exp;
+            term = num.ToString(CultureInfo.InvariantCulture) + ".0";
+        }
+        else
+        {
+            var denom = BigInteger.One << (-exp);
+            term = $"(/ {mantissa.ToString(CultureInfo.InvariantCulture)} {denom.ToString(CultureInfo.InvariantCulture)})";
+        }
+        return isNeg ? $"(- {term})" : term;
+    }
+
+    /// <summary>
+    /// Encodes a C# UTF-16 string as an SMT-LIB 2.6 string literal.
+    /// Printable ASCII characters (except '"' and '\') are written directly;
+    /// '"' is doubled as '""'; '\' and all non-printable or non-ASCII code units
+    /// are encoded using SMT-LIB 2.6 \u{hex} escapes.
+    /// </summary>
+    public static string EscapeSmtString(string text)
+    {
+        var sb = new StringBuilder(text.Length + 2);
+        sb.Append('"');
+        foreach (var ch in text)
+        {
+            if (ch == '"')
+            {
+                sb.Append("\"\"");
+            }
+            else if (ch == '\\')
+            {
+                sb.Append("\\u{5c}");
+            }
+            else if (ch >= 0x20 && ch <= 0x7E)
+            {
+                sb.Append(ch);
+            }
+            else
+            {
+                sb.Append("\\u{").Append(((int)ch).ToString("x", CultureInfo.InvariantCulture)).Append('}');
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
 
     public static bool IsBitVecSort(string sort) =>
         sort is "(_ BitVec 32)" or "(_ BitVec 64)";

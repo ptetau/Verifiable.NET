@@ -2,5 +2,6 @@
   <ItemGroup>
     <CompilerVisibleProperty Include="VerifiableZ3Path" />
     <CompilerVisibleProperty Include="VerifiableAgent" />
+    <CompilerVisibleProperty Include="VerifiableClosedEnums" />
   </ItemGroup>
 </Project>

@@ -24,4 +24,11 @@
     <ProjectReference Include="..\..\src\Verifiable.Analyzers\Verifiable.Analyzers.csproj" />
   </ItemGroup>
 
+  <Target Name="CopyRegexGenerator" AfterTargets="Build">
+    <ItemGroup>
+      <_SdkRegexGenerator Include="@(Analyzer)" Condition="'%(Analyzer.Filename)' == 'System.Text.RegularExpressions.Generator'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_SdkRegexGenerator)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="'@(_SdkRegexGenerator)' != ''" />
+  </Target>
+
 </Project>

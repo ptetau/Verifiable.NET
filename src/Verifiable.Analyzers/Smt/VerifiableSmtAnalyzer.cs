@@ -40,11 +40,15 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             var globalOptions = compilationCtx.Options.AnalyzerConfigOptionsProvider.GlobalOptions;
             globalOptions.TryGetValue("build_property.VerifiableZ3Path", out var msbuildZ3Path);
             globalOptions.TryGetValue("build_property.VerifiableAgent", out var msbuildAgent);
+            globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var msbuildClosedEnums);
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
                 envAgent == "1" || string.Equals(envAgent, "true", StringComparison.OrdinalIgnoreCase) ||
                 msbuildAgent == "1" || string.Equals(msbuildAgent, "true", StringComparison.OrdinalIgnoreCase);
+
+            var closedEnums =
+                msbuildClosedEnums == "1" || string.Equals(msbuildClosedEnums, "true", StringComparison.OrdinalIgnoreCase);
 
             var reportedUnavailable = 0;
 
@@ -53,7 +57,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 if (opCtx.OwningSymbol is not IMethodSymbol method) return;
                 if (VerifiableSymbolHelpers.IsSynthesizedRecordMember(method) ||
                     VerifiableSymbolHelpers.IsGeneratedByVerifiableGenerators(method) ||
-                    VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.PureAxiomAttr))
+                    VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.PureAxiomAttr) ||
+                    VerifiableSymbolHelpers.TryGetGeneratedRegexAttribute(method, out _, out _))
                 {
                     return;
                 }
@@ -63,13 +68,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
-                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks))
+                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums))
                 {
                     return;
                 }
 
                 var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
-                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method);
+                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method, closedEnums: closedEnums);
 
                 var allObligations = new List<ProofObligation>();
                 var allErrors = new List<(string Contract, Location Location, string Error)>();
@@ -178,13 +183,14 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return sb.ToString();
     }
 
-    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks)
+    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks, bool closedEnums)
     {
         if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             (method.ContainingAssembly is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             SmtTypeSystem.HasAnyInvariants(method.ReturnType) ||
-            IsResultWithInvariantPayload(method.ReturnType))
+            IsResultWithInvariantPayload(method.ReturnType) ||
+            IsClosedEnumType(method.ReturnType, closedEnums))
         {
             return true;
         }
@@ -193,15 +199,22 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         {
             foreach (var op in b.DescendantsAndSelf())
             {
+                if (op is IConversionOperation convOp && CfgSsaLowerer.IsConversionChecked(convOp, compilation))
+                {
+                    return true;
+                }
+
                 if (op is IInvocationOperation inv)
                 {
-                    if (inv.TargetMethod.ContainingType?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+                    var ct = inv.TargetMethod.ContainingType;
+                    var ctOrig = ct?.OriginalDefinition.ToDisplayString();
+
+                    if (ct?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
                     {
                         return true;
                     }
 
-                    if (inv.TargetMethod.Name == "From" &&
-                        inv.TargetMethod.ContainingType is { } ct &&
+                    if (inv.TargetMethod.Name == "From" && ct is not null &&
                         SmtTypeSystem.TryGetConstrainedUnderlying(ct, out _))
                     {
                         return true;
@@ -212,21 +225,98 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         return true;
                     }
 
+                    if (inv.TargetMethod.Parameters.Any(p => IsClosedEnumType(p.Type, closedEnums)))
+                    {
+                        return true;
+                    }
+
                     if (inv.TargetMethod.Name == "Add" &&
-                        inv.TargetMethod.ContainingType?.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>")
+                        ctOrig == "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>")
+                    {
+                        return true;
+                    }
+
+                    if (ctOrig == "System.Collections.Immutable.ImmutableArray<T>" &&
+                        inv.TargetMethod.Name is "Add" or "SetItem")
+                    {
+                        return true;
+                    }
+
+                    if (ctOrig is "System.Linq.Enumerable" or "System.Linq.ImmutableArrayExtensions")
+                    {
+                        return true;
+                    }
+
+                    if (ctOrig == "System.Text.RegularExpressions.Regex" && inv.TargetMethod.Name == "IsMatch")
+                    {
+                        return true;
+                    }
+
+                    if (ct?.SpecialType == SpecialType.System_String &&
+                        !inv.TargetMethod.IsStatic &&
+                        inv.TargetMethod.Name is "Trim" or "Contains" or "StartsWith" or "EndsWith")
+                    {
+                        return true;
+                    }
+
+                    if (CalendarArithmetic.IsTrustedCalendarMethod(inv.TargetMethod))
                     {
                         return true;
                     }
                 }
 
-                if (op is IPropertyReferenceOperation pr && pr.Property.IsIndexer)
+                if (op is IBinaryOperation bin &&
+                    (CalendarArithmetic.Classify(bin.LeftOperand.Type) != CalendarTypeKind.None ||
+                     CalendarArithmetic.Classify(bin.RightOperand.Type) != CalendarTypeKind.None) &&
+                    bin.OperatorKind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract)
                 {
                     return true;
+                }
+
+                if (op is IUnaryOperation { OperatorKind: UnaryOperatorKind.Minus } un &&
+                    CalendarArithmetic.Classify(un.Operand.Type) == CalendarTypeKind.TimeSpan)
+                {
+                    return true;
+                }
+
+                if (op is IPropertyReferenceOperation pr)
+                {
+                    if (pr.Property.IsIndexer)
+                    {
+                        return true;
+                    }
+                    if (pr.Instance?.Type?.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableArray<T>" &&
+                        pr.Property.Name is "Length" or "Count" or "IsEmpty")
+                    {
+                        return true;
+                    }
                 }
             }
         }
 
         return false;
+    }
+
+    private static bool IsClosedEnumType(ITypeSymbol type, bool closedEnums)
+    {
+        if (type is INamedTypeSymbol nullable &&
+            nullable.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
+            nullable.TypeArguments.Length == 1)
+        {
+            type = nullable.TypeArguments[0];
+        }
+
+        if (type is not INamedTypeSymbol nt || nt.TypeKind != TypeKind.Enum)
+        {
+            return false;
+        }
+
+        if (nt.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "System.FlagsAttribute"))
+        {
+            return false;
+        }
+
+        return closedEnums || VerifiableSymbolHelpers.HasAttribute(nt, VerifiableSymbolHelpers.VerifiableAttr);
     }
 
     private static bool IsResultWithInvariantPayload(ITypeSymbol type)

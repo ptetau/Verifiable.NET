@@ -19,21 +19,42 @@ internal static class AnalyzerTestHarness
         params DiagnosticAnalyzer[] analyzers) =>
         AnalyzeWithOptionsAsync(source, null, analyzers);
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAsync(
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAsync(
         string source,
         IReadOnlyDictionary<string, string>? buildProperties,
+        params DiagnosticAnalyzer[] analyzers) =>
+        AnalyzeWithOptionsAndGeneratorsAsync(source, buildProperties, null, analyzers);
+
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAndGeneratorsAsync(
+        string source,
+        IReadOnlyDictionary<string, string>? buildProperties,
+        IEnumerable<ISourceGenerator>? extraGenerators,
         params DiagnosticAnalyzer[] analyzers)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
 
-        var refs = AppDomain.CurrentDomain.GetAssemblies()
-            .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
-            .Select(a => MetadataReference.CreateFromFile(a.Location))
-            .ToList<MetadataReference>();
+        var refLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var refs = new List<MetadataReference>();
+        void AddRef(string loc)
+        {
+            if (!string.IsNullOrEmpty(loc) && refLocations.Add(loc))
+            {
+                refs.Add(MetadataReference.CreateFromFile(loc));
+            }
+        }
 
-        refs.Add(MetadataReference.CreateFromFile(typeof(VerifiableAttribute).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(ImmutableDictionary).Assembly.Location));
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (!asm.IsDynamic && !string.IsNullOrEmpty(asm.Location))
+            {
+                AddRef(asm.Location);
+            }
+        }
+
+        AddRef(typeof(VerifiableAttribute).Assembly.Location);
+        AddRef(typeof(ImmutableDictionary).Assembly.Location);
+        AddRef(typeof(System.Text.RegularExpressions.Regex).Assembly.Location);
 
         var compilation = CSharpCompilation.Create(
             "AnalyzerTestAssembly",
@@ -41,8 +62,18 @@ internal static class AnalyzerTestHarness
             refs,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
+        var generators = new List<ISourceGenerator>
+        {
+            new TypeAliasGenerator().AsSourceGenerator(),
+            new InboundPortGenerator().AsSourceGenerator()
+        };
+        if (extraGenerators is not null)
+        {
+            generators.AddRange(extraGenerators);
+        }
+
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
+            generators: generators,
             parseOptions: parseOptions);
         driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
 
