@@ -199,8 +199,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 if (CalendarArithmetic.NeedsCheck(op))
                     return true;
 
-                if (op is IConversionOperation { IsChecked: true } cast &&
-                    (cast.Type?.TypeKind == TypeKind.Enum || cast.Operand.Type?.TypeKind == TypeKind.Enum))
+                if (op is IConversionOperation cast && CfgSsaLowerer.IsCheckedEnumCast(cast, compilation))
                     return true;
 
                 var callee = op switch

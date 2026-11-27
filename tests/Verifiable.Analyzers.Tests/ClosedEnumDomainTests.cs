@@ -197,7 +197,8 @@ public class ClosedEnumDomainTests
         Assert.DoesNotContain(diagnostics, d => d.Id == "AD0001" ||
             d.Severity == DiagnosticSeverity.Error && d.Id != "VER102" ||
             d.Id.StartsWith("VER") && d.Id != "VER102");
-        Assert.Equal(failures, diagnostics.Count(d => d.Id == "VER102"));
+        Assert.True(failures == diagnostics.Count(d => d.Id == "VER102"),
+            $"Expected {failures} counterexamples. Diagnostics: {string.Join("\n", diagnostics)}");
         if (failureText is not null)
             Assert.All(diagnostics.Where(d => d.Id == "VER102"), d => Assert.Contains(failureText, d.GetMessage()));
     }

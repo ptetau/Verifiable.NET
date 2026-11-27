@@ -1155,8 +1155,7 @@ internal sealed partial class CfgSsaLowerer
                     }
                 }
                 var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
-                if (conv.IsChecked && conv.Type is { } checkedTarget &&
-                    (checkedTarget.TypeKind == TypeKind.Enum || inner.Type.TypeKind == TypeKind.Enum) &&
+                if (IsCheckedEnumCast(conv, _compilation) && conv.Type is { } checkedTarget &&
                     !_types.TryGetNullableInfo(checkedTarget, out _, out _, out _))
                 {
                     var cast = _translator.ConvertTo(inner, checkedTarget);
@@ -2242,6 +2241,16 @@ internal sealed partial class CfgSsaLowerer
 
         CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
+        // Neither a callee summary nor nested safety checks in its definition
+        // apply when the caller has already violated its entry assumptions.
+        var summaryGuard = gamma;
+        if (_closedEnums && VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable)
+        {
+            foreach (var input in receiver is null ? args : args.Concat(new[] { receiver }))
+                foreach (var domain in EntryEnumDomains(_types, input))
+                    summaryGuard = CombineAnd(summaryGuard, domain);
+        }
+
         var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
             !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.GhostAttr);
         SmtTypedTerm? definition = null;
@@ -2256,7 +2265,7 @@ internal sealed partial class CfgSsaLowerer
         {
             try
             {
-                definition = _translator.ConvertTo(LowerExpression(body!, gamma, calleeEnv, emitObligations: false, inlineDepth + 1), method.ReturnType);
+                definition = _translator.ConvertTo(LowerExpression(body!, summaryGuard, calleeEnv, emitObligations: false, inlineDepth + 1), method.ReturnType);
             }
             catch (ContractLoweringException) when (implementationCall)
             {
@@ -2282,15 +2291,6 @@ internal sealed partial class CfgSsaLowerer
 
         if (specs.Ensures.Count > 0)
         {
-            // A summary proved under entry assumptions does not describe calls
-            // with unnamed enum arguments (including those in record fields).
-            var summaryGuard = gamma;
-            if (_closedEnums && VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable)
-            {
-                foreach (var input in receiver is null ? args : args.Concat(new[] { receiver }))
-                    foreach (var domain in EntryEnumDomains(_types, input))
-                        summaryGuard = $"(and {summaryGuard} {domain})";
-            }
             calleeEnv.SpecResult = retTerm;
             foreach (var ens in specs.Ensures)
             {
@@ -2427,6 +2427,20 @@ internal sealed partial class CfgSsaLowerer
     {
         var text = Convert.ToString(constant, CultureInfo.InvariantCulture)!;
         return text.StartsWith("-", StringComparison.Ordinal) ? $"(- {text.Substring(1)})" : text;
+    }
+
+    internal static bool IsCheckedEnumCast(IConversionOperation cast, Compilation compilation)
+    {
+        if (cast.Type?.TypeKind != TypeKind.Enum && cast.Operand.Type?.TypeKind != TypeKind.Enum)
+            return false;
+        // Roslyn does not consistently set IsChecked for explicit enum casts.
+        // The innermost checked/unchecked context takes precedence over /checked.
+        foreach (var node in cast.Syntax.AncestorsAndSelf())
+        {
+            if (node is CheckedExpressionSyntax or CheckedStatementSyntax)
+                return node.IsKind(SyntaxKind.CheckedExpression) || node.IsKind(SyntaxKind.CheckedStatement);
+        }
+        return cast.IsChecked || compilation.Options.CheckOverflow;
     }
 
     private void AssumeEntryEnumDomains(SmtTypedTerm value, Location loc)
