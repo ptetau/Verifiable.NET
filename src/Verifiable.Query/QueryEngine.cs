@@ -197,14 +197,14 @@ internal static class QueryEngine
                 "Pass a boolean lambda predicate such as `s => s.TotalDebits == s.TotalCredits`.");
         }
 
-        var targetType = ResolveTypeSymbol(compilation, typeName, out var typeErr);
+        var targetType = ResolveTypeSymbol(compilation, typeName, out var typeErr, out var typeFix);
         if (targetType is null)
         {
             return ErrorReport("check-invariant", exprText, assumeText, because, typeName,
                 "TYPE NOT FOUND",
                 typeErr!,
                 Location.None,
-                "Check the type name with `verifiable-query list`.");
+                typeFix ?? "Check the type name with `verifiable-query list`.");
         }
 
         var candidates = CollectQueryableMethods(compilation);
@@ -401,7 +401,8 @@ internal static class QueryEngine
             var script = BuildNamedQueryScript(ob, allPremises);
             var sourceFile = ob.ReturnLocation.SourceTree?.FilePath ?? methodLoc.SourceTree?.FilePath;
 
-            var z3Res = Z3SolverRunner.ExecuteWithUnsatCore(script, z3Path, sourceFile, timeoutMs);
+            var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtName, ob.GoalClauses);
+            var z3Res = Z3SolverRunner.ExecuteWithUnsatCore(script, z3Path, sourceFile, timeoutMs, satEvalExprs: satEvals);
             lastHash = z3Res.QueryHash;
 
             if (z3Res.Status == SmtStatus.SolverUnavailable)
@@ -426,6 +427,7 @@ internal static class QueryEngine
 
             if (z3Res.Status == SmtStatus.Sat)
             {
+                var insight = SmtCounterexampleAnalyzer.Analyze(z3Res.Model, ob.GoalClauses);
                 var values = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var (pName, smtName) in ob.TrackedParameters)
                 {
@@ -436,14 +438,26 @@ internal static class QueryEngine
                 }
                 if (values.Count == 0)
                 {
-                    foreach (var kv in z3Res.Model.Where(k => !k.Key.StartsWith("ssa_", StringComparison.Ordinal)).Take(6))
+                    foreach (var kv in z3Res.Model.Where(k =>
+                        !k.Key.StartsWith("ssa_", StringComparison.Ordinal) &&
+                        !k.Key.StartsWith(SmtCounterexampleAnalyzer.EvalKeyPrefix, StringComparison.Ordinal)).Take(6))
                     {
                         values[kv.Key] = kv.Value;
                     }
                 }
+                if (!string.IsNullOrWhiteSpace(insight.EvaluatedResult) && !values.ContainsKey("result"))
+                {
+                    values["result"] = insight.EvaluatedResult!;
+                }
 
                 var (retFile, retLine) = GetLocationInfo(ob.ReturnLocation);
-                counterexamples.Add(new PathCounterexample(retFile, retLine, ob.ReturnLocation, values));
+                counterexamples.Add(new PathCounterexample(
+                    retFile,
+                    retLine,
+                    ob.ReturnLocation,
+                    values,
+                    insight.FailedClauseBlock,
+                    insight.BoundaryHint));
                 continue;
             }
 
@@ -493,6 +507,9 @@ internal static class QueryEngine
 
         if (counterexamples.Count > 0)
         {
+            var boundaryHint = counterexamples.Select(c => c.BoundaryHint).FirstOrDefault(h => !string.IsNullOrWhiteSpace(h));
+            var baseHint = "Strengthen `Spec.Requires(...)` / `--assume`, enforce a `[TypeAlias<T>]` / `[Invariant]`, or fix the implementation.";
+            var fullHint = boundaryHint is not null ? $"{baseHint} {boundaryHint}" : baseHint;
             return new MethodQueryResult(
                 methodDisplay,
                 returnTypeDisplay,
@@ -508,7 +525,7 @@ internal static class QueryEngine
                 coreTraceSteps,
                 counterexamples,
                 null,
-                "Strengthen `Spec.Requires(...)` / `--assume`, enforce a `[TypeAlias<T>]` / `[Invariant]`, or fix the implementation.");
+                fullHint);
         }
 
         if (anyUnknown)
@@ -693,18 +710,39 @@ internal static class QueryEngine
             return byType;
         }
 
+        var candidates = allMethods
+            .Select(m => $"{m.ContainingType?.Name}.{m.Name}")
+            .Concat(allMethods.Where(m => m.ContainingType is not null).Select(m => m.ContainingType!.Name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var suggestions = ElmSuggest.Rank(targetName, candidates, maxResults: 3);
+        var didYouMean = ElmSuggest.FormatDidYouMean(suggestions);
+
         var sampleNames = string.Join(", ", allMethods.Take(6).Select(m => $"{m.ContainingType?.Name}.{m.Name}"));
         error = $"No `[Verifiable]` method or class named `{targetName}` was found.";
-        fix = allMethods.Count > 0
-            ? $"Available methods include: {sampleNames}. Run `verifiable-query list` to see all targets."
-            : "Ensure the target class or assembly is marked `[Verifiable]`.";
+        if (didYouMean is not null)
+        {
+            fix = $"{didYouMean}\nRun `verifiable-query list` to see all verifiable targets.";
+        }
+        else
+        {
+            fix = allMethods.Count > 0
+                ? $"Available methods include: {sampleNames}. Run `verifiable-query list` to see all targets."
+                : "Ensure the target class or assembly is marked `[Verifiable]`.";
+        }
         return new List<IMethodSymbol>();
     }
 
-    private static INamedTypeSymbol? ResolveTypeSymbol(CSharpCompilation compilation, string typeName, out string? error)
+    private static INamedTypeSymbol? ResolveTypeSymbol(
+        CSharpCompilation compilation,
+        string typeName,
+        out string? error,
+        out string? fix)
     {
         error = null;
+        fix = null;
         var matches = new List<INamedTypeSymbol>();
+        var allTypeNames = new List<string>();
         foreach (var tree in compilation.SyntaxTrees)
         {
             if (IsGeneratedTree(tree.FilePath)) continue;
@@ -713,6 +751,7 @@ internal static class QueryEngine
             {
                 if (model.GetDeclaredSymbol(td) is INamedTypeSymbol ts)
                 {
+                    allTypeNames.Add(ts.Name);
                     if (ts.Name.Equals(typeName, StringComparison.OrdinalIgnoreCase) ||
                         ts.ToDisplayString().Equals(typeName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -735,7 +774,12 @@ internal static class QueryEngine
             return null;
         }
 
+        var suggestions = ElmSuggest.Rank(typeName, allTypeNames, maxResults: 3);
+        var didYouMean = ElmSuggest.FormatDidYouMean(suggestions);
         error = $"Type `{typeName}` was not found in the supplied sources.";
+        fix = didYouMean is not null
+            ? $"{didYouMean}\nRun `verifiable-query list` to inspect declared types."
+            : "Check the type name with `verifiable-query list`.";
         return null;
     }
 

@@ -24,6 +24,16 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         SinkParameter = 3
     }
 
+    private sealed record LinearDiag(
+        Location Loc,
+        Location? RelatedLoc,
+        string? RelatedHeading,
+        string Title,
+        string TokenName,
+        string TypeName,
+        string Detail,
+        string FixHint);
+
     /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
         [VerifiableDescriptors.LinearObligationViolation];
@@ -153,6 +163,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
         var inStates = new Dictionary<BasicBlock, ImmutableDictionary<ISymbol, ObligationState>>();
         var outStates = new Dictionary<BasicBlock, ImmutableDictionary<ISymbol, ObligationState>>();
+        var consumedSites = new Dictionary<ISymbol, Location>(SymbolEqualityComparer.Default);
         var entryBlock = cfg.Blocks[0];
         inStates[entryBlock] = entryState.ToImmutable();
 
@@ -171,7 +182,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             }
 
             var state = inState;
-            SimulateBlock(block, ref state, diagnostics: null);
+            SimulateBlock(block, ref state, consumedSites, diagnostics: null);
 
             if (outStates.TryGetValue(block, out var prevOut) && DictionariesEqual(prevOut, state))
             {
@@ -204,26 +215,32 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             }
 
             var state = inState;
-            var diags = new List<(Location Loc, string TokenName, string TypeName, string Detail)>();
-            SimulateBlock(block, ref state, diags);
+            var diags = new List<LinearDiag>();
+            SimulateBlock(block, ref state, consumedSites, diags);
 
             // Check normal Return / exit branch
             CheckReturnBranchLeaks(block, state, diags);
 
-            foreach (var (loc, tokenName, typeName, detail) in diags)
+            foreach (var d in diags)
             {
-                var span = loc.SourceSpan;
-                if (reported.Add((span.Start, span.Length, detail)))
+                var span = d.Loc.SourceSpan;
+                if (reported.Add((span.Start, span.Length, d.Detail)))
                 {
                     var elmMessage = ElmDiagnosticFormatter.Format(
-                        "UNCONSUMED OBLIGATION",
-                        loc,
-                        $"Linear obligation token `{tokenName}` (`{typeName}`) {detail}.",
-                        spirit: "A `[MustConsume]` token represents work that must finish along every code path (such as emitting a command or committing state).",
-                        fixHint: "Pass the `[MustConsume]` token to a `[ConsumesObligation]` method, return it to the caller, or explicitly call `Obligation.Discard(...)`.");
+                        d.Title,
+                        d.Loc,
+                        $"Linear obligation token `{d.TokenName}` (`{d.TypeName}`) {d.Detail}.",
+                        spirit: "A `[MustConsume]` token represents work that must finish exactly once along every code path (such as emitting a command or committing state).",
+                        fixHint: d.FixHint,
+                        relatedLocation: d.RelatedLoc,
+                        relatedHeading: d.RelatedHeading);
+                    var additionalLocs = d.RelatedLoc is { IsInSource: true } rel && rel != Location.None
+                        ? new[] { rel }
+                        : null;
                     context.ReportDiagnostic(Diagnostic.Create(
                         VerifiableDescriptors.LinearObligationViolation,
-                        loc,
+                        d.Loc,
+                        additionalLocations: additionalLocs,
                         elmMessage));
                 }
             }
@@ -239,7 +256,8 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void SimulateBlock(
         BasicBlock block,
         ref ImmutableDictionary<ISymbol, ObligationState> state,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        Dictionary<ISymbol, Location> consumedSites,
+        List<LinearDiag>? diagnostics)
     {
         var builder = state.ToBuilder();
         var consumedExpressions = new HashSet<IOperation>();
@@ -247,7 +265,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
         foreach (var op in block.Operations)
         {
-            ProcessTopLevelOperation(op, builder, consumedExpressions, returnOwnedExpressions, diagnostics);
+            ProcessTopLevelOperation(op, builder, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
         }
 
         if (block.BranchValue is { } branchVal)
@@ -256,9 +274,9 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 && block.ConditionalSuccessor is null;
             if (isReturnBranch)
             {
-                MarkReturnedOwnership(branchVal, builder, returnOwnedExpressions, diagnostics);
+                MarkReturnedOwnership(branchVal, builder, consumedSites, returnOwnedExpressions, diagnostics);
             }
-            WalkNonAssigningReads(branchVal, builder, consumedExpressions, returnOwnedExpressions, diagnostics);
+            WalkNonAssigningReads(branchVal, builder, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
         }
 
         state = builder.ToImmutable();
@@ -273,7 +291,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void CheckReturnBranchLeaks(
         BasicBlock block,
         ImmutableDictionary<ISymbol, ObligationState> postState,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)> diagnostics)
+        List<LinearDiag> diagnostics)
     {
         if (!IsNormalReturnOrExit(block.FallThroughSuccessor) &&
             !IsNormalReturnOrExit(block.ConditionalSuccessor))
@@ -289,11 +307,28 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         {
             if (kv.Value is ObligationState.Live or ObligationState.MaybeLive)
             {
-                var detail = kv.Value == ObligationState.Live
-                    ? "was never consumed before returning from this method"
-                    : "may not be consumed on all execution paths before returning";
-                var loc = kv.Key.Locations.FirstOrDefault() ?? returnLoc;
-                diagnostics.Add((loc, kv.Key.Name, GetTypeName(kv.Key), detail));
+                var isPartialBranch = kv.Value == ObligationState.MaybeLive;
+                var detail = isPartialBranch
+                    ? "may not be consumed on all execution paths before returning"
+                    : "was never consumed before returning from this method";
+                var fixHint = isPartialBranch
+                    ? $"Consume `{kv.Key.Name}` on every branch (pass it to a `[ConsumesObligation]` method, return it, or call `Obligation.Discard({kv.Key.Name}, \"reason\")` on the unconsumed branch)."
+                    : $"Pass `{kv.Key.Name}` to a `[ConsumesObligation]` method, return it to the caller, or explicitly call `Obligation.Discard({kv.Key.Name}, \"reason\")`.";
+                var declLoc = kv.Key.Locations.FirstOrDefault() ?? returnLoc;
+                var relatedLoc = returnLoc != Location.None && returnLoc.IsInSource ? returnLoc : null;
+                var relatedHeading = relatedLoc is not null
+                    ? "The method can exit here while the obligation is still live:"
+                    : null;
+
+                diagnostics.Add(new LinearDiag(
+                    declLoc,
+                    relatedLoc,
+                    relatedHeading,
+                    "UNCONSUMED OBLIGATION",
+                    kv.Key.Name,
+                    GetTypeName(kv.Key),
+                    detail,
+                    fixHint));
             }
         }
     }
@@ -301,15 +336,16 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void ProcessTopLevelOperation(
         IOperation op,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         // Walk children first (post-order for calls inside statements), except handle assignments/declarations directly
         switch (op)
         {
             case IExpressionStatementOperation exprStmt:
-                ProcessExpressionValue(exprStmt.Operation, isRootStatement: true, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                ProcessExpressionValue(exprStmt.Operation, isRootStatement: true, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 break;
 
             case IVariableDeclarationGroupOperation declGroup:
@@ -317,7 +353,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 {
                     foreach (var declarator in decl.Declarators)
                     {
-                        HandleVariableDeclarator(declarator, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                        HandleVariableDeclarator(declarator, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                     }
                 }
                 break;
@@ -325,32 +361,32 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             case IVariableDeclarationOperation singleDecl:
                 foreach (var declarator in singleDecl.Declarators)
                 {
-                    HandleVariableDeclarator(declarator, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                    HandleVariableDeclarator(declarator, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 }
                 break;
 
             case IVariableDeclaratorOperation directDeclarator:
-                HandleVariableDeclarator(directDeclarator, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleVariableDeclarator(directDeclarator, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 break;
 
             case ISimpleAssignmentOperation simpleAssign:
-                HandleSimpleAssignment(simpleAssign, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleSimpleAssignment(simpleAssign, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 break;
 
             case IDeconstructionAssignmentOperation deconstructAssign:
-                HandleDeconstructionAssignment(deconstructAssign, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleDeconstructionAssignment(deconstructAssign, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 break;
 
             case IReturnOperation retOp:
                 if (retOp.ReturnedValue is { } retVal)
                 {
-                    MarkReturnedOwnership(retVal, state, returnOwnedExpressions, diagnostics);
-                    WalkNonAssigningReads(retVal, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                    MarkReturnedOwnership(retVal, state, consumedSites, returnOwnedExpressions, diagnostics);
+                    WalkNonAssigningReads(retVal, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 }
                 break;
 
             default:
-                WalkNonAssigningReads(op, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                WalkNonAssigningReads(op, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 break;
         }
     }
@@ -359,11 +395,12 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         IOperation expr,
         bool isRootStatement,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
-        WalkNonAssigningReads(expr, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+        WalkNonAssigningReads(expr, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
 
         if (isRootStatement && !expr.IsImplicit)
         {
@@ -373,11 +410,15 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             {
                 if (unwrapped is not ILocalReferenceOperation && unwrapped is not IParameterReferenceOperation)
                 {
-                    diagnostics?.Add((
+                    diagnostics?.Add(new LinearDiag(
                         expr.Syntax.GetLocation(),
+                        null,
+                        null,
+                        "DROPPED OBLIGATION",
                         "<temporary>",
                         linearType!.Name,
-                        "was produced and immediately dropped without being stored or consumed"));
+                        "was produced and immediately dropped without being stored or consumed",
+                        "Bind the returned obligation to a local variable (`var token = ...;`) and pass it to a `[ConsumesObligation]` method, return it, or call `Obligation.Discard(...)`."));
                 }
             }
         }
@@ -386,21 +427,22 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void HandleVariableDeclarator(
         IVariableDeclaratorOperation declarator,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         var initVal = declarator.Initializer?.Value;
         if (initVal is not null)
         {
-            WalkNonAssigningReads(initVal, state, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
+            WalkNonAssigningReads(initVal, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
         }
 
         if (VerifiableSymbolHelpers.IsMustConsumeType(declarator.Symbol.Type))
         {
             if (initVal is not null)
             {
-                AssignToLinearTarget(declarator.Symbol, initVal, declarator.Syntax.GetLocation(), state, consumedExpressions, diagnostics);
+                AssignToLinearTarget(declarator.Symbol, initVal, declarator.Syntax.GetLocation(), state, consumedSites, consumedExpressions, diagnostics);
             }
         }
     }
@@ -408,11 +450,12 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void HandleSimpleAssignment(
         ISimpleAssignmentOperation assign,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
-        WalkNonAssigningReads(assign.Value, state, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
+        WalkNonAssigningReads(assign.Value, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
 
         var target = UnwrapConversion(assign.Target);
         if (target is IDiscardOperation)
@@ -425,13 +468,30 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 {
                     if (curSt is ObligationState.Live or ObligationState.MaybeLive)
                     {
-                        diagnostics?.Add((assign.Syntax.GetLocation(), movedSym!.Name, linearType!.Name, "was explicitly discarded without being consumed"));
-                        state[movedSym!] = ObligationState.Consumed;
+                        var originLoc = movedSym!.Locations.FirstOrDefault();
+                        diagnostics?.Add(new LinearDiag(
+                            assign.Syntax.GetLocation(),
+                            originLoc,
+                            originLoc is { IsInSource: true } ? "This obligation was created or received here:" : null,
+                            "UNCONSUMED OBLIGATION",
+                            movedSym.Name,
+                            linearType!.Name,
+                            "was explicitly discarded with `_` without being consumed",
+                            $"Pass `{movedSym.Name}` to a `[ConsumesObligation]` method, or document intentional cancellation with `Obligation.Discard({movedSym.Name}, \"reason\")`."));
+                        state[movedSym] = ObligationState.Consumed;
                     }
                 }
                 else
                 {
-                    diagnostics?.Add((assign.Syntax.GetLocation(), "_", linearType!.Name, "was explicitly discarded without being consumed"));
+                    diagnostics?.Add(new LinearDiag(
+                        assign.Syntax.GetLocation(),
+                        null,
+                        null,
+                        "DROPPED OBLIGATION",
+                        "_",
+                        linearType!.Name,
+                        "was explicitly discarded with `_` without being consumed",
+                        "Store the obligation in a named variable and pass it to a `[ConsumesObligation]` method, or call `Obligation.Discard(..., \"reason\")`."));
                 }
             }
             return;
@@ -439,22 +499,23 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
         if (target is ILocalReferenceOperation localRef && VerifiableSymbolHelpers.IsMustConsumeType(localRef.Local.Type))
         {
-            AssignToLinearTarget(localRef.Local, assign.Value, assign.Syntax.GetLocation(), state, consumedExpressions, diagnostics);
+            AssignToLinearTarget(localRef.Local, assign.Value, assign.Syntax.GetLocation(), state, consumedSites, consumedExpressions, diagnostics);
         }
         else if (target is IParameterReferenceOperation paramRef && VerifiableSymbolHelpers.IsMustConsumeType(paramRef.Parameter.Type))
         {
-            AssignToLinearTarget(paramRef.Parameter, assign.Value, assign.Syntax.GetLocation(), state, consumedExpressions, diagnostics);
+            AssignToLinearTarget(paramRef.Parameter, assign.Value, assign.Syntax.GetLocation(), state, consumedSites, consumedExpressions, diagnostics);
         }
     }
 
     private static void HandleDeconstructionAssignment(
         IDeconstructionAssignmentOperation deconstruct,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
-        WalkNonAssigningReads(deconstruct.Value, state, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
+        WalkNonAssigningReads(deconstruct.Value, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
 
         if (deconstruct.Target is ITupleOperation tupleTarget)
         {
@@ -476,7 +537,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 {
                     if (i < rhsTupleElems.Length)
                     {
-                        AssignToLinearTarget(targetSym, rhsTupleElems[i], elemTarget.Syntax.GetLocation(), state, consumedExpressions, diagnostics);
+                        AssignToLinearTarget(targetSym, rhsTupleElems[i], elemTarget.Syntax.GetLocation(), state, consumedSites, consumedExpressions, diagnostics);
                     }
                     else
                     {
@@ -492,8 +553,9 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         IOperation rhs,
         Location assignLoc,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         var unwrappedRhs = UnwrapConversion(rhs);
         if (TryGetTrackedSymbol(unwrappedRhs, out var srcSym))
@@ -507,11 +569,24 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             {
                 if (srcState == ObligationState.Consumed)
                 {
-                    diagnostics?.Add((rhs.Syntax.GetLocation(), srcSym!.Name, GetTypeName(srcSym!), "was already consumed before assignment"));
+                    consumedSites.TryGetValue(srcSym!, out var priorLoc);
+                    diagnostics?.Add(new LinearDiag(
+                        rhs.Syntax.GetLocation(),
+                        priorLoc,
+                        priorLoc is { IsInSource: true } ? "This obligation was already consumed or moved here:" : null,
+                        "OBLIGATION ALREADY CONSUMED",
+                        srcSym!.Name,
+                        GetTypeName(srcSym!),
+                        "was already consumed before assignment",
+                        $"Remove the duplicate use of `{srcSym.Name}`, or create a fresh `{GetTypeName(srcSym)}` token."));
                 }
                 else if (srcState != ObligationState.SinkParameter)
                 {
                     state[srcSym!] = ObligationState.Consumed;
+                    if (!consumedSites.ContainsKey(srcSym!))
+                    {
+                        consumedSites[srcSym!] = rhs.Syntax.GetLocation();
+                    }
                 }
             }
         }
@@ -527,11 +602,20 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         ISymbol targetSym,
         Location assignLoc,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         if (state.TryGetValue(targetSym, out var existing) && existing is ObligationState.Live or ObligationState.MaybeLive)
         {
-            diagnostics?.Add((assignLoc, targetSym.Name, GetTypeName(targetSym), "was overwritten before its previous obligation was consumed"));
+            var prevLoc = targetSym.Locations.FirstOrDefault();
+            diagnostics?.Add(new LinearDiag(
+                assignLoc,
+                prevLoc,
+                prevLoc is { IsInSource: true } ? "The previous obligation was bound here and never consumed:" : null,
+                "OBLIGATION OVERWRITTEN",
+                targetSym.Name,
+                GetTypeName(targetSym),
+                "was overwritten before its previous obligation was consumed",
+                $"Consume or discard the previous `{targetSym.Name}` before reassigning it."));
         }
 
         state[targetSym] = ObligationState.Live;
@@ -540,22 +624,23 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     private static void WalkNonAssigningReads(
         IOperation op,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> consumedExpressions,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics,
+        List<LinearDiag>? diagnostics,
         bool skipMovedRoot = false)
     {
         // Note: handle assignments/declarators embedded inside other expressions (e.g., nested assignment)
         switch (op)
         {
             case IVariableDeclaratorOperation v:
-                HandleVariableDeclarator(v, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleVariableDeclarator(v, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 return;
             case ISimpleAssignmentOperation sa:
-                HandleSimpleAssignment(sa, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleSimpleAssignment(sa, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 return;
             case IDeconstructionAssignmentOperation da:
-                HandleDeconstructionAssignment(da, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                HandleDeconstructionAssignment(da, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 return;
             case IBlockOperation:
                 return; // nested blocks/lambdas have their own CFG
@@ -566,7 +651,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             var consumesArgs = VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.ConsumesObligationAttr);
             if (inv.Instance is not null)
             {
-                WalkNonAssigningReads(inv.Instance, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                WalkNonAssigningReads(inv.Instance, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
             }
 
             foreach (var arg in inv.Arguments)
@@ -580,27 +665,48 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                         {
                             if (cur == ObligationState.Consumed)
                             {
-                                diagnostics?.Add((arg.Syntax.GetLocation(), argSym!.Name, GetTypeName(argSym!), "was consumed more than once"));
+                                consumedSites.TryGetValue(argSym!, out var priorLoc);
+                                diagnostics?.Add(new LinearDiag(
+                                    arg.Syntax.GetLocation(),
+                                    priorLoc,
+                                    priorLoc is { IsInSource: true } ? "It was already consumed here:" : null,
+                                    "OBLIGATION ALREADY CONSUMED",
+                                    argSym!.Name,
+                                    GetTypeName(argSym!),
+                                    "was consumed more than once",
+                                    $"Remove this duplicate consumption of `{argSym.Name}` so the obligation is discharged exactly once."));
                             }
                             else if (cur != ObligationState.SinkParameter)
                             {
                                 state[argSym!] = ObligationState.Consumed;
+                                if (!consumedSites.ContainsKey(argSym!))
+                                {
+                                    consumedSites[argSym!] = arg.Syntax.GetLocation();
+                                }
                             }
                         }
                         else
                         {
-                            diagnostics?.Add((arg.Syntax.GetLocation(), argSym!.Name, GetTypeName(argSym!), "was consumed before being initialized"));
+                            diagnostics?.Add(new LinearDiag(
+                                arg.Syntax.GetLocation(),
+                                null,
+                                null,
+                                "UNCONSUMED OBLIGATION",
+                                argSym!.Name,
+                                GetTypeName(argSym!),
+                                "was consumed before being initialized",
+                                $"Initialize `{argSym.Name}` from a producer before passing it to a `[ConsumesObligation]` method."));
                         }
                     }
                     else
                     {
-                        WalkNonAssigningReads(argVal, state, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
+                        WalkNonAssigningReads(argVal, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics, skipMovedRoot: true);
                         consumedExpressions.Add(argVal);
                     }
                 }
                 else
                 {
-                    WalkNonAssigningReads(arg.Value, state, consumedExpressions, returnOwnedExpressions, diagnostics);
+                    WalkNonAssigningReads(arg.Value, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics);
                 }
             }
             return;
@@ -614,7 +720,16 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 state.TryGetValue(sym!, out var cur) &&
                 cur == ObligationState.Consumed)
             {
-                diagnostics?.Add((op.Syntax.GetLocation(), sym!.Name, GetTypeName(sym!), "was used after being consumed or moved"));
+                consumedSites.TryGetValue(sym!, out var priorLoc);
+                diagnostics?.Add(new LinearDiag(
+                    op.Syntax.GetLocation(),
+                    priorLoc,
+                    priorLoc is { IsInSource: true } ? "It was already consumed or moved here:" : null,
+                    "OBLIGATION ALREADY CONSUMED",
+                    sym!.Name,
+                    GetTypeName(sym!),
+                    "was used after being consumed or moved",
+                    $"Read any fields you need from `{sym.Name}` before passing it to a `[ConsumesObligation]` method or moving it."));
             }
             return;
         }
@@ -623,20 +738,21 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         foreach (var child in op.ChildOperations)
         {
             var childSkip = skipMovedRoot && UnwrapConversion(op) == UnwrapConversion(child);
-            WalkNonAssigningReads(child, state, consumedExpressions, returnOwnedExpressions, diagnostics, childSkip);
+            WalkNonAssigningReads(child, state, consumedSites, consumedExpressions, returnOwnedExpressions, diagnostics, childSkip);
         }
     }
 
     private static void MarkReturnedOwnership(
         IOperation retVal,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         var unwrapped = UnwrapConversion(retVal);
         if (TryGetTrackedSymbol(unwrapped, out var directSym) && VerifiableSymbolHelpers.IsMustConsumeType(GetSymbolType(directSym!)))
         {
-            ConsumeForReturn(directSym!, unwrapped, state, returnOwnedExpressions, diagnostics);
+            ConsumeForReturn(directSym!, unwrapped, state, consumedSites, returnOwnedExpressions, diagnostics);
             return;
         }
 
@@ -645,7 +761,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         {
             foreach (var elem in tuple.Elements)
             {
-                MarkReturnedOwnership(elem, state, returnOwnedExpressions, diagnostics);
+                MarkReturnedOwnership(elem, state, consumedSites, returnOwnedExpressions, diagnostics);
             }
         }
         else if (unwrapped is IInvocationOperation inv &&
@@ -653,14 +769,14 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         {
             foreach (var arg in inv.Arguments)
             {
-                MarkReturnedOwnership(arg.Value, state, returnOwnedExpressions, diagnostics);
+                MarkReturnedOwnership(arg.Value, state, consumedSites, returnOwnedExpressions, diagnostics);
             }
         }
         else if (unwrapped is IObjectCreationOperation obj)
         {
             foreach (var arg in obj.Arguments)
             {
-                MarkReturnedOwnership(arg.Value, state, returnOwnedExpressions, diagnostics);
+                MarkReturnedOwnership(arg.Value, state, consumedSites, returnOwnedExpressions, diagnostics);
             }
         }
     }
@@ -669,18 +785,32 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         ISymbol sym,
         IOperation expr,
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites,
         HashSet<IOperation> returnOwnedExpressions,
-        List<(Location Loc, string TokenName, string TypeName, string Detail)>? diagnostics)
+        List<LinearDiag>? diagnostics)
     {
         if (state.TryGetValue(sym, out var cur))
         {
             if (cur == ObligationState.Consumed)
             {
-                diagnostics?.Add((expr.Syntax.GetLocation(), sym.Name, GetTypeName(sym), "was already consumed before being returned"));
+                consumedSites.TryGetValue(sym, out var priorLoc);
+                diagnostics?.Add(new LinearDiag(
+                    expr.Syntax.GetLocation(),
+                    priorLoc,
+                    priorLoc is { IsInSource: true } ? "It was already consumed here:" : null,
+                    "OBLIGATION ALREADY CONSUMED",
+                    sym.Name,
+                    GetTypeName(sym),
+                    "was already consumed before being returned",
+                    $"Either return `{sym.Name}` to transfer ownership to the caller, or consume it locally—not both."));
             }
             else if (cur != ObligationState.SinkParameter)
             {
                 state[sym] = ObligationState.Consumed;
+                if (!consumedSites.ContainsKey(sym))
+                {
+                    consumedSites[sym] = expr.Syntax.GetLocation();
+                }
             }
         }
         returnOwnedExpressions.Add(expr);

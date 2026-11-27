@@ -257,7 +257,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.HeapAliasingOrMutableState,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER001_RefLocal"),
                         $"ref local '{varDecl.Symbol.Name}'"));
                 }
 
@@ -286,7 +286,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                             VerifiableDescriptors.NondeterminismOrAmbientAuthority,
                             op.Syntax.GetLocation(),
                             isCandidate,
-                            null,
+                            ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER004_StaticField"),
                             $"assignment to static field '{fs.Name}'"));
                     }
                     else
@@ -301,9 +301,9 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 break;
 
-
             case IArrayCreationOperation arrCreate:
-                if (!(arrCreate.IsImplicit && arrCreate.Parent is IArgumentOperation { Parameter.IsParams: true }))
+                if (!(arrCreate.IsImplicit && arrCreate.Parent is IArgumentOperation { Parameter.IsParams: true }) &&
+                    !IsRedundantMutableCollectionInitializer(arrCreate))
                 {
                     var arrDisplay = arrCreate.Type?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "T[]";
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -322,26 +322,32 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.NondeterminismOrAmbientAuthority,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER004_AmbientAuthority"),
                         $"new {objCreate.Type.Name}()"));
                 }
                 else if (VerifiableSymbolHelpers.IsMutableCollectionType(objCreate.Type, out var createdCol))
                 {
-                    context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
-                        VerifiableDescriptors.MutableCollection,
-                        op.Syntax.GetLocation(),
-                        isCandidate,
-                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER002_MutableCollection"),
-                        createdCol));
+                    if (!IsRedundantMutableCollectionInitializer(objCreate))
+                    {
+                        context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                            VerifiableDescriptors.MutableCollection,
+                            op.Syntax.GetLocation(),
+                            isCandidate,
+                            ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER002_MutableCollection"),
+                            createdCol));
+                    }
                 }
                 else if (objCreate.Constructor is { Parameters.Length: 0 } &&
                          VerifiableSymbolHelpers.HasInvariantOrRefinedContract(objCreate.Type))
                 {
+                    var fixKind = VerifiableSymbolHelpers.IsConstrainedStruct(objCreate.Type)
+                        ? "VER003_NewConstrained"
+                        : "VER003_NewInvariant";
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.UncheckedInitialization,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", fixKind),
                         objCreate.Type.Name));
                 }
                 break;
@@ -353,7 +359,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.UncheckedInitialization,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER003_Default"),
                         defOp.Type.Name));
                 }
                 break;
@@ -374,7 +380,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.UnverifiedCallOrDynamic,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_Reflection"),
                         $"System.Reflection member '{memRef.Member.Name}'"));
                 }
                 break;
@@ -382,6 +388,11 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
             case IInvocationOperation inv:
                 if (VerifiableSymbolHelpers.IsNondeterministicMember(inv.TargetMethod, out var invDisplay))
                 {
+                    if (inv.Instance is IObjectCreationOperation { Type: { } recvType } && IsNondeterministicType(recvType))
+                    {
+                        break;
+                    }
+
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.NondeterminismOrAmbientAuthority,
                         op.Syntax.GetLocation(),
@@ -398,7 +409,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                             VerifiableDescriptors.UnverifiedCallOrDynamic,
                             op.Syntax.GetLocation(),
                             isCandidate,
-                            null,
+                            ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_Delegate"),
                             "delegate invocation"));
                     }
                 }
@@ -412,19 +423,29 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.UnverifiedCallOrDynamic,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_Reflection"),
                         $"System.Reflection call '{inv.TargetMethod.Name}'"));
                 }
                 else if (VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.GhostAttr)
                     ? !IsSpecificationUse(inv, context.OwningSymbol)
                     : !IsTrustedInvocation(inv))
                 {
-                    context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                    var calleeDisplay = $"{inv.TargetMethod.ContainingType?.Name}.{inv.TargetMethod.Name}(...)";
+                    var isCultureParse = IsCultureSensitiveParseMethod(inv.TargetMethod);
+                    var fixKind = isCultureParse ? "VER006_CultureSensitiveParse" : "VER006_UnverifiedCall";
+                    var calleeLoc = !isCultureParse ? inv.TargetMethod.Locations.FirstOrDefault(l => l.IsInSource) : null;
+                    var calleeHeading = calleeLoc is not null
+                        ? $"Callee `{inv.TargetMethod.ContainingType?.Name}.{inv.TargetMethod.Name}` is declared here (not `[Verifiable]`):"
+                        : null;
+
+                    context.ReportDiagnostic(VerifiableDescriptors.CreateScopedWithContext(
                         VerifiableDescriptors.UnverifiedCallOrDynamic,
                         op.Syntax.GetLocation(),
                         isCandidate,
-                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_UnverifiedCall"),
-                        $"{inv.TargetMethod.ContainingType?.Name}.{inv.TargetMethod.Name}(...)"));
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", fixKind),
+                        calleeLoc,
+                        calleeHeading,
+                        calleeDisplay));
                 }
                 break;
 
@@ -436,7 +457,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     VerifiableDescriptors.UnverifiedCallOrDynamic,
                     op.Syntax.GetLocation(),
                     isCandidate,
-                    null,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_Dynamic"),
                     "dynamic dispatch"));
                 break;
 
@@ -463,7 +484,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     VerifiableDescriptors.DisallowedControlFlow,
                     op.Syntax.GetLocation(),
                     isCandidate,
-                    null,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_TryCatch"),
                     "try/catch block"));
                 break;
 
@@ -472,7 +493,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     VerifiableDescriptors.DisallowedControlFlow,
                     op.Syntax.GetLocation(),
                     isCandidate,
-                    null,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_Lock"),
                     "lock statement"));
                 break;
 
@@ -481,7 +502,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     VerifiableDescriptors.DisallowedControlFlow,
                     op.Syntax.GetLocation(),
                     isCandidate,
-                    null,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_Goto"),
                     "goto statement"));
                 break;
 
@@ -492,7 +513,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.DisallowedControlFlow,
                         whileOp.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_UnannotatedLoop"),
                         whileOp.Syntax is DoStatementSyntax ? "unannotated do-while loop" : "unannotated while loop"));
                 }
                 break;
@@ -504,12 +525,35 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         VerifiableDescriptors.DisallowedControlFlow,
                         foreachOp.Syntax.GetLocation(),
                         isCandidate,
-                        null,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_UnannotatedLoop"),
                         "unannotated foreach loop"));
                 }
                 break;
         }
     }
+
+    private static bool IsRedundantMutableCollectionInitializer(IOperation creationOp)
+    {
+        if (creationOp.Parent is IVariableInitializerOperation { Parent: IVariableDeclaratorOperation declarator } &&
+            !declarator.IsImplicit &&
+            VerifiableSymbolHelpers.IsMutableCollectionType(declarator.Symbol.Type, out _))
+        {
+            return SymbolEqualityComparer.Default.Equals(declarator.Symbol.Type, creationOp.Type);
+        }
+
+        return false;
+    }
+
+    private static bool IsCultureSensitiveParseMethod(IMethodSymbol method) =>
+        method.IsStatic &&
+        method.Name is "Parse" or "TryParse" &&
+        method.ContainingType?.SpecialType is
+            SpecialType.System_Int32 or
+            SpecialType.System_Int64 or
+            SpecialType.System_Decimal or
+            SpecialType.System_Double or
+            SpecialType.System_Single or
+            SpecialType.System_DateTime;
     private static bool IsConstructorImmutableMemberInit(ISymbol owningSymbol, IMemberReferenceOperation memberTarget)
     {
         if (owningSymbol is not IMethodSymbol { MethodKind: MethodKind.Constructor })

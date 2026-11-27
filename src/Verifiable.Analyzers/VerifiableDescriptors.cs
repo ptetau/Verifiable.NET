@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 
@@ -102,12 +103,37 @@ internal static class VerifiableDescriptors
         Location location,
         bool isCandidate,
         ImmutableDictionary<string, string?>? properties = null,
+        params object?[] args) =>
+        CreateScopedWithContext(descriptor, location, isCandidate, properties, relatedLocation: null, relatedHeading: null, args);
+
+    public static Diagnostic CreateScopedWithContext(
+        DiagnosticDescriptor descriptor,
+        Location location,
+        bool isCandidate,
+        ImmutableDictionary<string, string?>? properties,
+        Location? relatedLocation,
+        string? relatedHeading,
         params object?[] args)
     {
         var severity = isCandidate ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error;
         var warningLevel = isCandidate ? 1 : 0;
         var subject = args.Length > 0 ? args[0]?.ToString() ?? string.Empty : string.Empty;
-        var formatted = FormatGatekeeperOrFallback(descriptor.Id, location, subject, args);
+        string? fixKind = null;
+        properties?.TryGetValue("FixKind", out fixKind);
+
+        var formatted = FormatGatekeeperOrFallback(
+            descriptor.Id,
+            location,
+            subject,
+            fixKind,
+            relatedLocation,
+            relatedHeading,
+            args);
+
+        var additionalLocations = relatedLocation is { } rel && rel != Location.None && rel.IsInSource
+            ? new[] { rel }
+            : null;
+
         return Diagnostic.Create(
             id: descriptor.Id,
             category: descriptor.Category,
@@ -120,7 +146,7 @@ internal static class VerifiableDescriptors
             description: descriptor.Description,
             helpLink: descriptor.HelpLinkUri,
             location: location,
-            additionalLocations: null,
+            additionalLocations: additionalLocations,
             customTags: descriptor.CustomTags,
             properties: properties);
     }
@@ -129,47 +155,278 @@ internal static class VerifiableDescriptors
         string id,
         Location location,
         string subject,
+        string? fixKind,
+        Location? relatedLocation,
+        string? relatedHeading,
         object?[] args)
     {
         return id switch
         {
-            "VER001" => ElmDiagnosticFormatter.Format(
-                "MUTABLE STATE",
-                location,
-                $"Inside a `[Verifiable]` scope, `{subject}` allows aliasing or in-place mutation.",
-                spirit: "Two references to the same mutable object make it impossible to prove locally what changed across a method call.",
-                fixHint: "Use a `readonly record struct` or immutable `record` with `with` expressions instead of mutable heap state or ref/out aliasing."),
-            "VER002" => ElmDiagnosticFormatter.Format(
-                "MUTABLE COLLECTION",
-                location,
-                $"Mutable collection `{subject}` cannot cross or live inside a `[Verifiable]` cage.",
-                spirit: "Mutable lists, dictionaries, and arrays can be changed out from under a proof after a check passes.",
-                fixHint: "Replace with `ImmutableList<T>`, `ImmutableDictionary<K, V>`, `ImmutableHashSet<T>`, or `ImmutableArray<T>`."),
-            "VER003" => ElmDiagnosticFormatter.Format(
-                "UNCHECKED INITIALIZATION",
-                location,
-                $"Using `default` or `new` on `{subject}` skips its `[TypeAlias<T>]` / `[Invariant]` validation.",
-                spirit: "Unchecked struct defaults can put an impossible value (like an empty ID or negative quantity) inside a verified cage.",
-                fixHint: $"Construct `{subject}` using `{subject}.From(...)`, `{subject}.TryFrom(...)`, or an `[InboundPort]` gate."),
-            "VER004" => ElmDiagnosticFormatter.Format(
-                "AMBIENT AUTHORITY",
-                location,
-                $"Non-deterministic or ambient construct `{subject}` cannot be called inside a `[Verifiable]` scope.",
-                spirit: "Verified code must always return the same output for the same inputs so Z3 proofs and GalaxyCheck replays remain 100% reproducible.",
-                fixHint: "Hoist the time/ID/random value into an explicit parameter such as `UnixTimestamp now` or `Guid nextId`."),
-            "VER005" => ElmDiagnosticFormatter.Format(
-                "DISALLOWED CONTROL FLOW",
-                location,
-                $"Control flow `{subject}` is not allowed inside a `[Verifiable]` cage.",
-                spirit: "Hidden exceptions, async state machines, and unannotated loops break straight-line mathematical reasoning.",
-                fixHint: "Use bounded loops or `Spec.LoopInvariant`/`Spec.Decreases`, avoid async/lock/goto, and return `Result<T, TError>` instead of throwing exceptions."),
-            "VER006" => ElmDiagnosticFormatter.Format(
-                "UNVERIFIED CALL",
-                location,
-                $"Call `{subject}` crosses out of the verified closed world.",
-                spirit: "Z3 cannot prove invariants hold if a verified method calls unverified code whose behavior is unknown.",
-                fixHint: "Mark the callee `[Verifiable]` or `[PureAxiom]`, or move the I/O outside via Sandwich I/O splitting."),
+            "VER001" => FormatVer001(location, subject, fixKind),
+            "VER002" => FormatVer002(location, subject),
+            "VER003" => FormatVer003(location, subject, fixKind),
+            "VER004" => FormatVer004(location, subject, fixKind),
+            "VER005" => FormatVer005(location, subject, fixKind),
+            "VER006" => FormatVer006(location, subject, fixKind, relatedLocation, relatedHeading),
             _ => args.Length == 1 ? subject : string.Join(" ", args)
         };
+    }
+
+    private static string FormatVer001(Location location, string subject, string? fixKind)
+    {
+        var (intro, spirit, fix) = fixKind switch
+        {
+            "VER001_MutableType" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` is a mutable reference type.",
+                "Two references to the same mutable class can alias each other, making it impossible to prove locally what changed across a method call.",
+                "Convert it to a `readonly record struct` or immutable `sealed record` with `init`-only properties."),
+            "VER001_MutableStruct" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` is not marked `readonly`.",
+                "Non-readonly structs can mutate fields in place (or trigger defensive copies), breaking value-equality reasoning.",
+                "Mark the declaration `readonly struct` or `readonly record struct` and make all fields `readonly`."),
+            "VER001_SettableProperty" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` has a mutable `set;` accessor.",
+                "Settable properties allow state to change after construction, invalidating previously proved invariants.",
+                "Change `set;` to `init;` and produce updated copies with `record with { ... }` expressions."),
+            "VER001_MutableField" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` can be reassigned after construction.",
+                "Mutable fields break local reasoning because any method with a reference could silently alter them.",
+                "Mark the field `readonly` (or convert it to an `init`-only property on a `readonly record struct`)."),
+            "VER001_RefOutParam" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` passes a mutable alias by reference.",
+                "`ref` and `out` parameters allow two names to point at the same storage location, breaking local value proofs.",
+                "Return multiple outputs as a value tuple `(T1, T2)` or a `readonly record struct` instead of using `ref`/`out`."),
+            "VER001_MemberAssignment" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` mutates state in place.",
+                "In-place property or field mutation invalidates value snapshots held elsewhere in the method.",
+                "Return a new value using a non-destructive `with` expression (for example, `state = state with { Prop = newValue };`)."),
+            "VER001_RefLocal" => (
+                $"Inside a `[Verifiable]` scope, `{subject}` creates a mutable alias to existing storage.",
+                "`ref` locals let writes through one variable silently alter another variable in the same scope.",
+                "Bind a regular value local instead of `ref`, and compute a new value via `with`."),
+            _ => (
+                $"Inside a `[Verifiable]` scope, `{subject}` allows aliasing or in-place mutation.",
+                "Two references to the same mutable object make it impossible to prove locally what changed across a method call.",
+                "Use a `readonly record struct` or immutable `record` with `with` expressions instead of mutable heap state or ref/out aliasing.")
+        };
+
+        return ElmDiagnosticFormatter.Format("MUTABLE STATE", location, intro, spirit: spirit, fixHint: fix);
+    }
+
+    private static string FormatVer002(Location location, string subject)
+    {
+        var replacement = SuggestImmutableCollection(subject);
+        var fix = replacement is not null
+            ? $"Replace `{subject}` with `{replacement}` (from `System.Collections.Immutable`)."
+            : "Replace with `ImmutableList<T>`, `ImmutableDictionary<K, V>`, `ImmutableHashSet<T>`, or `ImmutableArray<T>`.";
+
+        return ElmDiagnosticFormatter.Format(
+            "MUTABLE COLLECTION",
+            location,
+            $"Mutable collection `{subject}` cannot cross or live inside a `[Verifiable]` cage.",
+            spirit: "Mutable lists, dictionaries, and arrays can be mutated through another reference after a contract or invariant check passes.",
+            fixHint: fix);
+    }
+
+    private static string FormatVer003(Location location, string subject, string? fixKind)
+    {
+        var (intro, fix) = fixKind switch
+        {
+            "VER003_Default" => (
+                $"Using `default({subject})` bypasses `{subject}`'s `[TypeAlias<T>]` / `[Invariant]` validation.",
+                $"Construct `{subject}` through `{subject}.From(...)`, `{subject}.TryFrom(...)`, or an `[InboundPort]` gate instead of `default`."),
+            "VER003_NewConstrained" => (
+                $"Using parameterless `new {subject}()` bypasses `{subject}`'s `[TypeAlias<T>]` / `[Invariant]` validation.",
+                $"Construct `{subject}` through `{subject}.From(...)`, `{subject}.TryFrom(...)`, or an `[InboundPort]` gate."),
+            "VER003_NewInvariant" => (
+                $"Using parameterless `new {subject}()` leaves `{subject}` zero-initialized without checking its `[Invariant]` rules.",
+                $"Call `{subject}`'s parameterized constructor (or factory / `[InboundPort]` gate) with valid field values."),
+            _ => (
+                $"Using `default` or `new` on `{subject}` skips its `[TypeAlias<T>]` / `[Invariant]` validation.",
+                $"Construct `{subject}` using `{subject}.From(...)`, `{subject}.TryFrom(...)`, or an `[InboundPort]` gate.")
+        };
+
+        return ElmDiagnosticFormatter.Format(
+            "UNCHECKED INITIALIZATION",
+            location,
+            intro,
+            spirit: "Unchecked struct defaults can smuggle an impossible value (like an empty ID or negative quantity) inside a verified cage.",
+            fixHint: fix);
+    }
+
+    private static string FormatVer004(Location location, string subject, string? fixKind)
+    {
+        var (intro, fix) = ClassifyAmbientAuthority(subject, fixKind);
+        return ElmDiagnosticFormatter.Format(
+            "AMBIENT AUTHORITY",
+            location,
+            intro,
+            spirit: "Verified code must always return the same output for the same inputs so Z3 proofs and GalaxyCheck replays remain 100% reproducible.",
+            fixHint: fix);
+    }
+
+    private static string FormatVer005(Location location, string subject, string? fixKind)
+    {
+        var (intro, spirit, fix) = fixKind switch
+        {
+            "VER005_Throw" => (
+                $"Throwing an exception (`{subject}`) is not allowed inside a `[Verifiable]` cage.",
+                "Exceptions act as invisible, unchecked exit paths that bypass normal return types and postcondition reasoning.",
+                "Return `Result<T, TError>.Fail(...)` (or a discriminated union) instead of throwing, and let the imperative shell handle failures."),
+            "VER005_TryCatch" => (
+                $"A `try`/`catch` block is not allowed inside a `[Verifiable]` cage.",
+                "Exception handlers introduce non-local control flow that hides failure paths from straight-line proof verification.",
+                "Return `Result<T, TError>` from pure verified logic and keep `try`/`catch` at the outer `[Unverifiable]` I/O shell."),
+            "VER005_AsyncTask" => (
+                $"Asynchronous `{subject}` cannot live directly inside a `[Verifiable]` cage.",
+                "Async state machines interleave I/O suspension points with computation, breaking deterministic local reasoning.",
+                "Split the pure calculation into a synchronous `[Verifiable]` helper and keep `async`/`await` in an outer imperative shell (Sandwich I/O)."),
+            "VER005_Await" => (
+                $"An `await` expression cannot appear inside a `[Verifiable]` cage.",
+                "Awaiting asynchronous I/O suspends execution and introduces external nondeterminism mid-computation.",
+                "Await your inputs first in the outer shell, pass immutable snapshots into a synchronous `[Verifiable]` method, then await the output side effects."),
+            "VER005_Lock" => (
+                $"A `lock` statement is not allowed inside a `[Verifiable]` cage.",
+                "Locks imply shared mutable state and thread-interleaving schedules that cannot be verified locally.",
+                "Read an immutable snapshot at the boundary, run the `[Verifiable]` transition on that value, and commit outside the cage."),
+            "VER005_Goto" => (
+                $"A `goto` statement is not allowed inside a `[Verifiable]` cage.",
+                "Unstructured jumps obscure loop structure and make path-condition / termination proofs fragile.",
+                "Replace `goto` with structured `if`/`else`, `switch`, early `return`, or a small helper method."),
+            "VER005_UnannotatedLoop" => (
+                $"This `{subject}` has no `Spec.LoopInvariant(...)` or `Spec.Decreases(...)` annotation.",
+                "Without a loop invariant and termination measure, Z3 cannot inductively prove what holds after an arbitrary number of iterations or that the loop terminates.",
+                "Add `Spec.LoopInvariant(...)` and `Spec.Decreases(...)` inside the loop body, or replace with a bounded `for` loop."),
+            _ => (
+                $"Control flow `{subject}` is not allowed inside a `[Verifiable]` cage.",
+                "Hidden exceptions, async state machines, and unannotated loops break straight-line mathematical reasoning.",
+                "Use bounded loops or `Spec.LoopInvariant`/`Spec.Decreases`, avoid async/lock/goto, and return `Result<T, TError>` instead of throwing exceptions.")
+        };
+
+        return ElmDiagnosticFormatter.Format("DISALLOWED CONTROL FLOW", location, intro, spirit: spirit, fixHint: fix);
+    }
+
+    private static string FormatVer006(
+        Location location,
+        string subject,
+        string? fixKind,
+        Location? relatedLocation,
+        string? relatedHeading)
+    {
+        var (intro, spirit, fix) = fixKind switch
+        {
+            "VER006_CultureSensitiveParse" => (
+                $"Call `{subject}` is culture-sensitive or may throw on invalid input, so it cannot be called inside a `[Verifiable]` cage.",
+                "Locale-dependent parsing behaves differently across machines and throws exceptions on malformed strings.",
+                "Validate and parse untrusted strings at an `[InboundPort]` boundary (or with `TryParse(..., CultureInfo.InvariantCulture)` in an `[Unverifiable]` shell) before passing typed values into verified code."),
+            "VER006_Reflection" => (
+                $"Reflection call `{subject}` crosses out of the verified closed world.",
+                "Reflection inspects and invokes arbitrary runtime metadata that Z3 cannot reason about statically.",
+                "Replace reflection with static generics, pattern matching, or move metadata inspection into an `[Unverifiable]` boundary."),
+            "VER006_Dynamic" => (
+                "`dynamic` dispatch crosses out of the verified closed world.",
+                "Runtime dynamic binding defers method resolution and type checks until execution, making static proof impossible.",
+                "Use concrete static types or interfaces/records instead of `dynamic`."),
+            "VER006_Delegate" => (
+                "Invoking an opaque delegate crosses out of the verified closed world.",
+                "Z3 cannot know what arbitrary side effects or return values an unanalyzed delegate might produce.",
+                "Call a concrete `[Verifiable]` method directly, or dispatch over a closed union / enum with `switch`."),
+            _ => (
+                $"Call `{subject}` crosses out of the verified closed world.",
+                "Z3 cannot prove invariants hold if a verified method calls unverified code whose behavior is unknown.",
+                relatedLocation is { IsInSource: true }
+                    ? $"Mark `{subject}` with `[Verifiable]` (if pure) or `[PureAxiom]` (if a trusted primitive), or move the I/O outside via Sandwich I/O splitting."
+                    : "Mark the callee `[Verifiable]` or `[PureAxiom]`, or move the I/O outside via Sandwich I/O splitting.")
+        };
+
+        return ElmDiagnosticFormatter.Format(
+            "UNVERIFIED CALL",
+            location,
+            intro,
+            spirit: spirit,
+            fixHint: fix,
+            relatedLocation: relatedLocation,
+            relatedHeading: relatedHeading);
+    }
+
+    internal static string? SuggestImmutableCollection(string subject)
+    {
+        if (string.IsNullOrWhiteSpace(subject)) return null;
+        var s = subject.Trim();
+
+        if (s.EndsWith("[]", StringComparison.Ordinal) && s.Length > 2)
+        {
+            var elem = s.Substring(0, s.Length - 2);
+            return $"ImmutableArray<{elem}>";
+        }
+
+        if (s.StartsWith("List<", StringComparison.Ordinal))
+            return "ImmutableList" + s.Substring("List".Length);
+        if (s.StartsWith("Dictionary<", StringComparison.Ordinal))
+            return "ImmutableDictionary" + s.Substring("Dictionary".Length);
+        if (s.StartsWith("HashSet<", StringComparison.Ordinal))
+            return "ImmutableHashSet" + s.Substring("HashSet".Length);
+        if (s.StartsWith("Queue<", StringComparison.Ordinal))
+            return "ImmutableQueue" + s.Substring("Queue".Length);
+        if (s.StartsWith("Stack<", StringComparison.Ordinal))
+            return "ImmutableStack" + s.Substring("Stack".Length);
+        if (s.StartsWith("SortedDictionary<", StringComparison.Ordinal))
+            return "ImmutableSortedDictionary" + s.Substring("SortedDictionary".Length);
+        if (s.StartsWith("SortedList<", StringComparison.Ordinal))
+            return "ImmutableSortedDictionary" + s.Substring("SortedList".Length);
+        if (s.StartsWith("SortedSet<", StringComparison.Ordinal))
+            return "ImmutableSortedSet" + s.Substring("SortedSet".Length);
+        if (s.StartsWith("LinkedList<", StringComparison.Ordinal))
+            return "ImmutableList" + s.Substring("LinkedList".Length);
+
+        return null;
+    }
+
+    private static (string Intro, string Fix) ClassifyAmbientAuthority(string subject, string? fixKind)
+    {
+        if (fixKind == "VER004_StaticField" || subject.Contains("static field"))
+        {
+            return (
+                $"Mutable global state `{subject}` cannot live inside a `[Verifiable]` scope.",
+                "Make the field `static readonly` / `const` if it is a constant, or pass the state explicitly as an immutable parameter.");
+        }
+
+        if (subject.IndexOf("DateTime", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("Stopwatch", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("Environment.TickCount", StringComparison.Ordinal) >= 0)
+        {
+            return (
+                $"Clock read `{subject}` reads ambient wall-clock time inside a `[Verifiable]` scope.",
+                "Hoist the timestamp into an explicit parameter such as `DateTimeOffset now` or `UnixTimestamp now` and pass it from the calling shell.");
+        }
+
+        if (subject.IndexOf("Guid.NewGuid", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("Guid.CreateVersion7", StringComparison.Ordinal) >= 0)
+        {
+            return (
+                $"ID allocation `{subject}` generates a fresh nondeterministic value inside a `[Verifiable]` scope.",
+                "Hoist the generated ID into an explicit parameter such as `Guid nextId` and allocate it once per item in the calling shell.");
+        }
+
+        if (subject.IndexOf("Random", StringComparison.Ordinal) >= 0)
+        {
+            return (
+                $"Random source `{subject}` introduces nondeterminism inside a `[Verifiable]` scope.",
+                "Sample the random value in the outer shell and pass it as an explicit deterministic parameter.");
+        }
+
+        if (subject.IndexOf("HttpClient", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("File", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("Console", StringComparison.Ordinal) >= 0 ||
+            subject.IndexOf("Environment", StringComparison.Ordinal) >= 0)
+        {
+            return (
+                $"External I/O or environment access `{subject}` cannot run inside a `[Verifiable]` scope.",
+                "Read external I/O or environment values in an `[Unverifiable]` outer shell and pass immutable data into your `[Verifiable]` core (Sandwich I/O).");
+        }
+
+        return (
+            $"Non-deterministic or ambient construct `{subject}` cannot be called inside a `[Verifiable]` scope.",
+            "Hoist the time/ID/random value into an explicit parameter such as `DateTimeOffset now`, `UnixTimestamp now`, or `Guid nextId`.");
     }
 }

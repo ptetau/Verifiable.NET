@@ -178,14 +178,16 @@ Nullable expressions work in both the implementation and the contract. For `deci
 
 ## 4. Reading Elm-style compiler errors
 
-When a rule breaks, Verifiable.NET formats compiler errors in an Elm-inspired layout so you can spot the problem in seconds:
+When a rule breaks, Verifiable.NET formats compiler and query diagnostics in an Elm-inspired layout so you can spot the problem in seconds:
 
 - A **banner** (`-- PROOF FAILED ---- File.cs`) naming the check and file
-- A short sentence saying what happened and where
-- The **exact line of code** with `^` carets pointing at the expression
-- **Why this rule exists** — showing your `because` / `description` string (or the built-in rationale for Gatekeeper rules `VER001`–`VER007`)
-- **Contract** and **Counterexample** (when Z3 finds failing inputs)
-- A concrete **Fix:** line
+- A short, 78-column reflowed sentence saying what happened and where
+- The **exact code** as you wrote it—single-line spans use `^` carets, while multi-line blocks switch to Elm-style `|>` gutter markers
+- A **second linked snippet** (and IDE `AdditionalLocations`) whenever two locations matter—such as the failing `Spec.Ensures` / `[Invariant]` / callee `Spec.Requires` declaration (`VER102`), the first consumption or binding site of a `[MustConsume]` token (`VER007`), or an in-source unverified callee (`VER006`)
+- **Why this rule exists** — showing your `because` / `description` string (or a context-specific rationale for Gatekeeper rules `VER001`–`VER007`)
+- **Contract**, **Counterexample** (including the concrete `result` value), and **failed-clause pinpointing** showing which conjunct broke along with evaluated `Left` / `Right` values and boundary/off-by-one hints
+- **Typo suggestions** (Damerau-Levenshtein `"Did you mean ...?"`) in `Verifiable.Query` and `[TypeAlias<T>]` generator checks (`VER202`)
+- A concrete, context-specific **Fix:** line
 
 When `VERIFIABLE_AGENT=1` is set in CI or AI agent environments, `VER102` appends one single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` JSON payload containing `"reason"`, `"counterexample"`, `"smtHash"`, and `"fix"`.
 

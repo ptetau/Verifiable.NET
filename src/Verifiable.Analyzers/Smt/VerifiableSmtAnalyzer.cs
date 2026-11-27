@@ -105,10 +105,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         elmErr));
                 }
 
+                var reportedFailures = new HashSet<(int Start, int Length, string Kind, string Contract)>();
+
                 foreach (var ob in allObligations)
                 {
                     var script = BuildQueryScript(ob);
-                    var result = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath);
+                    var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtTerm, ob.GoalClauses);
+                    var result = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
 
                     if (result.Status == SmtStatus.SolverUnavailable)
                     {
@@ -131,10 +134,20 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                     if (result.Status == SmtStatus.Sat)
                     {
-                        var ceSummary = FormatCounterexampleSummary(ob, result.Model);
-                        var fixHint = GetFixHint(ob.Kind);
+                        var dedupKey = (ob.Location.SourceSpan.Start, ob.Location.SourceSpan.Length, ob.Kind, ob.ContractText);
+                        if (!reportedFailures.Add(dedupKey))
+                        {
+                            continue;
+                        }
+
+                        var insight = SmtCounterexampleAnalyzer.Analyze(result.Model, ob.GoalClauses);
+                        var ceSummary = FormatCounterexampleSummary(ob, result.Model, insight.EvaluatedResult);
+                        var baseFixHint = GetFixHint(ob.Kind);
+                        var combinedFixHint = insight.BoundaryHint is not null
+                            ? $"{baseFixHint} {insight.BoundaryHint}"
+                            : baseFixHint;
                         var agentPayload = isAgentMode
-                            ? BuildAgentJsonBlock(method, ob, result, fixHint)
+                            ? BuildAgentJsonBlock(method, ob, result, combinedFixHint)
                             : null;
                         var failSummary =
                             $"{ob.Kind} of {method.ContainingType?.Name}.{method.Name} fails: " +
@@ -146,13 +159,21 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             spirit: ob.Reason,
                             contract: $"{ob.Kind}: {ob.ContractText}",
                             counterexample: ceSummary,
-                            fixHint: fixHint,
+                            explanation: insight.FailedClauseBlock,
+                            fixHint: combinedFixHint,
                             agentPayload: agentPayload,
-                            summary: failSummary);
+                            summary: failSummary,
+                            relatedLocation: ob.ContractLocation,
+                            relatedHeading: ob.ContractLocationLabel);
+
+                        var additionalLocs = ob.ContractLocation is { IsInSource: true } cl && cl != Location.None
+                            ? new[] { cl }
+                            : null;
 
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
+                            additionalLocations: additionalLocs,
                             elmFail));
                     }
                     else if (result.Status is SmtStatus.Unknown or SmtStatus.Error)
@@ -167,7 +188,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             spirit: ob.Reason,
                             explanation: string.IsNullOrWhiteSpace(result.ErrorMessage) ? null : result.ErrorMessage,
                             fixHint: "Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.",
-                            summary: unknownSummary);
+                            summary: unknownSummary,
+                            relatedLocation: ob.ContractLocation,
+                            relatedHeading: ob.ContractLocationLabel);
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.SmtSolverUnknown,
                             ob.Location,
@@ -336,7 +359,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static string FormatCounterexampleSummary(ProofObligation ob, IReadOnlyDictionary<string, string> model)
+    private static string FormatCounterexampleSummary(
+        ProofObligation ob,
+        IReadOnlyDictionary<string, string> model,
+        string? evaluatedResult = null)
     {
         var bindings = new List<string>();
         foreach (var (paramName, smtName) in ob.TrackedParameters)
@@ -349,10 +375,18 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
         if (bindings.Count == 0)
         {
-            foreach (var kv in model.Where(k => !k.Key.StartsWith("ssa_", StringComparison.Ordinal)).Take(4))
+            foreach (var kv in model.Where(k =>
+                !k.Key.StartsWith("ssa_", StringComparison.Ordinal) &&
+                !k.Key.StartsWith(SmtCounterexampleAnalyzer.EvalKeyPrefix, StringComparison.Ordinal)).Take(4))
             {
                 bindings.Add($"{kv.Key} = {kv.Value}");
             }
+        }
+
+        if (!string.IsNullOrWhiteSpace(evaluatedResult) &&
+            !bindings.Any(b => b.StartsWith("result =", StringComparison.Ordinal)))
+        {
+            bindings.Add($"result = {evaluatedResult}");
         }
 
         return bindings.Count > 0

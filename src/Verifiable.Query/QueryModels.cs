@@ -52,7 +52,9 @@ public sealed record PathCounterexample(
     string ReturnFile,
     int ReturnLine,
     Location ReturnLocation,
-    IReadOnlyDictionary<string, string> Values);
+    IReadOnlyDictionary<string, string> Values,
+    string? FailedClauseBlock = null,
+    string? BoundaryHint = null);
 
 /// <summary>
 /// Query evaluation result for a single analyzed method.
