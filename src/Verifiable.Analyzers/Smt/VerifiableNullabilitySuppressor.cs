@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
+using Verifiable.Core;
 
 namespace Verifiable.Analyzers.Smt;
 
@@ -126,7 +127,7 @@ public sealed class VerifiableNullabilitySuppressor : DiagnosticSuppressor
             {
                 var script = VerifiableSmtAnalyzer.BuildQueryScript(ob);
                 var z3Res = Z3SolverRunner.Execute(script, msbuildZ3Path, loc.SourceTree.FilePath);
-                if (z3Res.Status != SmtStatus.Unsat)
+                if (ProofKernel.Decide(z3Res.Status) != ObligationVerdict.Proved)
                 {
                     allProvedNonNull = false;
                     break;

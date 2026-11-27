@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The trusted kernel of Verifiable.NET.
+
+    Everything in this project decides whether a proof passes or fails. It has no Roslyn,
+    no file system, no process and no network access, and it is compiled with Verifiable's own
+    analyzers and Z3 attached, under [assembly: Verifiable]. A successful build of this project
+    is therefore a machine-checked proof of every Spec.* contract written here.
+
+    Verifiable.Analyzers compiles the same kernel sources (excluding Proofs/) into its own DLL, so
+    the code that ships is the code that was proved.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Kernel sources have no using directives of their own so Verifiable.Analyzers can compile them
+         against a stripped-down spec shim; here they bind to the real contracts. -->
+    <Using Include="Verifiable.Contracts" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Verifiable.Core.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Verifiable.Contracts\Verifiable.Contracts.csproj" />
+    <ProjectReference Include="..\Verifiable.Generators\Verifiable.Generators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+    <ProjectReference Include="..\Verifiable.Analyzers\Verifiable.Analyzers.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
+  </ItemGroup>
+
+</Project>

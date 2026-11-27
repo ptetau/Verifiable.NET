@@ -209,6 +209,8 @@ Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xu
 | `Verifiable.Testing` | Deterministic state-machine drivers and fault-injected persistence test helpers. |
 | `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`) for asking ad-hoc `ask`, `check-invariant`, and `list` verification queries with Z3 unsat-core explanations. |
 
+Inside these packages, the code that decides whether a proof passes is kept in one small, separate kernel (`src/Verifiable.Core`) that Verifiable.NET proves with its own Z3 checks on every build. See [The Trusted Core](docs/trusted-core.md) for what is proved and what is still trusted.
+
 ---
 
 ## Working Sample Applications
