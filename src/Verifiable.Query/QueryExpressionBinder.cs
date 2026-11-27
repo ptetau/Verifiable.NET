@@ -6,6 +6,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
+using Verifiable.Analyzers;
 
 namespace Verifiable.Query;
 
@@ -177,12 +178,17 @@ internal static class QueryExpressionBinder
 
         if (probeErrors.Count > 0)
         {
+            var probeSemModel = withProbe.GetSemanticModel(probeTree);
+            var suggestion = BuildElmBindSuggestion(probeErrors, probeSemModel, probeTree, targetMethod, assertParamName);
             var diagMsg = string.Join(" ", probeErrors.Select(e => e.GetMessage()));
             var available = DescribeAvailableIdentifiers(targetMethod, assertParamName);
+            var fixHint = suggestion is not null
+                ? $"{suggestion}\nAvailable variables in scope: {available}"
+                : $"Available variables in scope: {available}";
             return new QueryBindOutcome(
                 null,
                 $"Could not compile query expression against `{targetMethod.ContainingType?.Name}.{targetMethod.Name}`: {diagMsg}",
-                $"Available variables in scope: {available}");
+                fixHint);
         }
 
         var probeModel = withProbe.GetSemanticModel(probeTree);
@@ -280,6 +286,95 @@ internal static class QueryExpressionBinder
             }
         }
         return result;
+    }
+
+    private static string? BuildElmBindSuggestion(
+        IReadOnlyList<Diagnostic> probeErrors,
+        SemanticModel probeModel,
+        SyntaxTree probeTree,
+        IMethodSymbol targetMethod,
+        string resultParamName)
+    {
+        var root = probeTree.GetRoot();
+        foreach (var err in probeErrors)
+        {
+            var node = root.FindNode(err.Location.SourceSpan, getInnermostNodeForTie: true);
+
+            // Detect '=' assignment inside a boolean claim instead of '=='
+            if (node.FirstAncestorOrSelf<AssignmentExpressionSyntax>() is { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } assign)
+            {
+                return $"It looks like `=` (assignment) was used in `{assign}` instead of `==` (equality comparison).";
+            }
+
+            // CS1061: 'Type' does not contain a definition for 'Member'
+            if (err.Id == "CS1061")
+            {
+                var memberAccess = node.FirstAncestorOrSelf<MemberAccessExpressionSyntax>();
+                if (memberAccess is not null)
+                {
+                    var badMember = memberAccess.Name.Identifier.ValueText;
+                    var recvType = probeModel.GetTypeInfo(memberAccess.Expression).Type;
+                    if (recvType is not null)
+                    {
+                        var candidates = CollectAccessibleMembers(recvType);
+                        var ranked = ElmSuggest.Rank(badMember, candidates, maxResults: 3);
+                        var didYouMean = ElmSuggest.FormatDidYouMean(ranked);
+                        if (didYouMean is not null)
+                        {
+                            var typeName = recvType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+                            return $"I couldn't find `{badMember}` on `{typeName}`. {didYouMean}";
+                        }
+                    }
+                }
+            }
+
+            // CS0103: The name 'foo' does not exist in the current context
+            if (err.Id == "CS0103" && node is IdentifierNameSyntax ident)
+            {
+                var badIdent = ident.Identifier.ValueText;
+                var candidates = new List<string> { resultParamName };
+                foreach (var p in targetMethod.Parameters)
+                {
+                    candidates.Add(p.Name);
+                }
+                if (!targetMethod.IsStatic && targetMethod.ContainingType is { } ct)
+                {
+                    candidates.AddRange(CollectAccessibleMembers(ct));
+                }
+
+                var ranked = ElmSuggest.Rank(badIdent, candidates, maxResults: 3);
+                var didYouMean = ElmSuggest.FormatDidYouMean(ranked);
+                if (didYouMean is not null)
+                {
+                    return $"I couldn't find `{badIdent}` in scope. {didYouMean}";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> CollectAccessibleMembers(ITypeSymbol type)
+    {
+        for (var cur = type; cur is not null; cur = cur.BaseType)
+        {
+            foreach (var m in cur.GetMembers())
+            {
+                if (m.IsImplicitlyDeclared || m.DeclaredAccessibility != Accessibility.Public) continue;
+                if (m is IPropertySymbol { IsIndexer: false } prop && prop.Name != "EqualityContract")
+                {
+                    yield return prop.Name;
+                }
+                else if (m is IFieldSymbol field)
+                {
+                    yield return field.Name;
+                }
+                else if (m is IMethodSymbol { MethodKind: MethodKind.Ordinary } method)
+                {
+                    yield return method.Name;
+                }
+            }
+        }
     }
 
     private static string DescribeAvailableIdentifiers(IMethodSymbol targetMethod, string resultParamName)

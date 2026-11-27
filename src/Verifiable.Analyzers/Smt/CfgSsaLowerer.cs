@@ -4,6 +4,7 @@ using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -11,6 +12,15 @@ using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
 
 namespace Verifiable.Analyzers.Smt;
+
+internal sealed record GoalClauseInfo(
+    string ClauseText,
+    string ClauseSmtTerm,
+    string? Operator = null,
+    string? LeftText = null,
+    string? LeftSmtTerm = null,
+    string? RightText = null,
+    string? RightSmtTerm = null);
 
 internal sealed record ProofObligation(
     string Kind,
@@ -20,7 +30,11 @@ internal sealed record ProofObligation(
     string GoalTerm,
     string ScriptPreamble,
     IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters,
-    string? Reason = null);
+    string? Reason = null,
+    Location? ContractLocation = null,
+    string? ContractLocationLabel = null,
+    string? ResultSmtTerm = null,
+    IReadOnlyList<GoalClauseInfo>? GoalClauses = null);
 
 internal sealed record NamedPremise(
     string Id,
@@ -42,7 +56,8 @@ internal sealed record QueryObligation(
     string ResultSmtName,
     string ScriptPreamble,
     IReadOnlyList<(string ParamName, string SmtName)> TrackedParameters,
-    IReadOnlyList<NamedPremise> Premises);
+    IReadOnlyList<NamedPremise> Premises,
+    IReadOnlyList<GoalClauseInfo>? GoalClauses = null);
 
 internal sealed record QueryLoweringOutcome(
     IReadOnlyList<QueryObligation> Obligations,
@@ -960,6 +975,7 @@ internal sealed partial class CfgSsaLowerer
 
             var goalGamma = resultAssumption is null ? gamma : CombineAnd(gamma, resultAssumption.SmtFormula);
             var goal = LowerExpression(_queryAssertOp!, goalGamma, queryEnv, emitObligations: false);
+            var queryClauses = ExtractGoalClauses(_queryAssertOp!, goalGamma, queryEnv);
             var tracked = _trackedParams.ToList();
             tracked.Add(("result", boundRet.Term));
             var conjuncts = FlattenConjuncts(gamma);
@@ -977,7 +993,8 @@ internal sealed partial class CfgSsaLowerer
                 boundRet.Term,
                 preamble,
                 tracked,
-                _premises.ToList()));
+                _premises.ToList(),
+                queryClauses));
         }
         catch (ContractLoweringException ex)
         {
@@ -1007,7 +1024,18 @@ internal sealed partial class CfgSsaLowerer
                 ensEnv.SpecResult = retTerm;
 
                 var goal = LowerExpression(ens.BodyExpr, gamma, ensEnv, emitObligations: false);
-                AddObligation("Postcondition", ens.DisplayText, retLoc, gamma, goal.Term, ens.Because);
+                var clauses = ExtractGoalClauses(ens.BodyExpr, gamma, ensEnv);
+                AddObligation(
+                    "Postcondition",
+                    ens.DisplayText,
+                    retLoc,
+                    gamma,
+                    goal.Term,
+                    ens.Because,
+                    contractLocation: ens.Location,
+                    contractLocationLabel: "The postcondition that failed is declared here:",
+                    resultSmtTerm: retTerm.Term,
+                    goalClauses: clauses);
             }
             catch (ContractLoweringException ex)
             {
@@ -1047,7 +1075,18 @@ internal sealed partial class CfgSsaLowerer
                 var valEnv = new BlockEnv();
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var goal = LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false);
-                AddObligation("TypeInvariant", $"{value.Type.Name}.IsValid", loc, gamma, goal.Term, typeDescription);
+                var clauses = ExtractGoalClauses(isValidBody!, gamma, valEnv);
+                AddObligation(
+                    "TypeInvariant",
+                    $"{value.Type.Name}.IsValid",
+                    loc,
+                    gamma,
+                    goal.Term,
+                    typeDescription,
+                    contractLocation: isValidMethod!.Locations.FirstOrDefault(l => l.IsInSource),
+                    contractLocationLabel: $"The `{value.Type.Name}.IsValid` predicate is declared here:",
+                    resultSmtTerm: unwrapped.Term,
+                    goalClauses: clauses);
             }
             catch (ContractLoweringException ex)
             {
@@ -1070,7 +1109,18 @@ internal sealed partial class CfgSsaLowerer
                 var invDescription = SmtTypeSystem.GetInvariantDescription(invMember);
                 var invEnv = new BlockEnv { ThisOverride = value };
                 var goal = LowerExpression(invBody!, gamma, invEnv, emitObligations: false);
-                AddObligation("TypeInvariant", $"[Invariant] {value.Type.Name}.{invMember.Name}", loc, gamma, goal.Term, invDescription);
+                var clauses = ExtractGoalClauses(invBody!, gamma, invEnv);
+                AddObligation(
+                    "TypeInvariant",
+                    $"[Invariant] {value.Type.Name}.{invMember.Name}",
+                    loc,
+                    gamma,
+                    goal.Term,
+                    invDescription,
+                    contractLocation: invMember.Locations.FirstOrDefault(l => l.IsInSource),
+                    contractLocationLabel: $"The `[Invariant]` member `{value.Type.Name}.{invMember.Name}` is declared here:",
+                    resultSmtTerm: value.Term,
+                    goalClauses: clauses);
             }
             catch (ContractLoweringException ex)
             {
@@ -2582,7 +2632,17 @@ internal sealed partial class CfgSsaLowerer
             try
             {
                 var reqTerm = LowerExpression(req.Condition, gamma, calleeEnv, emitObligations: false);
-                AddObligation("Precondition", $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}", callLoc, gamma, reqTerm.Term, req.Because);
+                var clauses = ExtractGoalClauses(req.Condition, gamma, calleeEnv);
+                AddObligation(
+                    "Precondition",
+                    $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}",
+                    callLoc,
+                    gamma,
+                    reqTerm.Term,
+                    req.Because,
+                    contractLocation: req.Location,
+                    contractLocationLabel: $"The callee precondition on `{callee.ContainingType?.Name}.{callee.Name}` is declared here:",
+                    goalClauses: clauses);
             }
             catch (ContractLoweringException ex)
             {
@@ -3443,10 +3503,148 @@ internal sealed partial class CfgSsaLowerer
         }
     }
 
-    private void AddObligation(string kind, string description, Location location, string gamma, string goalTerm, string? reason = null)
+    private void AddObligation(
+        string kind,
+        string description,
+        Location location,
+        string gamma,
+        string goalTerm,
+        string? reason = null,
+        Location? contractLocation = null,
+        string? contractLocationLabel = null,
+        string? resultSmtTerm = null,
+        IReadOnlyList<GoalClauseInfo>? goalClauses = null)
     {
         var preamble = string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions));
-        _obligations.Add(new ProofObligation(kind, description, location, gamma, goalTerm, preamble, _trackedParams.ToList(), reason));
+        _obligations.Add(new ProofObligation(
+            kind,
+            description,
+            location,
+            gamma,
+            goalTerm,
+            preamble,
+            _trackedParams.ToList(),
+            reason,
+            contractLocation,
+            contractLocationLabel,
+            resultSmtTerm,
+            goalClauses));
+    }
+
+    private IReadOnlyList<GoalClauseInfo>? ExtractGoalClauses(IOperation expr, string gamma, BlockEnv env)
+    {
+        var conjuncts = new List<IOperation>();
+        CollectBooleanConjuncts(expr, conjuncts, maxClauses: 8);
+        if (conjuncts.Count == 0)
+        {
+            return null;
+        }
+
+        var result = new List<GoalClauseInfo>(conjuncts.Count);
+        foreach (var conj in conjuncts)
+        {
+            try
+            {
+                var clauseTerm = LowerExpression(conj, gamma, env, emitObligations: false);
+                var clauseText = NormalizeWhitespace(conj.Syntax.ToString());
+                string? opStr = null;
+                string? leftText = null;
+                string? leftTerm = null;
+                string? rightText = null;
+                string? rightTerm = null;
+
+                var unwrapped = UnwrapParens(conj);
+                if (unwrapped is IBinaryOperation bin && TryGetComparisonOperator(bin.OperatorKind, out var op))
+                {
+                    opStr = op;
+                    leftText = NormalizeWhitespace(bin.LeftOperand.Syntax.ToString());
+                    rightText = NormalizeWhitespace(bin.RightOperand.Syntax.ToString());
+                    try
+                    {
+                        var l = LowerExpression(bin.LeftOperand, gamma, env, emitObligations: false);
+                        var r = LowerExpression(bin.RightOperand, gamma, env, emitObligations: false);
+                        leftTerm = l.Term;
+                        rightTerm = r.Term;
+                    }
+                    catch
+                    {
+                        // Side-value evaluation is best-effort; keep the clause term itself.
+                    }
+                }
+
+                result.Add(new GoalClauseInfo(clauseText, clauseTerm.Term, opStr, leftText, leftTerm, rightText, rightTerm));
+            }
+            catch
+            {
+                // Best-effort clause extraction; never fail lowering because of diagnostic enrichment.
+            }
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    private static void CollectBooleanConjuncts(IOperation op, List<IOperation> output, int maxClauses)
+    {
+        if (output.Count >= maxClauses) return;
+        op = UnwrapParens(op);
+
+        if (op is IBinaryOperation bin &&
+            bin.OperatorKind is BinaryOperatorKind.ConditionalAnd or BinaryOperatorKind.And &&
+            bin.Type?.SpecialType == SpecialType.System_Boolean)
+        {
+            CollectBooleanConjuncts(bin.LeftOperand, output, maxClauses);
+            CollectBooleanConjuncts(bin.RightOperand, output, maxClauses);
+            return;
+        }
+
+        output.Add(op);
+    }
+
+    private static IOperation UnwrapParens(IOperation op)
+    {
+        while (op is IParenthesizedOperation paren)
+        {
+            op = paren.Operand;
+        }
+        return op;
+    }
+
+    private static bool TryGetComparisonOperator(BinaryOperatorKind kind, out string op)
+    {
+        op = kind switch
+        {
+            BinaryOperatorKind.Equals => "==",
+            BinaryOperatorKind.NotEquals => "!=",
+            BinaryOperatorKind.LessThan => "<",
+            BinaryOperatorKind.LessThanOrEqual => "<=",
+            BinaryOperatorKind.GreaterThan => ">",
+            BinaryOperatorKind.GreaterThanOrEqual => ">=",
+            _ => string.Empty
+        };
+        return op.Length > 0;
+    }
+
+    private static string NormalizeWhitespace(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        var prevSpace = false;
+        foreach (var ch in text.Trim())
+        {
+            if (char.IsWhiteSpace(ch))
+            {
+                if (!prevSpace)
+                {
+                    sb.Append(' ');
+                    prevSpace = true;
+                }
+            }
+            else
+            {
+                sb.Append(ch);
+                prevSpace = false;
+            }
+        }
+        return sb.ToString();
     }
 
     private static string? ExtractConstantStringArg(IOperation argOp)

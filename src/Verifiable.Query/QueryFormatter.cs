@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Verifiable.Analyzers;
 
 namespace Verifiable.Query;
 
@@ -222,6 +223,11 @@ internal static class QueryFormatter
                     csb.Append(string.Join(Environment.NewLine, items));
                 }
                 extra.Add(csb.ToString());
+
+                if (!string.IsNullOrWhiteSpace(ce.FailedClauseBlock))
+                {
+                    extra.Add(ce.FailedClauseBlock!);
+                }
             }
 
             return FormatElmBlock("QUERY REFUTED", ceLoc, intro, extra, res.Hint);
@@ -258,44 +264,18 @@ internal static class QueryFormatter
     {
         var sb = new StringBuilder();
         var fileLabel = string.Empty;
-        string? sourceExcerpt = null;
-
         if (location != Location.None && location.IsInSource)
         {
             var span = location.GetMappedLineSpan();
             var path = span.Path ?? location.SourceTree?.FilePath ?? string.Empty;
             fileLabel = string.IsNullOrEmpty(path) ? string.Empty : System.IO.Path.GetFileName(path);
-
-            var text = location.SourceTree?.GetText();
-            if (text is not null)
-            {
-                var startLine = span.StartLinePosition.Line;
-                if (startLine >= 0 && startLine < text.Lines.Count)
-                {
-                    var lineText = text.Lines[startLine].ToString();
-                    var lineNumber = (startLine + 1).ToString();
-                    var gutter = new string(' ', lineNumber.Length);
-
-                    var startCol = Math.Max(0, Math.Min(span.StartLinePosition.Character, lineText.Length));
-                    var endCol = span.EndLinePosition.Line == startLine
-                        ? Math.Max(startCol + 1, Math.Min(span.EndLinePosition.Character, lineText.Length))
-                        : Math.Max(startCol + 1, lineText.Length);
-                    var caretLen = Math.Max(1, endCol - startCol);
-
-                    var indent = new StringBuilder(startCol);
-                    for (var i = 0; i < startCol; i++)
-                    {
-                        indent.Append(lineText[i] == '\t' ? '\t' : ' ');
-                    }
-
-                    sourceExcerpt = $"{gutter} |\n{lineNumber} | {lineText}\n{gutter} | {indent}{new string('^', caretLen)}";
-                }
-            }
         }
+
+        var sourceExcerpt = ElmDiagnosticFormatter.RenderExcerpt(location);
 
         sb.AppendLine(BuildBanner(title, fileLabel));
         sb.AppendLine();
-        sb.Append(intro.Trim());
+        sb.Append(ElmDiagnosticFormatter.Reflow(intro.Trim()));
 
         if (sourceExcerpt is not null)
         {
@@ -320,9 +300,10 @@ internal static class QueryFormatter
             sb.AppendLine();
             sb.AppendLine();
             var trimmed = fixHint!.Trim();
-            sb.Append(trimmed.StartsWith("Fix:", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("Warning:", StringComparison.OrdinalIgnoreCase)
+            var prefixed = trimmed.StartsWith("Fix:", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("Warning:", StringComparison.OrdinalIgnoreCase)
                 ? trimmed
-                : $"Fix: {trimmed}");
+                : $"Fix: {trimmed}";
+            sb.Append(ElmDiagnosticFormatter.Reflow(prefixed));
         }
 
         return sb.ToString();

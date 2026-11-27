@@ -464,4 +464,153 @@ public sealed class QueryTests
         ], source);
         Assert.True(badCode == 1, badOut + badErr);
     }
+
+    [Fact]
+    public void ElmTypoSuggestions_RankTargetTypeMemberAndAssignmentMistakes()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+
+            namespace TypoCatalog;
+
+            [Verifiable]
+            public readonly record struct AccountState(decimal Balance, int Version);
+
+            [Verifiable]
+            public static class AccountOps
+            {
+                public static AccountState ResetBalance(AccountState state) =>
+                    state with { Balance = 0m, Version = state.Version + 1 };
+            }
+            """;
+
+        // 1. Misspelled --target
+        var badTarget = RunCli([
+            "ask", "--stdin",
+            "--target", "AccountOps.ResetBalnce",
+            "--assert", "result.Balance == 0m"
+        ], source);
+        Assert.Equal(3, badTarget.ExitCode);
+        Assert.Contains("Did you mean `AccountOps.ResetBalance`?", badTarget.Stderr);
+
+        // 2. Misspelled --type in check-invariant
+        var badType = RunCli([
+            "check-invariant", "--stdin",
+            "--type", "AccountStat",
+            "--expr", "a => a.Balance >= 0m"
+        ], source);
+        Assert.Equal(3, badType.ExitCode);
+        Assert.Contains("Did you mean `AccountState`?", badType.Stderr);
+
+        // 3. Misspelled member in --assert
+        var badMember = RunCli([
+            "ask", "--stdin",
+            "--target", "AccountOps.ResetBalance",
+            "--assert", "result.Balnce == 0m"
+        ], source);
+        Assert.Equal(3, badMember.ExitCode);
+        Assert.Contains("I couldn't find `Balnce` on `AccountState`", badMember.Stderr);
+        Assert.Contains("Did you mean `Balance`?", badMember.Stderr);
+
+        // 4. Assignment '=' instead of '=='
+        var badAssign = RunCli([
+            "ask", "--stdin",
+            "--target", "AccountOps.ResetBalance",
+            "--assert", "result.Balance = 0m"
+        ], source);
+        Assert.Equal(3, badAssign.ExitCode);
+        Assert.Contains("instead of `==`", badAssign.Stderr);
+    }
+
+    [Fact]
+    public void RefutedCompoundQuery_PinpointsFailingClauseWithLeftAndRightValues()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+
+            namespace ClauseCatalog;
+
+            [Verifiable]
+            public readonly record struct PairState(int First, int Second);
+
+            [Verifiable]
+            public static class PairOps
+            {
+                public static PairState BumpFirstOnly(PairState p) =>
+                    p with { First = p.First + 1 };
+            }
+            """;
+
+        var (code, stdout, stderr) = RunCli([
+            "ask", "--stdin",
+            "--target", "PairOps.BumpFirstOnly",
+            "--assert", "result.First == p.First + 1 && result.Second == p.Second + 1"
+        ], source);
+
+        Assert.Equal(1, code);
+        Assert.True(string.IsNullOrWhiteSpace(stderr), $"Unexpected stderr: {stderr}");
+        Assert.Contains("-- QUERY REFUTED", stdout);
+        Assert.Contains("Failed clause (2 of 2):", stdout);
+        Assert.Contains("result.Second == p.Second + 1", stdout);
+        Assert.Contains("Left  (result.Second):", stdout);
+        Assert.Contains("Right (p.Second + 1):", stdout);
+    }
+
+    [Fact]
+    public void ElmCSharpDiagnosticRewriter_ImprovesRoslynErrorsWithoutCustomCompiler()
+    {
+        // 1. Generic type argument diff (Result<int, int> vs Result<int, string>)
+        const string genericMismatch = """
+            using Verifiable.Contracts;
+            [Verifiable]
+            public static class GenericDemo
+            {
+                public static Result<int, string> Bad() => Result<int, int>.Ok(1);
+            }
+            """;
+
+        var genRes = RunCli(["list", "--stdin"], genericMismatch);
+        Assert.Equal(3, genRes.ExitCode);
+        Assert.Contains("-- TYPE MISMATCH", genRes.Stderr);
+        Assert.Contains("2nd type argument", genRes.Stderr);
+        Assert.Contains("Actual:   `int`", genRes.Stderr);
+        Assert.Contains("Expected: `string`", genRes.Stderr);
+
+        // 2. Classic C# double-vs-decimal literal hint (C#'s version of Elm's IntFloat)
+        const string decimalMismatch = """
+            using Verifiable.Contracts;
+            [Verifiable]
+            public static class MoneyDemo
+            {
+                public static decimal Tax() => 0.15;
+            }
+            """;
+
+        var decRes = RunCli(["list", "--stdin"], decimalMismatch);
+        Assert.Equal(3, decRes.ExitCode);
+        Assert.Contains("-- TYPE MISMATCH", decRes.Stderr);
+        Assert.Contains("0.15m", decRes.Stderr);
+
+        // 3. C# member typo suggestion via Roslyn SemanticModel + ElmSuggest
+        const string memberTypo = """
+            using Verifiable.Contracts;
+            [Verifiable]
+            public readonly record struct Wallet(decimal Balance);
+            [Verifiable]
+            public static class WalletOps
+            {
+                public static decimal Read(Wallet w) => w.Balnce;
+            }
+            """;
+
+        var memRes = RunCli(["list", "--stdin"], memberTypo);
+        Assert.Equal(3, memRes.ExitCode);
+        Assert.Contains("-- MISSING MEMBER", memRes.Stderr);
+        Assert.Contains("Did you mean `Balance`?", memRes.Stderr);
+
+        // 4. Unknown CLI subcommand typo suggestion
+        var cmdRes = RunCli(["check-invarint"]);
+        Assert.Equal(3, cmdRes.ExitCode);
+        Assert.Contains("Did you mean `check-invariant`?", cmdRes.Stderr);
+    }
 }

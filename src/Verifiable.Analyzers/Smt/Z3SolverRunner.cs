@@ -124,11 +124,14 @@ internal static class Z3SolverRunner
         return sb.ToString();
     }
 
+    private const string EvalSentinel = "__VERIFIABLE_EVAL_DONE__";
+
     public static SmtQueryResult Execute(
         string smtScriptBody,
         string? msbuildZ3Path = null,
         string? sourceFilePath = null,
-        int timeoutMs = DefaultTimeoutMs)
+        int timeoutMs = DefaultTimeoutMs,
+        IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs = null)
     {
         var z3Path = DiscoverZ3Path(msbuildZ3Path, sourceFilePath);
         if (z3Path is null)
@@ -136,7 +139,8 @@ internal static class Z3SolverRunner
             return new SmtQueryResult(SmtStatus.SolverUnavailable, string.Empty, new Dictionary<string, string>(), "Z3 binary not found.");
         }
 
-        var hash = ComputeSha256(z3Path + "\n" + timeoutMs + "\n" + smtScriptBody);
+        var hashInput = BuildHashInput(z3Path, string.Empty, timeoutMs, smtScriptBody, satEvalExprs);
+        var hash = ComputeSha256(hashInput);
         if (MemoryCache.TryGetValue(hash, out var cached))
         {
             return cached;
@@ -149,7 +153,7 @@ internal static class Z3SolverRunner
         }
 
         var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
-        var result = pool.RunQuery(smtScriptBody, hash, timeoutMs);
+        var result = pool.RunQuery(smtScriptBody, hash, timeoutMs, satEvalExprs);
 
         if (result.Status is SmtStatus.Unsat or SmtStatus.Sat)
         {
@@ -164,7 +168,8 @@ internal static class Z3SolverRunner
         string smtScriptBody,
         string? msbuildZ3Path = null,
         string? sourceFilePath = null,
-        int timeoutMs = 5000)
+        int timeoutMs = 5000,
+        IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs = null)
     {
         var z3Path = DiscoverZ3Path(msbuildZ3Path, sourceFilePath);
         if (z3Path is null)
@@ -177,14 +182,15 @@ internal static class Z3SolverRunner
                 "Z3 binary not found.");
         }
 
-        var hash = ComputeSha256(z3Path + "\nCORE\n" + timeoutMs + "\n" + smtScriptBody);
+        var hashInput = BuildHashInput(z3Path, "CORE", timeoutMs, smtScriptBody, satEvalExprs);
+        var hash = ComputeSha256(hashInput);
         if (DetailedMemoryCache.TryGetValue(hash, out var cached))
         {
             return cached;
         }
 
         var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
-        var result = pool.RunDetailedQuery(smtScriptBody, hash, timeoutMs, produceUnsatCore: true);
+        var result = pool.RunDetailedQuery(smtScriptBody, hash, timeoutMs, produceUnsatCore: true, satEvalExprs);
 
         if (result.Status is SmtStatus.Unsat or SmtStatus.Sat)
         {
@@ -192,6 +198,28 @@ internal static class Z3SolverRunner
         }
 
         return result;
+    }
+
+    private static string BuildHashInput(
+        string z3Path,
+        string mode,
+        int timeoutMs,
+        string smtScriptBody,
+        IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs)
+    {
+        var sb = new StringBuilder(smtScriptBody.Length + 128);
+        sb.Append(z3Path).Append('\n');
+        if (!string.IsNullOrEmpty(mode)) sb.Append(mode).Append('\n');
+        sb.Append(timeoutMs).Append('\n').Append(smtScriptBody);
+        if (satEvalExprs is { Count: > 0 })
+        {
+            sb.Append("\nEVALS:");
+            foreach (var (k, e) in satEvalExprs)
+            {
+                sb.Append('\n').Append(k).Append('=').Append(e);
+            }
+        }
+        return sb.ToString();
     }
 
     private static string GetDiskCacheDirectory() =>
@@ -461,13 +489,22 @@ internal static class Z3SolverRunner
             _semaphore = new SemaphoreSlim(maxWorkers, maxWorkers);
         }
 
-        public SmtQueryResult RunQuery(string scriptBody, string hash, int timeoutMs)
+        public SmtQueryResult RunQuery(
+            string scriptBody,
+            string hash,
+            int timeoutMs,
+            IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs = null)
         {
-            var detailed = RunDetailedQuery(scriptBody, hash, timeoutMs, produceUnsatCore: false);
+            var detailed = RunDetailedQuery(scriptBody, hash, timeoutMs, produceUnsatCore: false, satEvalExprs);
             return new SmtQueryResult(detailed.Status, detailed.QueryHash, detailed.Model, detailed.ErrorMessage);
         }
 
-        public SmtDetailedResult RunDetailedQuery(string scriptBody, string hash, int timeoutMs, bool produceUnsatCore)
+        public SmtDetailedResult RunDetailedQuery(
+            string scriptBody,
+            string hash,
+            int timeoutMs,
+            bool produceUnsatCore,
+            IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs = null)
         {
             _semaphore.Wait();
             Z3Worker? worker = null;
@@ -480,7 +517,7 @@ internal static class Z3SolverRunner
                     worker = Z3Worker.Start(_z3Path);
                 }
 
-                return worker.ExecuteDetailed(scriptBody, hash, timeoutMs, produceUnsatCore, out recycle);
+                return worker.ExecuteDetailed(scriptBody, hash, timeoutMs, produceUnsatCore, satEvalExprs, out recycle);
             }
             catch (Exception ex)
             {
@@ -568,7 +605,13 @@ internal static class Z3SolverRunner
             }
         }
 
-        public SmtDetailedResult ExecuteDetailed(string scriptBody, string hash, int timeoutMs, bool produceUnsatCore, out bool shouldRecycle)
+        public SmtDetailedResult ExecuteDetailed(
+            string scriptBody,
+            string hash,
+            int timeoutMs,
+            bool produceUnsatCore,
+            IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs,
+            out bool shouldRecycle)
         {
             shouldRecycle = false;
 
@@ -638,7 +681,60 @@ internal static class Z3SolverRunner
             }
 
             var model = ParseModel(modelOutput);
+
+            if (satEvalExprs is { Count: > 0 })
+            {
+                var exprList = new StringBuilder();
+                exprList.Append("(get-value (");
+                for (var i = 0; i < satEvalExprs.Count; i++)
+                {
+                    if (i > 0) exprList.Append(' ');
+                    exprList.Append(satEvalExprs[i].SmtExpr);
+                }
+                exprList.Append("))");
+
+                _stdin.WriteLine(exprList.ToString());
+                _stdin.WriteLine($"(echo \"{EvalSentinel}\")");
+                _stdin.Flush();
+
+                var evalOutput = ReadUntilSentinel(EvalSentinel, hardWaitMs, out var evalTimedOut);
+                if (evalTimedOut)
+                {
+                    shouldRecycle = true;
+                }
+                else
+                {
+                    MergeEvaluatedValues(evalOutput, satEvalExprs, model);
+                }
+            }
+
             return new SmtDetailedResult(SmtStatus.Sat, hash, model, Array.Empty<string>(), null);
+        }
+
+        private static void MergeEvaluatedValues(
+            string evalOutput,
+            IReadOnlyList<(string Key, string SmtExpr)> satEvalExprs,
+            Dictionary<string, string> model)
+        {
+            if (string.IsNullOrWhiteSpace(evalOutput)) return;
+            var openIdx = evalOutput.IndexOf('(');
+            if (openIdx < 0) return;
+
+            var form = ReadBalancedForm(evalOutput, openIdx, out _);
+            if (form is null || form.StartsWith("(error", StringComparison.Ordinal)) return;
+
+            var pairs = TokenizeTopLevelChildren(form);
+            var count = Math.Min(pairs.Count, satEvalExprs.Count);
+            for (var i = 0; i < count; i++)
+            {
+                var pairForm = pairs[i];
+                if (!pairForm.StartsWith("(", StringComparison.Ordinal)) continue;
+                var items = TokenizeTopLevelChildren(pairForm);
+                if (items.Count >= 2)
+                {
+                    model[satEvalExprs[i].Key] = FormatSmtValue(items[1]);
+                }
+            }
         }
 
         private static IReadOnlyList<string> ParseUnsatCore(string coreOutput)

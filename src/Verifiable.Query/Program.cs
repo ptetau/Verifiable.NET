@@ -84,11 +84,16 @@ public static class Program
         var command = args[0].ToLowerInvariant();
         if (command is not ("ask" or "check-invariant" or "list"))
         {
+            var rankedCmd = Verifiable.Analyzers.ElmSuggest.Rank(command, ["ask", "check-invariant", "list"], maxResults: 2);
+            var didYouMean = Verifiable.Analyzers.ElmSuggest.FormatDidYouMean(rankedCmd);
+            var cmdFix = didYouMean is not null
+                ? $"{didYouMean} Supported subcommands are `ask`, `check-invariant`, and `list`."
+                : "Use `ask`, `check-invariant`, or `list` (run `verifiable-query --help`).";
             var errReport = new QueryReport(
                 command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
                 Array.Empty<MethodQueryResult>(), "UNKNOWN COMMAND",
                 $"Unknown subcommand `{args[0]}`.", Location.None,
-                "Use `ask`, `check-invariant`, or `list` (run `verifiable-query --help`).");
+                cmdFix);
             stderr.WriteLine(QueryFormatter.FormatReport(errReport, "elm", agentMode, false));
             return ResolveExitCode(QueryOutcomeStatus.Error);
         }
@@ -164,13 +169,11 @@ public static class Program
 
         if (loadResult.CompilationErrors.Count > 0)
         {
-            var first = loadResult.CompilationErrors[0];
-            var msg = string.Join(Environment.NewLine, loadResult.CompilationErrors.Take(5).Select(e => e.ToString()));
+            var rewritten = ElmCSharpDiagnosticRewriter.Rewrite(loadResult.Compilation, loadResult.CompilationErrors);
             var cErr = new QueryReport(
                 command, assertExpr ?? string.Empty, assumeExpr, because, typeName ?? target,
                 QueryOutcomeStatus.Error, Array.Empty<MethodQueryResult>(),
-                "SOURCE COMPILATION ERROR", msg, first.Location,
-                "Fix the C# compiler errors in the target sources before running queries.");
+                rewritten.Title, rewritten.Message, rewritten.Location, rewritten.FixHint);
             WriteOutput(command, cErr, format, agentMode, verbose, stdout, stderr);
             return ResolveExitCode(QueryOutcomeStatus.Error);
         }

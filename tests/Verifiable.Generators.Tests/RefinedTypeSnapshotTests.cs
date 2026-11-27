@@ -270,5 +270,47 @@ public class RefinedTypeSnapshotTests
         Assert.Contains("|", msg);
         Assert.Contains("^", msg);
         Assert.Contains("Fix:", msg);
+        Assert.Contains("`readonly`", msg);
+        Assert.Contains("`partial`", msg);
+    }
+
+    [Fact]
+    public void TypeAlias_IsValidTypoAndSignatureMismatch_ProduceElmSuggestions()
+    {
+        const string typoCode = """
+            using Verifiable.Contracts;
+
+            namespace BrokenDomain;
+
+            [TypeAlias<int>]
+            public readonly partial record struct OrderId
+            {
+                public static bool IsVald(int value) => value >= 1;
+            }
+            """;
+
+        var (_, typoDiags, _) = RunGenerators(typoCode);
+        var typoDiag = Assert.Single(typoDiags.Where(d => d.Id == "VER202"));
+        Assert.Contains("`IsVald`", typoDiag.GetMessage());
+        Assert.Contains("Did you mean `IsValid`?", typoDiag.GetMessage());
+
+        const string wrongParamCode = """
+            using Verifiable.Contracts;
+
+            namespace BrokenDomain;
+
+            [TypeAlias<int>]
+            public readonly partial record struct AccountId
+            {
+                private bool IsValid(long value) => value >= 1;
+            }
+            """;
+
+        var (_, sigDiags, _) = RunGenerators(wrongParamCode);
+        var sigDiag = Assert.Single(sigDiags.Where(d => d.Id == "VER202"));
+        var sigMsg = sigDiag.GetMessage();
+        Assert.Contains("not `static`", sigMsg);
+        Assert.Contains("not `public`", sigMsg);
+        Assert.Contains("takes `long` instead of `int`", sigMsg);
     }
 }
