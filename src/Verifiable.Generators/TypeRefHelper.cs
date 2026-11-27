@@ -16,6 +16,12 @@ internal static class TypeRefHelper
     public const string InvariantAttributeMetadataName = "Verifiable.Contracts.InvariantAttribute";
     public const string InboundPortAttributeMetadataName = "Verifiable.Contracts.InboundPortAttribute";
     public const string GhostAttributeMetadataName = "Verifiable.Contracts.GhostAttribute";
+    public const string VerifiableAttributeMetadataName = "Verifiable.Contracts.VerifiableAttribute";
+    public const string UnverifiableAttributeMetadataName = "Verifiable.Contracts.UnverifiableAttribute";
+    public const string PureAxiomAttributeMetadataName = "Verifiable.Contracts.PureAxiomAttribute";
+    public const string MapToAttributeMetadataName = "Verifiable.Contracts.MapToAttribute";
+    public const string ContractMetadataAttributeMetadataName = "Verifiable.Contracts.VerifiableContractMetadataAttribute";
+    public const string GeneratedRegexAttributeMetadataName = "System.Text.RegularExpressions.GeneratedRegexAttribute";
 
     public static string ToGlobalTypeName(ITypeSymbol type) =>
         type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);

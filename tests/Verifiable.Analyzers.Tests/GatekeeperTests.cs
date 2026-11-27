@@ -240,6 +240,9 @@ public class GatekeeperTests
         var diags = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer());
         var err = Assert.Single(diags.Where(d => d.Id == "VER004"));
         var msg = err.GetMessage();
+        var firstLine = msg.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[0];
+        Assert.DoesNotContain("-- AMBIENT AUTHORITY", firstLine);
+        Assert.Contains("DateTime.UtcNow", firstLine);
         Assert.Contains("-- AMBIENT AUTHORITY", msg);
         Assert.Contains("Why this rule exists:", msg);
         Assert.Contains("DateTime.UtcNow", msg);

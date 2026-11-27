@@ -84,12 +84,20 @@ internal sealed partial class CfgSsaLowerer
     private bool _queryAssumeUsesResult;
     private string? _queryAssumeDisplay;
 
+    private sealed record RequiresSpec(
+        IOperation Condition,
+        Location Location,
+        string DisplayText,
+        string? Because = null,
+        IMethodSymbol? StubMethod = null);
+
     private sealed record EnsuresSpec(
         IParameterSymbol? LambdaParam,
         IOperation BodyExpr,
         Location Location,
         string DisplayText,
-        string? Because = null);
+        string? Because = null,
+        IMethodSymbol? StubMethod = null);
 
     private sealed record LoopSpecGroup(
         ILoopOperation Loop,
@@ -99,7 +107,7 @@ internal sealed partial class CfgSsaLowerer
     private sealed class MethodSpecs
     {
         public HashSet<SyntaxNode> AnnotationCalls { get; } = new();
-        public List<(IOperation Condition, Location Location, string DisplayText, string? Because)> Requires { get; } = new();
+        public List<RequiresSpec> Requires { get; } = new();
         public List<EnsuresSpec> Ensures { get; } = new();
         public List<LoopSpecGroup> Loops { get; } = new();
         public List<(string Contract, Location Location, string Error)> Errors { get; } = new();
@@ -336,7 +344,7 @@ internal sealed partial class CfgSsaLowerer
                 }
             }
         }
-        return false;
+        return CrossAssemblyContractCache.HasRequires(compilation, method);
     }
 
     private static MethodSpecs ExtractMethodSpecs(
@@ -367,6 +375,35 @@ internal sealed partial class CfgSsaLowerer
                     roots.Add(bodyOp);
                 }
             }
+        }
+
+        if (roots.Count == 0 &&
+            existingBlocks.IsDefaultOrEmpty &&
+            CrossAssemblyContractCache.TryGetMethodSpecs(compilation, method, out var extReqs, out var extEns))
+        {
+            foreach (var req in extReqs)
+            {
+                specs.Requires.Add(new RequiresSpec(
+                    req.Expression,
+                    Location.None,
+                    $"Spec.Requires({req.RawExpression})",
+                    req.Description,
+                    req.StubMethod));
+            }
+
+            foreach (var ens in extEns)
+            {
+                var resultParam = ens.StubMethod.Parameters.LastOrDefault(p => p.Name == CrossAssemblyContractCache.ResultPlaceholder);
+                specs.Ensures.Add(new EnsuresSpec(
+                    resultParam,
+                    ens.Expression,
+                    Location.None,
+                    $"Spec.Ensures({ens.RawExpression})",
+                    ens.Description,
+                    ens.StubMethod));
+            }
+
+            return specs;
         }
 
         var loopGroups = new Dictionary<ILoopOperation, LoopSpecGroup>();
@@ -409,7 +446,7 @@ internal sealed partial class CfgSsaLowerer
                 switch (inv.TargetMethod.Name)
                 {
                     case "Requires" when inv.Arguments.Length is 1 or 2:
-                        specs.Requires.Add((inv.Arguments[0].Value, loc, text, because));
+                        specs.Requires.Add(new RequiresSpec(inv.Arguments[0].Value, loc, text, because));
                         return;
 
                     case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 1 or 2:
@@ -1221,6 +1258,8 @@ internal sealed partial class CfgSsaLowerer
 
             case IParameterReferenceOperation pr:
                 if (env.Vars.TryGetValue(pr.Parameter, out var pVal)) return pVal;
+                if (pr.Parameter.Name == CrossAssemblyContractCache.ThisPlaceholder && env.ThisOverride is not null) return env.ThisOverride;
+                if (pr.Parameter.Name == CrossAssemblyContractCache.ResultPlaceholder && env.SpecResult is not null) return env.SpecResult;
                 return new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type);
 
             case IInstanceReferenceOperation inst when inst.ReferenceKind == InstanceReferenceKind.ContainingTypeInstance:
@@ -2377,6 +2416,22 @@ internal sealed partial class CfgSsaLowerer
             }
         }
 
+        foreach (var req in specs.Requires)
+        {
+            if (req.StubMethod is not null)
+            {
+                CrossAssemblyContractCache.BindStubParameters(calleeEnv.Vars, method, req.StubMethod, args);
+            }
+        }
+
+        foreach (var ens in specs.Ensures)
+        {
+            if (ens.StubMethod is not null)
+            {
+                CrossAssemblyContractCache.BindStubParameters(calleeEnv.Vars, method, ens.StubMethod, args);
+            }
+        }
+
         CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
         var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
@@ -2388,9 +2443,14 @@ internal sealed partial class CfgSsaLowerer
             !method.IsGenericMethod && method.ContainingType is { IsGenericType: false } &&
             (!method.IsVirtual && !method.IsOverride || method.IsSealed || method.ContainingType.IsSealed) &&
             !method.ReturnsByRef && !method.ReturnsByRefReadonly && method.Parameters.All(p => p.RefKind == RefKind.None) &&
-            inlineDepth < 8 && SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var body, allowLeadingContracts: true) &&
+            inlineDepth < 8 && SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, method, out _, out var body, out var bodyStubMethod, allowLeadingContracts: true) &&
             CanUseHelperBody(body!))
         {
+            if (bodyStubMethod is not null)
+            {
+                CrossAssemblyContractCache.BindStubParameters(calleeEnv.Vars, method, bodyStubMethod, args);
+            }
+
             try
             {
                 definition = _translator.ConvertTo(LowerExpression(body!, gamma, calleeEnv, emitObligations: false, inlineDepth + 1), method.ReturnType);
@@ -2502,6 +2562,14 @@ internal sealed partial class CfgSsaLowerer
         for (var i = 0; i < callee.Parameters.Length && i < args.Count; i++)
         {
             calleeEnv.Vars[callee.Parameters[i]] = args[i];
+        }
+
+        foreach (var req in calleeSpecs.Requires)
+        {
+            if (req.StubMethod is not null)
+            {
+                CrossAssemblyContractCache.BindStubParameters(calleeEnv.Vars, callee, req.StubMethod, args);
+            }
         }
 
         CheckMethodRequires(callee, calleeSpecs, calleeEnv, gamma, callLoc);
@@ -2883,7 +2951,10 @@ internal sealed partial class CfgSsaLowerer
     private static SmtTypedTerm? GetReceiverTerm(IOperation instance, BlockEnv env) => instance switch
     {
         ILocalReferenceOperation lr => env.Vars.TryGetValue(lr.Local, out var v) ? v : null,
-        IParameterReferenceOperation pr => env.Vars.TryGetValue(pr.Parameter, out var v) ? v : new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type),
+        IParameterReferenceOperation pr =>
+            env.Vars.TryGetValue(pr.Parameter, out var v) ? v :
+            pr.Parameter.Name == CrossAssemblyContractCache.ThisPlaceholder && env.ThisOverride is not null ? env.ThisOverride :
+            new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type),
         IFlowCaptureReferenceOperation cr => env.Captures.TryGetValue(cr.Id, out var v) ? v : null,
         _ => null
     };

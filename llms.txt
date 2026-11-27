@@ -65,6 +65,12 @@ Proved on return values by Z3 and enforced at runtime inside `[InboundPort]` gat
 ### Inbound Boundary Gates (`[InboundPort]`)
 Put `[InboundPort]` on pure domain entry methods. Emits `Raw<Domain>` DTOs, `<Domain>Gate.TryMarshal(...)`, and `<Class>Port.<Method>(...)` returning `MarshalResult<TReturn>` with `ContractViolation` entries carrying spirit messages.
 
+### Verified 1:1 DTO Projections (`[MapTo]`)
+Generate verified 1:1 field/property projections without duplicating field-by-field `Spec.Ensures`:
+- Type-level: `[MapTo(typeof(OrderState))]` (optional `MethodName = "..."`, repeatable) on a class/record/struct generates `[Verifiable] static partial class <Source>Mappings` with `To<Target>(this <Source> source)`.
+- Method-level: `[MapTo]` (or `[MapTo(typeof(Target))]`) on a `static partial` method inside a `partial` class/struct generates the projection body (works even for external DTO types).
+- Invalid or incomplete mappings emit `VER203` (use `[InboundPort]` when narrowing raw primitives into `[TypeAlias<T>]`).
+
 ### Domain Errors
 Return `Result<T, TError>` (`Result<T, E>.Ok(v)` / `Result<T, E>.Fail(e)`) instead of throwing domain exceptions inside `[Verifiable]`.
 
@@ -75,8 +81,8 @@ Return `Result<T, TError>` (`Result<T, E>.Ok(v)` / `Result<T, E>.Fail(e)`) inste
 - Text & Regex: `string.IsNullOrEmpty`, `string.IsNullOrWhiteSpace`, `Trim()`, `Contains`/`StartsWith`/`EndsWith` (ordinal only), bounded `string.Join` (<= 32 elements), static `Regex.IsMatch` and `[GeneratedRegex]` factories via Z3 `str.in_re` (non-null obligations always enforced).
 - Pure LINQ: `Any`, `All`, `Count`, `Where`, `Select`, and `GroupBy` uniqueness (`g => g.Count() > 1` / `== 1`) over immutable sequences (`ImmutableList<T>`, `ImmutableArray<T>`, `IImmutableList<T>`, `IReadOnlyList<T>`).
 - Decimal & Calendar: `decimal.Round`/`Truncate`/`Floor`/`Ceiling` (constant decimals `0..28`, all `MidpointRounding` modes) and pure `DateOnly`/`DateTime`/`DateTimeOffset`/`TimeSpan` arithmetic with range/overflow checks (ambient `Now`/`UtcNow`/`Today` remain `VER004`).
-- Source-visible, nonrecursive `[Verifiable]` helpers can specify their result with `=> expr` or a single `return expr;` after leading `Spec.Requires` / `Spec.Ensures` statements, including both positional constructors and object initializers. Omitted arguments use their C# defaults at the call site; the callee is still verified for *all* argument values satisfying its preconditions.
-- A `Spec.*` expression may call a supported source helper, including a `[Ghost]` method; the analyzer checks its preconditions on the path to the call. Ghost methods are for specification use, not executable calls from verified code. Inlining requires a supported expression and statically known target, not a generic method, recursive definition, or metadata-only implementation. More complex executable helpers still need explicit contracts. The query CLI proves call preconditions and safety obligations (`Overflow`, `DivisionByZero`, `CollectionBounds`) separately before checking the claim; an unproved safety obligation makes the query inconclusive.
+- Source-visible (and cross-assembly exported via `[assembly: VerifiableContractMetadata]`) nonrecursive `[Verifiable]` helpers can specify their result with `=> expr` or a single `return expr;` after leading `Spec.Requires` / `Spec.Ensures` statements, including both positional constructors and object initializers. Omitted arguments use their C# defaults at the call site; the callee is still verified for *all* argument values satisfying its preconditions.
+- A `Spec.*` expression may call a supported helper (same-compilation or cross-assembly exported), including a `[Ghost]` method; the analyzer checks its preconditions on the path to the call. Ghost methods are for specification use, not executable calls from verified code. Inlining requires a supported expression and statically known target, not a generic method, recursive definition, or unexported private/metadata-only implementation. More complex executable helpers still need explicit contracts. The query CLI proves call preconditions and safety obligations (`Overflow`, `DivisionByZero`, `CollectionBounds`) separately before checking the claim; an unproved safety obligation makes the query inconclusive.
 
 ## 4. Elm-Style Diagnostics & Agent JSON Schema
 
@@ -93,7 +99,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
   `<verifiable-counterexample>{"rule":"VER102","symbol":"...","kind":"...","contract":"...","reason":"...","counterexample":{...},"smtHash":"...","fix":"Fix: ..."}</verifiable-counterexample>`
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.
 - `VER104` (`Z3 SOLVER NOT FOUND`): missing Z3 binary (warning).
-- `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`): generator declaration errors.
+- `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
 
 ## 5. Packages
 

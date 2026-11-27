@@ -97,7 +97,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         err.Location,
                         $"Could not translate contract `{err.Contract}` in `{method.ContainingType?.Name}.{method.Name}` into an SMT formula.",
                         explanation: $"Reason: {err.Error}",
-                        fixHint: "Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.");
+                        fixHint: "Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.",
+                        summary: $"Unsupported contract in {method.ContainingType?.Name}.{method.Name}: {OneLine(err.Contract)} — {OneLine(err.Error)}");
                     opCtx.ReportDiagnostic(Diagnostic.Create(
                         VerifiableDescriptors.InvalidContractExpression,
                         err.Location,
@@ -135,6 +136,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         var agentPayload = isAgentMode
                             ? BuildAgentJsonBlock(method, ob, result, fixHint)
                             : null;
+                        var failSummary =
+                            $"{ob.Kind} of {method.ContainingType?.Name}.{method.Name} fails: " +
+                            OneLine(ob.Reason ?? ob.ContractText) + "; " + OneLine(ceSummary);
                         var elmFail = ElmDiagnosticFormatter.Format(
                             "PROOF FAILED",
                             ob.Location,
@@ -143,24 +147,27 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             contract: $"{ob.Kind}: {ob.ContractText}",
                             counterexample: ceSummary,
                             fixHint: fixHint,
-                            agentPayload: agentPayload);
+                            agentPayload: agentPayload,
+                            summary: failSummary);
 
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
-                            $"{ob.Kind} of {method.ContainingType?.Name}.{method.Name} fails: " +
-                            OneLine(ob.Reason ?? ob.ContractText) + "; " + OneLine(ceSummary) +
-                            Environment.NewLine + elmFail));
+                            elmFail));
                     }
                     else if (result.Status is SmtStatus.Unknown or SmtStatus.Error)
                     {
+                        var unknownSummary =
+                            $"Z3 returned {result.Status} for {method.ContainingType?.Name}.{method.Name}: {OneLine(ob.ContractText)}" +
+                            (string.IsNullOrWhiteSpace(result.ErrorMessage) ? string.Empty : $" — {OneLine(result.ErrorMessage!)}");
                         var elmUnknown = ElmDiagnosticFormatter.Format(
                             "SOLVER COULD NOT DECIDE",
                             ob.Location,
                             $"Z3 returned `{result.Status}` while checking `{ob.ContractText}` in `{method.ContainingType?.Name}.{method.Name}`.",
                             spirit: ob.Reason,
                             explanation: string.IsNullOrWhiteSpace(result.ErrorMessage) ? null : result.ErrorMessage,
-                            fixHint: "Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.");
+                            fixHint: "Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.",
+                            summary: unknownSummary);
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.SmtSolverUnknown,
                             ob.Location,

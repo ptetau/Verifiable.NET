@@ -133,12 +133,32 @@ internal static class InitializerProjection
     /// </summary>
     public static bool IsPurePositionalRecordConstructor(IMethodSymbol ctor, SmtCompositeInfo composite)
     {
-        if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not RecordDeclarationSyntax)
+        if (ctor.ContainingType.BaseType?.IsRecord == true)
         {
             return false;
         }
 
-        if (ctor.ContainingType.BaseType?.IsRecord == true)
+        if (ctor.DeclaringSyntaxReferences.Length == 0)
+        {
+            var isMetadataRecord = ctor.ContainingType.IsRecord ||
+                ctor.ContainingType.GetMembers("PrintMembers").OfType<IMethodSymbol>().Any() ||
+                (ctor.ContainingType.IsValueType &&
+                 ctor.ContainingType.GetMembers("Deconstruct").OfType<IMethodSymbol>().Any(m => m.Parameters.Length == ctor.Parameters.Length));
+
+            if (!isMetadataRecord ||
+                ctor.Parameters.Length == 0 ||
+                (ctor.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(ctor.Parameters[0].Type, ctor.ContainingType)))
+            {
+                return false;
+            }
+
+            return ctor.Parameters.All(p =>
+                composite.Fields.Any(f =>
+                    f.Name.Equals(p.Name, StringComparison.OrdinalIgnoreCase) &&
+                    SymbolEqualityComparer.Default.Equals(f.Type, p.Type)));
+        }
+
+        if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not RecordDeclarationSyntax)
         {
             return false;
         }

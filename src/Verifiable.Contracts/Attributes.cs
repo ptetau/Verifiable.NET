@@ -95,3 +95,70 @@ public sealed class RefinedAttribute<TUnderlying>(string? description = null) : 
     /// </summary>
     public string? Description { get; } = description;
 }
+
+/// <summary>
+/// Triggers source generation of a verified 1:1 field/property projection mapping to <see cref="TargetType"/>
+/// (or to the annotated <c>static partial</c> method's return type when omitted).
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method, AllowMultiple = true)]
+public sealed class MapToAttribute : Attribute
+{
+    /// <summary>
+    /// Initializes a <see cref="MapToAttribute"/> for a <c>static partial</c> projection method whose target type is inferred from its return type.
+    /// </summary>
+    public MapToAttribute()
+    {
+    }
+
+    /// <summary>
+    /// Initializes a <see cref="MapToAttribute"/> targeting <paramref name="targetType"/>.
+    /// </summary>
+    /// <param name="targetType">The target record, struct, or DTO class to project into.</param>
+    public MapToAttribute(Type targetType)
+    {
+        TargetType = targetType;
+    }
+
+    /// <summary>
+    /// Gets the target type to map to, or <see langword="null"/> when inferred from an annotated <c>static partial</c> method's return type.
+    /// </summary>
+    public Type? TargetType { get; }
+
+    /// <summary>
+    /// Gets or sets an optional generated method name when applied to a type (defaults to <c>To&lt;TargetTypeName&gt;</c>).
+    /// </summary>
+    public string? MethodName { get; set; }
+}
+
+/// <summary>
+/// Stores compiler-generated contract metadata for an externally accessible verified member so referencing
+/// compilations can prove helper predicates, preconditions, postconditions, invariants, and type aliases across assembly boundaries.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public sealed class VerifiableContractMetadataAttribute(
+    string memberId,
+    string kind,
+    string expression,
+    string? description = null) : Attribute
+{
+    /// <summary>
+    /// Gets the Roslyn documentation comment ID (for example <c>M:Sample.Bounds.IsValid(System.Decimal)</c>) of the exported member.
+    /// </summary>
+    public string MemberId { get; } = memberId;
+
+    /// <summary>
+    /// Gets the contract metadata kind: <c>"Body"</c>, <c>"Requires"</c>, <c>"Ensures"</c>, <c>"Invariant"</c>, or <c>"IsValid"</c>.
+    /// </summary>
+    public string Kind { get; } = kind;
+
+    /// <summary>
+    /// Gets the canonical self-contained C# expression using fully-qualified <c>global::</c> symbol references.
+    /// </summary>
+    public string Expression { get; } = expression;
+
+    /// <summary>
+    /// Gets an optional plain-English explanation (<c>because</c> or invariant/type-alias description).
+    /// </summary>
+    public string? Description { get; } = description;
+}

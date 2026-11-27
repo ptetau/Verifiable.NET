@@ -14,14 +14,14 @@ dotnet test Verifiable.NET.sln -c Release --no-build
 ```
 
 ### Structured Counterexample JSON (`VER102`) & Elm Output
-The first console line for VER102 includes the obligation, method, and counterexample.
-For the complete message and JSON when MSBuild truncates multiline diagnostics, run
+The first console line of every diagnostic (`VER001`–`VER203`) carries a concise, actionable summary (including the obligation, method, and counterexample for `VER102`, or the failing contract/reason for `VER101`–`VER103`), followed by the full Elm-style block.
+For the complete multiline message and JSON when MSBuild truncates diagnostics to one console line, run
 `dotnet build MyProject.csproj -p:VerifiableAgent=1 -p:ErrorLog=proof.sarif%2Cversion=2.1`
-and read the VER102 entry's `message.text` under `runs[].results[]` in `proof.sarif`.
+and read the diagnostic entry's `message.text` under `runs[].results[]` in `proof.sarif`.
 
-All diagnostics (`VER001`–`VER202`) use an Elm-style layout (`-- TITLE ---- File.cs`, numbered source excerpt with `^` caret underline, `"Why this rule exists:"`, and a concrete `Fix:` line).
+All diagnostics (`VER001`–`VER203`) use an Elm-style layout (single-line console summary, `-- TITLE ---- File.cs` banner, numbered source excerpt with `^` caret underline, `"Why this rule exists:"`, and a concrete `Fix:` line).
 When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyzers` outputs:
-- Elm-style banner, source caret, optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, and `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`)
+- Single-line console summary, Elm-style banner, source caret, optional `"Why this rule exists:"` (from `because` / attribute `description`), `Contract:`, and `Counterexample:` (`fromBal = 0.0`, `amount = 1.0`)
 - A `Fix:` line naming the exact remediation
 - A single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` payload containing:
   - `rule`: `"VER102"`
@@ -34,7 +34,7 @@ When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyz
   - `fix`: actionable fix string
 
 ### Every Diagnostic Ends With `Fix:`
-All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER202`) diagnostics include an Elm-style explanation and a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
+All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Generator (`VER201`–`VER203`) diagnostics include a single-line console summary, an Elm-style explanation, and a concrete `Fix:` guidance clause. See [`docs/manual.md`](manual.md) and [`README.md`](../README.md) for full details and examples.
 
 ## 2. Z3 Discovery & Caching
 

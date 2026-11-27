@@ -25,15 +25,92 @@ internal static class AnalyzerTestHarness
         params DiagnosticAnalyzer[] analyzers) =>
         AnalyzeWithOptionsAndGeneratorsAsync(source, buildProperties, null, analyzers);
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAndGeneratorsAsync(
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAndGeneratorsAsync(
         string source,
+        IReadOnlyDictionary<string, string>? buildProperties,
+        IEnumerable<ISourceGenerator>? extraGenerators,
+        params DiagnosticAnalyzer[] analyzers) =>
+        AnalyzeWithReferencesAsync(source, null, buildProperties, extraGenerators, analyzers);
+
+    public static MetadataReference CompileLibraryReference(
+        string source,
+        string assemblyName = "ReferencedLibrary",
+        IEnumerable<MetadataReference>? extraReferences = null)
+    {
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: $"{assemblyName}.cs");
+        var refs = CollectDefaultReferences(extraReferences);
+
+        var compilation = CSharpCompilation.Create(
+            assemblyName,
+            [syntaxTree],
+            refs,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            generators: CreateDefaultGenerators(null),
+            parseOptions: parseOptions);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out var genDiagnostics);
+
+        var genErrors = genDiagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+        if (genErrors.Count > 0)
+        {
+            throw new InvalidOperationException($"Library generator errors in {assemblyName}: " +
+                string.Join(Environment.NewLine, genErrors.Select(d => d.ToString())));
+        }
+
+        using var ms = new System.IO.MemoryStream();
+        var emitResult = updatedCompilation.Emit(ms);
+        if (!emitResult.Success)
+        {
+            throw new InvalidOperationException($"Failed to emit library {assemblyName}: " +
+                string.Join(Environment.NewLine, emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+        }
+
+        ms.Position = 0;
+        return MetadataReference.CreateFromImage(ms.ToArray());
+    }
+
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithReferencesAsync(
+        string source,
+        IEnumerable<MetadataReference>? extraReferences,
         IReadOnlyDictionary<string, string>? buildProperties,
         IEnumerable<ISourceGenerator>? extraGenerators,
         params DiagnosticAnalyzer[] analyzers)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
+        var refs = CollectDefaultReferences(extraReferences);
 
+        var compilation = CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            [syntaxTree],
+            refs,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            generators: CreateDefaultGenerators(extraGenerators),
+            parseOptions: parseOptions);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out var genDiagnostics);
+
+        AnalyzerOptions? analyzerOptions = buildProperties is null
+            ? null
+            : new AnalyzerOptions(
+                ImmutableArray<AdditionalText>.Empty,
+                new DictionaryConfigOptionsProvider(buildProperties));
+
+        var withAnalyzers = updatedCompilation.WithAnalyzers(
+            ImmutableArray.Create(analyzers),
+            analyzerOptions);
+
+        var analyzerDiagnostics = await withAnalyzers.GetAllDiagnosticsAsync();
+        return genDiagnostics.IsDefaultOrEmpty
+            ? analyzerDiagnostics
+            : analyzerDiagnostics.AddRange(genDiagnostics);
+    }
+
+    private static List<MetadataReference> CollectDefaultReferences(IEnumerable<MetadataReference>? extraReferences)
+    {
         var refLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var refs = new List<MetadataReference>();
         void AddRef(string loc)
@@ -56,38 +133,29 @@ internal static class AnalyzerTestHarness
         AddRef(typeof(ImmutableDictionary).Assembly.Location);
         AddRef(typeof(System.Text.RegularExpressions.Regex).Assembly.Location);
 
-        var compilation = CSharpCompilation.Create(
-            "AnalyzerTestAssembly",
-            [syntaxTree],
-            refs,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+        if (extraReferences is not null)
+        {
+            refs.AddRange(extraReferences);
+        }
 
+        return refs;
+    }
+
+    private static List<ISourceGenerator> CreateDefaultGenerators(IEnumerable<ISourceGenerator>? extraGenerators)
+    {
         var generators = new List<ISourceGenerator>
         {
             new TypeAliasGenerator().AsSourceGenerator(),
-            new InboundPortGenerator().AsSourceGenerator()
+            new InboundPortGenerator().AsSourceGenerator(),
+            new MapToGenerator().AsSourceGenerator(),
+            new ContractMetadataGenerator().AsSourceGenerator()
         };
         if (extraGenerators is not null)
         {
             generators.AddRange(extraGenerators);
         }
 
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: generators,
-            parseOptions: parseOptions);
-        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
-
-        AnalyzerOptions? analyzerOptions = buildProperties is null
-            ? null
-            : new AnalyzerOptions(
-                ImmutableArray<AdditionalText>.Empty,
-                new DictionaryConfigOptionsProvider(buildProperties));
-
-        var withAnalyzers = updatedCompilation.WithAnalyzers(
-            ImmutableArray.Create(analyzers),
-            analyzerOptions);
-
-        return await withAnalyzers.GetAllDiagnosticsAsync();
+        return generators;
     }
 
     private sealed class DictionaryConfigOptionsProvider(IReadOnlyDictionary<string, string> props) : AnalyzerConfigOptionsProvider

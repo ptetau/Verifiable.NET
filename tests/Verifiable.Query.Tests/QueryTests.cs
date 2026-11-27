@@ -426,4 +426,42 @@ public sealed class QueryTests
         Assert.Equal(2, code);
         Assert.Contains("Checked cast", stdout + stderr);
     }
+
+    [Fact]
+    public void MapToGeneratedProjection_ProvesFieldPreservationInQueryCli()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+            namespace MapQueryDemo;
+
+            [MapTo(typeof(OrderState))]
+            public class OrderDto
+            {
+                public int Id { get; set; }
+                public decimal Total { get; set; }
+            }
+
+            public readonly record struct OrderState(int Id, decimal Total);
+
+            [Verifiable]
+            public static class Adapter
+            {
+                public static OrderState Convert(OrderDto dto) => dto.ToOrderState();
+            }
+            """;
+
+        var (okCode, okOut, okErr) = RunCli([
+            "ask", "--stdin",
+            "--target", "Adapter.Convert",
+            "--assert", "result.Id == dto.Id && result.Total == dto.Total"
+        ], source);
+        Assert.True(okCode == 0, okOut + okErr);
+
+        var (badCode, badOut, badErr) = RunCli([
+            "ask", "--stdin",
+            "--target", "Adapter.Convert",
+            "--assert", "result.Total > dto.Total"
+        ], source);
+        Assert.True(badCode == 1, badOut + badErr);
+    }
 }

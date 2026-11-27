@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
     <PackageId>Verifiable.Generators</PackageId>
-    <Description>Incremental Roslyn source generators for [Refined&lt;T&gt;] refinement types, System.Text.Json converters, unchecked bounded accessors, and [InboundPort] marshaling gates.</Description>
+    <Description>Incremental Roslyn source generators for [TypeAlias&lt;T&gt;]/[Refined&lt;T&gt;] constrained types, System.Text.Json converters, unchecked bounded accessors, [InboundPort] marshaling gates, [MapTo] verified projections, and cross-assembly contract metadata.</Description>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
     <IsRoslynComponent>true</IsRoslynComponent>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
