@@ -73,6 +73,25 @@ public class ImmutableQueryTests
     }
 
     [Fact]
+    public async Task PredicatesUseEnumMembersAndScalarConstants()
+    {
+        Assert.Empty(await Analyze("""
+            public enum State { Active = 7 }
+            public const int Minimum = 3;
+            public static bool Active(ImmutableList<State> xs) {
+                Spec.Requires(xs.Count == 1 && xs[0] == State.Active);
+                Spec.Ensures<bool>(r => r);
+                return xs.Any(x => x == State.Active);
+            }
+            public static int CountAboveMinimum(ImmutableList<int> xs) {
+                Spec.Requires(xs.Count == 1 && xs[0] == 3);
+                Spec.Ensures<int>(r => r == 0);
+                return xs.Where(x => x > Minimum).Count();
+            }
+            """));
+    }
+
+    [Fact]
     public async Task EmptySequenceRefutesExistential()
     {
         var errors = await Analyze("""

@@ -179,7 +179,10 @@ internal sealed partial class CfgSsaLowerer
             case IParameterReferenceOperation p when env.Vars.TryGetValue(p.Parameter, out var arg):
                 return arg;
             case ILiteralOperation lit when IsQueryScalar(lit.Type):
-                return LowerExpression(lit, "true", env, false);
+                return LowerLiteralOperation(lit);
+            case IFieldReferenceOperation { Instance: null, Field: { HasConstantValue: true } constant }
+                when IsQueryScalar(constant.Type):
+                return LowerConstant(constant.Type, constant.ConstantValue);
             case IParenthesizedOperation paren:
                 return LowerQueryValue(paren.Operand, env);
             case IConversionOperation { OperatorMethod: null, IsImplicit: true } conversion

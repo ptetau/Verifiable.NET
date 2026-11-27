@@ -1442,7 +1442,11 @@ internal sealed partial class CfgSsaLowerer
         if (!lit.ConstantValue.HasValue)
             return new SmtTypedTerm("str-null", type);
 
-        var val = lit.ConstantValue.Value;
+        return LowerConstant(type, lit.ConstantValue.Value);
+    }
+
+    private SmtTypedTerm LowerConstant(ITypeSymbol type, object? val)
+    {
         if (val is null)
         {
             if (_types.TryGetNullableInfo(type, out _, out var optId, out _))
