@@ -6,6 +6,14 @@ internal static class GeneratorDescriptors
 {
     private const string Category = "Verifiable.Generators";
 
+    public static readonly DiagnosticDescriptor InvalidMapping = new(
+        id: "VER203",
+        title: "Cannot generate a complete scalar DTO mapping",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor RefinedMustBeReadOnlyPartialRecordStruct = new(
         id: "VER201",
         title: "Invalid constrained struct target declaration",

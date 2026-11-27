@@ -125,12 +125,12 @@ internal static class WorkspaceLoader
                 nullableContextOptions: NullableContextOptions.Enable));
 
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
+            generators: [new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator(), new MapToGenerator().AsSourceGenerator()],
             parseOptions: DefaultParseOptions);
-        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out var generatorDiagnostics);
 
         var updatedCSharp = (CSharpCompilation)updated;
-        var errors = updatedCSharp.GetDiagnostics()
+        var errors = generatorDiagnostics.Concat(updatedCSharp.GetDiagnostics())
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
 

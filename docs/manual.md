@@ -200,6 +200,33 @@ With the option enabled, adding `Cancelled` without updating the return expressi
 
 ### Mapping DTOs with initializers
 
+For a one-to-one projection into a positional record, annotate the **source DTO** with `[MapTo(typeof(Target))]`. The generator adds a `ToTarget()` extension in the DTO's namespace; the DTO does not need to be `partial`.
+
+```csharp
+using Verifiable.Contracts;
+
+[MapTo(typeof(OrderState))]
+public sealed class OrderDto
+{
+    public int Id { get; set; }
+    public int Quantity { get; set; }
+}
+
+public readonly record struct OrderState(int Quantity, int Id);
+
+[Verifiable]
+public static class Orders
+{
+    public static OrderState Read(OrderDto dto)
+    {
+        Spec.Ensures<OrderState>(s => s.Id == dto.Id && s.Quantity == dto.Quantity);
+        return dto.ToOrderState();
+    }
+}
+```
+
+Mapping uses case-sensitive names and exact scalar types, not declaration order. A missing `Quantity` or a `long` in place of `int` produces a generator error (`VER203`), not a default value or conversion. The verifier uses the generated C# constructor expression itself; the postcondition above illustrates what a caller can prove, not a contract you must provide. Use a hand-written mapper for renames, conversions, or computed values.
+
 A mapper may return `new OrderResponse { Id = dto.Id, Total = dto.Total }` and prove `Spec.Ensures<OrderResponse>(r => r.Id == dto.Id && r.Total == dto.Total)`. These are proofs about the values of stored properties, not reference identity. Init-only auto-property projections can also be expanded in helper contracts. A DTO with mutable setters must be constructed and returned in the same expression: saving it in a local and mutating or aliasing it later is not supported. Use plain source-defined types with scalar auto-properties, not arbitrary constructors, virtual setters, or property initializers with executable behavior.
 
 ### Rounding and calendar arithmetic
@@ -331,7 +358,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 
 ---
 
-## 10. Diagnostic Reference (`VER001`–`VER202`)
+## 10. Diagnostic Reference (`VER001`–`VER203`)
 
 | Code | Banner Title | What Happened & Typical Fix |
 | --- | --- | --- |
@@ -348,6 +375,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`). Warning only; proof checks resume once Z3 is present. |
 | `VER201` | `INVALID CONSTRAINED TYPE` | Type with `[TypeAlias<T>]` / `[Refined<T>]` is missing `readonly partial record struct` modifiers. |
 | `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |
+| `VER203` | Invalid `[MapTo]` projection | Check the diagnostic for the unsupported declaration or unmapped target member. |
 
 For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds.
 

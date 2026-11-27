@@ -214,6 +214,28 @@ public sealed class QueryTests
     }
 
     [Theory]
+    [InlineData("Quantity", 0)]
+    [InlineData("Unknown", 3)]
+    public void GeneratedProjectionIsAvailableToQueries(string sourceMember, int expected)
+    {
+        var source = $$"""
+            using Verifiable.Contracts;
+            namespace Orders;
+            [MapTo(typeof(State))]
+            public sealed class OrderDto { public int Id { get; set; } public int {{sourceMember}} { get; set; } }
+            public readonly record struct State(int Quantity, int Id);
+            [Verifiable] public static class Rules
+            {
+                public static State Read(OrderDto dto) => dto.ToState();
+            }
+            """;
+        var (code, stdout, stderr) = RunCli(["ask", "--stdin", "--target", "Rules.Read",
+            "--assert", "result.Quantity == dto.Quantity && result.Id == dto.Id"], source);
+        Assert.True(code == expected, stdout + stderr);
+        if (expected == 3) Assert.Contains("VER203", stdout + stderr);
+    }
+
+    [Theory]
     [InlineData("x >= 0", 0)]
     [InlineData("true", 2)]
     [InlineData("Rules.Checked(x) >= 0", 2)]

@@ -70,6 +70,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly List<(string ParamName, string SmtName)> _trackedParams = new();
     private readonly HashSet<string> _emittedOnDemandKeys = new(StringComparer.Ordinal);
     private readonly HashSet<IMethodSymbol> _expandingCalls = new(SymbolEqualityComparer.Default);
+    private readonly Dictionary<string, Dictionary<string, SmtTypedTerm>> _positionalArguments = new(StringComparer.Ordinal);
 
     private int _ssaCounter;
     private int _premiseCounter;
@@ -1277,7 +1278,18 @@ internal sealed partial class CfgSsaLowerer
             case IBinaryOperation bin:
                 if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
                     (ContainsUnmodeledReference(bin.LeftOperand.Type) || ContainsUnmodeledReference(bin.RightOperand.Type)))
+                {
+                    // Extensional collection contents do not establish identity. A
+                    // forwarded input, however, is the very same value (including
+                    // its reference fields), not another value with equal contents.
+                    var left = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+                    var right = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+                    if (bin.OperatorMethod is { IsImplicitlyDeclared: true } opMethod &&
+                        left.Term == right.Term && _entryParamVars.Values.Any(v => v.Term == left.Term) &&
+                        IsReflexiveStoredValue(opMethod.ContainingType))
+                        return new SmtTypedTerm(bin.OperatorKind == BinaryOperatorKind.Equals ? "true" : "false", bin.Type!);
                     throw new ContractLoweringException("Reference identity is not modeled for this type or its stored fields; compare individual properties instead.");
+                }
                 if (TryCompareTotalSeconds(bin, gamma, env, emitObligations, inlineDepth) is { } seconds)
                     return seconds;
                 if (bin.IsLifted)
@@ -1291,6 +1303,8 @@ internal sealed partial class CfgSsaLowerer
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalOr)
                 {
                     var lOr = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
+                    if (lOr.Term == "true")
+                        return lOr;
                     var rOr = LowerExpression(bin.RightOperand, CombineAnd(gamma, $"(not {lOr.Term})"), env, emitObligations, inlineDepth);
                     return new SmtTypedTerm($"(or {lOr.Term} {rOr.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 }
@@ -1792,6 +1806,8 @@ internal sealed partial class CfgSsaLowerer
 
     private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth)
     {
+        if (_positionalArguments.TryGetValue(receiver.Term, out var args) && args.TryGetValue(memberName, out var argument))
+            return argument;
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
             return direct;
@@ -1906,7 +1922,10 @@ internal sealed partial class CfgSsaLowerer
             argMap.TryGetValue(f.Name, out var v) ? _translator.ConvertTo(v, f.Type).Term : _types.GetDefaultTerm(f.Type));
 
         var constructed = new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", args)})", targetType);
-        return BindSsaValue("new_" + SmtTypeSystem.SanitizeName(targetType.Name), constructed);
+        var result = BindSsaValue("new_" + SmtTypeSystem.SanitizeName(targetType.Name), constructed);
+        if (IsPositionalProjection(objCreate))
+            _positionalArguments[result.Term] = new Dictionary<string, SmtTypedTerm>(argMap, StringComparer.Ordinal);
+        return result;
     }
 
     private SmtTypedTerm LowerTuple(ITupleOperation tuple, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
@@ -2353,9 +2372,9 @@ internal sealed partial class CfgSsaLowerer
             return true;
         try
         {
-            if (named.OriginalDefinition.ToDisplayString() is "System.Collections.Immutable.ImmutableList<T>" or
-                "System.Collections.Immutable.ImmutableArray<T>" or "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>" or
-                "System.Collections.Immutable.ImmutableHashSet<T>" || named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+            if (IsIdentityCollection(named))
+                return true;
+            if (named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
                 return named.TypeArguments.Any(t => ContainsUnmodeledReference(t, path));
             if (!named.IsRecord && named.IsReferenceType)
                 return true;
@@ -2365,6 +2384,25 @@ internal sealed partial class CfgSsaLowerer
                 return named.TupleElements.Any(e => ContainsUnmodeledReference(e.Type, path));
             return named.BaseType is { IsRecord: true } parent && ContainsUnmodeledReference(parent, path) ||
                 named.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic && ContainsUnmodeledReference(f.Type, path));
+        }
+
+        private static bool IsIdentityCollection(INamedTypeSymbol type) => type.OriginalDefinition.ToDisplayString() is
+            "System.Collections.Immutable.ImmutableList<T>" or "System.Collections.Immutable.ImmutableArray<T>" or
+            "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>" or "System.Collections.Immutable.ImmutableHashSet<T>";
+
+        private static bool IsReflexiveStoredValue(ITypeSymbol type)
+        {
+            if (type is not INamedTypeSymbol named)
+                return false;
+            if (type.TypeKind == TypeKind.Enum || IsIdentityCollection(named) ||
+                type.SpecialType is SpecialType.System_Boolean or SpecialType.System_String or SpecialType.System_Decimal or
+                    SpecialType.System_Int32 or SpecialType.System_Int64)
+                return true;
+            // A record can supply its own Equals(T), even when operator == is synthesized.
+            return named.IsRecord && named.IsValueType &&
+                named.GetMembers("Equals").OfType<IMethodSymbol>().Any(m => m.IsImplicitlyDeclared && !m.IsStatic &&
+                    m.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, named)) &&
+                named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).All(f => IsReflexiveStoredValue(f.Type));
         }
         finally
         {

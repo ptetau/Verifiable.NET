@@ -39,29 +39,11 @@ internal static class AnalyzerTestHarness
         ISourceGenerator? additionalGenerator,
         params DiagnosticAnalyzer[] analyzers)
     {
-        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
-        var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
-
-        var refs = AppDomain.CurrentDomain.GetAssemblies()
-            .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
-            .Select(a => a.Location)
-            .Concat(referenceTypes.Select(t => t.Assembly.Location))
-            .Distinct(StringComparer.Ordinal)
-            .Select(path => MetadataReference.CreateFromFile(path))
-            .ToList<MetadataReference>();
-
-        refs.Add(MetadataReference.CreateFromFile(typeof(VerifiableAttribute).Assembly.Location));
-        refs.Add(MetadataReference.CreateFromFile(typeof(ImmutableDictionary).Assembly.Location));
-
-        var compilation = CSharpCompilation.Create(
-            "AnalyzerTestAssembly",
-            [syntaxTree],
-            refs,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+        var compilation = CreateCompilation(source, referenceTypes);
 
         var generators = new List<ISourceGenerator> { new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator() };
         if (additionalGenerator != null) generators.Add(additionalGenerator);
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(generators, parseOptions: parseOptions);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generators, parseOptions: ParseOptions);
         driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
 
         AnalyzerOptions? analyzerOptions = buildProperties is null
@@ -75,6 +57,29 @@ internal static class AnalyzerTestHarness
             analyzerOptions);
 
         return await withAnalyzers.GetAllDiagnosticsAsync();
+    }
+
+    internal static CSharpParseOptions ParseOptions { get; } = new(LanguageVersion.Preview);
+
+    internal static CSharpCompilation CreateCompilation(string source, params Type[] referenceTypes)
+    {
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, ParseOptions, path: "TestInput.cs");
+        var refs = AppDomain.CurrentDomain.GetAssemblies()
+            .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
+            .Select(a => a.Location)
+            .Concat(referenceTypes.Select(t => t.Assembly.Location))
+            .Distinct(StringComparer.Ordinal)
+            .Select(path => MetadataReference.CreateFromFile(path))
+            .ToList<MetadataReference>();
+
+        refs.Add(MetadataReference.CreateFromFile(typeof(VerifiableAttribute).Assembly.Location));
+        refs.Add(MetadataReference.CreateFromFile(typeof(ImmutableDictionary).Assembly.Location));
+
+        return CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            [syntaxTree],
+            refs,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
     }
 
     private sealed class DictionaryConfigOptionsProvider(IReadOnlyDictionary<string, string> props) : AnalyzerConfigOptionsProvider

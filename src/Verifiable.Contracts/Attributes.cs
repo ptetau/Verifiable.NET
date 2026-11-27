@@ -52,6 +52,16 @@ public sealed class ConsumesObligationAttribute : Attribute;
 public sealed class InboundPortAttribute : Attribute;
 
 /// <summary>
+/// Generates a name-based mapping from this DTO to the positional members of a record.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, Inherited = false)]
+public sealed class MapToAttribute(Type targetType) : Attribute
+{
+    /// <summary>Gets the record type constructed by the generated extension method.</summary>
+    public Type TargetType { get; } = targetType;
+}
+
+/// <summary>
 /// Marks a proof-only specification member. Ghost fields and properties are excluded from generated raw I/O DTOs.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.Method)]
