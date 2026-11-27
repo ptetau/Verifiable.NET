@@ -23,7 +23,7 @@ Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and 
 ./scripts/verify.sh
 ```
 
-If Z3 is not installed yet:
+Z3 is required: the build proves the kernel in `src/Verifiable.Core` and stops with `VER104` without it. If Z3 is not installed yet:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1

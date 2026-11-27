@@ -37,7 +37,9 @@
     KernelShim and are stripped from IL, as they are in user code.
   -->
   <ItemGroup>
-    <Compile Include="..\Verifiable.Core\*.cs" Exclude="..\Verifiable.Core\AssemblyInfo.cs" Link="Core\%(Filename)%(Extension)" />
+    <Compile Include="..\Verifiable.Core\**\*.cs"
+             Exclude="..\Verifiable.Core\AssemblyInfo.cs;..\Verifiable.Core\Proofs\**;..\Verifiable.Core\obj\**;..\Verifiable.Core\bin\**"
+             Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
     <Using Include="Verifiable.Analyzers.KernelShim.Spec" Alias="Spec" />
     <Using Include="Verifiable.Analyzers.KernelShim.VerifiableAttribute" Alias="VerifiableAttribute" />
   </ItemGroup>
