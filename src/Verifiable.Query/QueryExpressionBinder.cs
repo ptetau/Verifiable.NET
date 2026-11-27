@@ -303,7 +303,7 @@ internal static class QueryExpressionBinder
             // Detect '=' assignment inside a boolean claim instead of '=='
             if (node.FirstAncestorOrSelf<AssignmentExpressionSyntax>() is { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } assign)
             {
-                return $"It looks like `=` (assignment) was used in `{assign}` instead of `==` (equality comparison).";
+                return $"It looks like `=` (assignment) was used instead of `==` (equality) in `{assign}`.";
             }
 
             // CS1061: 'Type' does not contain a definition for 'Member'

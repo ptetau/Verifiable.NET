@@ -109,6 +109,31 @@ internal static class AnalyzerTestHarness
             : analyzerDiagnostics.AddRange(genDiagnostics);
     }
 
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeIncludingSuppressedAsync(
+        string source,
+        params DiagnosticAnalyzer[] analyzers)
+    {
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
+        var refs = CollectDefaultReferences(null);
+
+        var compilation = CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            [syntaxTree],
+            refs,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        var options = new CompilationWithAnalyzersOptions(
+            options: null,
+            onAnalyzerException: null,
+            concurrentAnalysis: true,
+            logAnalyzerExecutionTime: false,
+            reportSuppressedDiagnostics: true);
+
+        var withAnalyzers = compilation.WithAnalyzers(ImmutableArray.Create(analyzers), options);
+        return await withAnalyzers.GetAllDiagnosticsAsync();
+    }
+
     private static List<MetadataReference> CollectDefaultReferences(IEnumerable<MetadataReference>? extraReferences)
     {
         var refLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
