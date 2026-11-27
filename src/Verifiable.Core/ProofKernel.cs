@@ -55,6 +55,22 @@ internal static class ProofKernel
     }
 
     /// <summary>
+    /// Whether a verdict must stop the build. Only a proved obligation passes. A missing solver
+    /// passes only when the project has explicitly opted out of proof checking.
+    /// </summary>
+    internal static bool BlocksBuild(ObligationVerdict verdict, bool allowMissingSolver)
+    {
+        Spec.Ensures<bool>(
+            r => r == !(verdict == ObligationVerdict.Proved ||
+                        (verdict == ObligationVerdict.SolverMissing && allowMissingSolver)),
+            "A build passes only when every obligation is proved; skipping proofs because Z3 is missing needs an explicit opt-out.");
+
+        if (verdict == ObligationVerdict.Proved) return false;
+        if (verdict == ObligationVerdict.SolverMissing) return !allowMissingSolver;
+        return true;
+    }
+
+    /// <summary>
     /// Whether a solver answer may be cached and replayed. Only definitive answers are cached, so a
     /// timeout or crash is always retried instead of being remembered.
     /// </summary>

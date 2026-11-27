@@ -20,6 +20,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.NamedNegatedGoal` | The labelled goal at the end of a `verifiable-query` script is exactly the negated goal. (The rest of that script is built by `QueryEngine`; see below.) |
 | `ProofKernel.ClassifyStatusLine` | Only the exact token `unsat` reads as a proof. An `(error ...)` line is never ignored. |
 | `ProofKernel.ReadCheckSatAnswer` | `unsat` is only reported if Z3 printed exactly `unsat` and nothing before it was another verdict or an error. Empty output is an error. |
+| `ProofKernel.BlocksBuild` | Decides the severity of `VER104`: a missing solver stops the build unless the project explicitly opts out with `VerifiableAllowMissingZ3`. (Refuted and undecided obligations stop the build through the default Error severity of `VER102`/`VER103`, which a project can still lower in `.editorconfig`.) |
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
 | `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
@@ -55,7 +56,6 @@ The core is small on purpose. These parts are outside it and are trusted:
 
 These are open, and are listed so they are not forgotten:
 
-- **No solver, no failure.** `VER104` (Z3 not found) is a warning. A build without Z3 succeeds with no proofs checked. (The kernel's own build is the exception: `Verifiable.Core` treats warnings as errors.)
 - **Vacuous proofs in the analyzer.** If a method's premises contradict each other, every goal is "proved". `verifiable-query` detects this through the unsat core; the build-time analyzer does not.
 
 ## Rules for contributors
