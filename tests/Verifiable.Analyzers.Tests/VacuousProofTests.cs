@@ -115,6 +115,38 @@ public class VacuousProofTests
     }
 
     [Fact]
+    public async Task RefutedEarlyGoal_DoesNotHideALaterContradiction()
+    {
+        var diags = await AnalyzeAsync("""
+            using Verifiable.Contracts;
+
+            public static class Ax
+            {
+                [PureAxiom]
+                public static int Weird(int x)
+                {
+                    Spec.Ensures<int>(r => r > x && r < x, "Impossible guarantee.");
+                    return x;
+                }
+            }
+
+            [Verifiable]
+            public static class Calc
+            {
+                public static int M(int a, int b)
+                {
+                    Spec.Ensures<int>(r => r == 42, "Nonsense that only an impossible guarantee could prove.");
+                    var q = a / b;          // refuted: b may be zero
+                    return Ax.Weird(q);     // afterwards the premises contradict
+                }
+            }
+            """);
+
+        Assert.Contains(diags, d => d.Id == "VER102");
+        Assert.Contains(diags, d => d.Id == "VER105" && d.GetMessage().Contains("Calc.M"));
+    }
+
+    [Fact]
     public async Task RefutedGoal_StillReportsTheCounterexample_NotVacuity()
     {
         var diags = await AnalyzeAsync("""

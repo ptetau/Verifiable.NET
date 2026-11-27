@@ -126,7 +126,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 var reportedFailures = new HashSet<(int Start, int Length, string Kind, string Contract)>();
-                var anyRefuted = false;
+                var longestRefutedPreamble = -1;
 
                 foreach (var ob in allObligations)
                 {
@@ -161,7 +161,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                     if (verdict == ObligationVerdict.Refuted)
                     {
-                        anyRefuted = true;
+                        longestRefutedPreamble = Math.Max(longestRefutedPreamble, ob.ScriptPreamble.Length);
                         var dedupKey = (ob.Location.SourceSpan.Start, ob.Location.SourceSpan.Length, ob.Kind, ob.ContractText);
                         if (!reportedFailures.Add(dedupKey))
                         {
@@ -228,19 +228,48 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 // Vacuity: if the premises themselves contradict, every goal above was "proved" without meaning
-                // anything. A refuted goal already shows the premises are satisfiable, so the check is skipped then.
-                // Assertions only accumulate, so the longest preamble contains every premise of the method.
-                if (!anyRefuted && allObligations.Count > 0)
+                // anything. Assertions only accumulate, so the longest preamble contains every premise of the method.
+                // A refuted goal shows its own premises are satisfiable, which settles it only if it saw all of them.
+                if (allObligations.Count > 0)
                 {
                     var allPremises = allObligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
-                    var premiseCheck = Z3SolverRunner.Execute(allPremises, msbuildZ3Path, sourceTree?.FilePath);
-                    if (ProofKernel.PremisesContradict(premiseCheck.Status))
+                    if (longestRefutedPreamble < allPremises.Length)
                     {
-                        ReportContradictoryPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceTree?.FilePath);
+                        CheckPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceTree?.FilePath, allPremises);
                     }
                 }
             });
         });
+    }
+
+    /// <summary>Premise checks Z3 could not decide, remembered for the life of the process so they are not retried on every build.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> UndecidedPremiseChecks = new(StringComparer.Ordinal);
+
+    private const int PremiseCheckTimeoutMs = 1000;
+
+    private static void CheckPremises(
+        OperationBlockAnalysisContext opCtx,
+        IMethodSymbol method,
+        bool closedEnums,
+        bool nonDefaultImmArr,
+        string? msbuildZ3Path,
+        string? sourceFilePath,
+        string allPremises)
+    {
+        var key = Z3SolverRunner.ComputeSha256(allPremises);
+        if (UndecidedPremiseChecks.ContainsKey(key)) return;
+
+        var premiseCheck = Z3SolverRunner.Execute(allPremises, msbuildZ3Path, sourceFilePath, timeoutMs: PremiseCheckTimeoutMs);
+        if (ProofKernel.Decide(premiseCheck.Status) == ObligationVerdict.Undecided)
+        {
+            UndecidedPremiseChecks.TryAdd(key, 0);
+            return;
+        }
+
+        if (ProofKernel.PremisesContradict(premiseCheck.Status))
+        {
+            ReportContradictoryPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceFilePath);
+        }
     }
 
     private static void ReportContradictoryPremises(
@@ -285,7 +314,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     var why = string.IsNullOrWhiteSpace(premise.Reason) || premise.Label.Contains(premise.Reason!.Trim())
                         ? string.Empty
                         : $" — {premise.Reason!.Trim()}";
-                    lines.Add($"- {premise.Kind}: {premise.Label}{where}{why}");
+                    lines.Add($"{premise.Kind}: {premise.Label}{where}{why}");
                 }
             }
         }
@@ -293,14 +322,14 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         var display = $"{method.ContainingType?.Name}.{method.Name}";
         var loc = method.Locations.FirstOrDefault() ?? Location.None;
         var conflict = lines.Count > 0
-            ? "These assumptions cannot all hold at once:\n    " + string.Join("\n    ", lines)
+            ? "These assumptions cannot all hold at once:\n    - " + string.Join("\n    - ", lines)
             : "Z3 could not narrow the conflict down to named assumptions.";
         var elm = ElmDiagnosticFormatter.Format(
             "CONTRADICTORY PREMISES",
             loc,
             $"No input satisfies the assumptions of `{display}`, so Z3 would \"prove\" any contract here, true or false. Its proofs have been rejected.",
             explanation: conflict,
-            fixHint: "Fix: Correct the conflicting `Spec.Requires`, `[Invariant]` or `[TypeAlias<T>]` rules so that at least one input satisfies them all.",
+            fixHint: "Fix: Correct the conflicting rules (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, or a callee's `Spec.Ensures` / `[PureAxiom]`) so that at least one input satisfies them all. Note that a `Spec.Requires` anywhere in a method counts as an entry precondition.",
             summary: $"Premises of {display} contradict each other, so its proofs are vacuous" +
                      (lines.Count > 0 ? ": " + OneLine(string.Join("; ", lines)) : "."));
         opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, loc, elm));
