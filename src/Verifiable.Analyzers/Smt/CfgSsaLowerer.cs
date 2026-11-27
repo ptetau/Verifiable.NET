@@ -74,6 +74,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly IMethodSymbol _method;
     private readonly bool _trackProofPremises;
     private readonly bool _closedEnums;
+    private readonly bool _nonDefaultImmutableArrays;
     private readonly SmtTypeSystem _types;
     private readonly ContractExpressionTranslator _translator;
 
@@ -104,7 +105,8 @@ internal sealed partial class CfgSsaLowerer
         Location Location,
         string DisplayText,
         string? Because = null,
-        IMethodSymbol? StubMethod = null);
+        IMethodSymbol? StubMethod = null,
+        IOperation? GuardCondition = null);
 
     private sealed record EnsuresSpec(
         IParameterSymbol? LambdaParam,
@@ -112,7 +114,8 @@ internal sealed partial class CfgSsaLowerer
         Location Location,
         string DisplayText,
         string? Because = null,
-        IMethodSymbol? StubMethod = null);
+        IMethodSymbol? StubMethod = null,
+        IOperation? GuardCondition = null);
 
     private sealed record LoopSpecGroup(
         ILoopOperation Loop,
@@ -156,12 +159,18 @@ internal sealed partial class CfgSsaLowerer
     private readonly Dictionary<ISymbol, SmtTypedTerm> _entryParamVars = new(SymbolEqualityComparer.Default);
     private SmtTypedTerm? _entryThis;
 
-    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false, bool closedEnums = false)
+    public CfgSsaLowerer(
+        Compilation compilation,
+        IMethodSymbol method,
+        bool trackProofPremises = false,
+        bool closedEnums = false,
+        bool nonDefaultImmutableArrays = false)
     {
         _compilation = compilation;
         _method = method;
         _trackProofPremises = trackProofPremises;
         _closedEnums = closedEnums;
+        _nonDefaultImmutableArrays = nonDefaultImmutableArrays;
         var useBitVec = HasCheckedArithmetic(method);
         _types = new SmtTypeSystem(useBitVec);
         _translator = new ContractExpressionTranslator(compilation, _types);
@@ -259,7 +268,15 @@ internal sealed partial class CfgSsaLowerer
             var pTerm = new SmtTypedTerm(smtName, p.Type);
             entryEnv.Vars[p] = pTerm;
             _entryParamVars[p] = pTerm;
-            EmitTypeAssumptions(pTerm, p.Locations.FirstOrDefault() ?? methodLoc);
+            var pLoc = p.Locations.FirstOrDefault() ?? methodLoc;
+            EmitTypeAssumptions(pTerm, pLoc);
+            if (!_nonDefaultImmutableArrays &&
+                VerifiableSymbolHelpers.IsNonDefaultParameter(p, globalNonDefault: false) &&
+                _types.TryGetSequenceInfo(p.Type, out _, out var pSeqId, out _, out var pIsImmArr) &&
+                pIsImmArr)
+            {
+                AddAssertion($"(not (seq_is_default_{pSeqId} {pTerm.Term}))", "NonDefault", $"[NonDefault] parameter '{p.Name}'", pLoc);
+            }
         }
 
         _currentSpecs = ExtractMethodSpecs(_compilation, _method, rawOperationBlocks);
@@ -268,13 +285,22 @@ internal sealed partial class CfgSsaLowerer
             _errors.Add(err);
         }
 
-        // Method Spec.Requires entry assumptions
+        // Method Spec.Requires / Spec.RequiresWhen entry assumptions
         foreach (var req in _currentSpecs.Requires)
         {
             try
             {
-                var reqTerm = LowerExpression(req.Condition, "true", entryEnv, emitObligations: false);
-                AddAssertion(reqTerm.Term, "Requires", req.DisplayText, req.Location, req.Because);
+                if (req.GuardCondition is not null)
+                {
+                    var guardTerm = LowerExpression(req.GuardCondition, "true", entryEnv, emitObligations: false);
+                    var reqTerm = LowerExpression(req.Condition, guardTerm.Term, entryEnv, emitObligations: false);
+                    AddAssertion($"(=> {guardTerm.Term} {reqTerm.Term})", "Requires", req.DisplayText, req.Location, req.Because);
+                }
+                else
+                {
+                    var reqTerm = LowerExpression(req.Condition, "true", entryEnv, emitObligations: false);
+                    AddAssertion(reqTerm.Term, "Requires", req.DisplayText, req.Location, req.Because);
+                }
             }
             catch (ContractLoweringException ex)
             {
@@ -369,10 +395,11 @@ internal sealed partial class CfgSsaLowerer
                 foreach (var inv in md.DescendantNodes().OfType<InvocationExpressionSyntax>())
                 {
                     var name = inv.Expression is MemberAccessExpressionSyntax access ? access.Name : inv.Expression;
-                    if (name is IdentifierNameSyntax { Identifier.ValueText: "Requires" } &&
+                    if (name is IdentifierNameSyntax { Identifier.ValueText: "Requires" or "RequiresWhen" } &&
                         compilation.ContainsSyntaxTree(inv.SyntaxTree) &&
                         compilation.GetSemanticModel(inv.SyntaxTree).GetSymbolInfo(inv).Symbol is IMethodSymbol target &&
-                        VerifiableSymbolHelpers.IsSpecCall(target, "Requires"))
+                        (VerifiableSymbolHelpers.IsSpecCall(target, "Requires") ||
+                         VerifiableSymbolHelpers.IsSpecCall(target, "RequiresWhen")))
                     {
                         return true;
                     }
@@ -471,17 +498,23 @@ internal sealed partial class CfgSsaLowerer
             {
                 var loc = inv.Syntax.GetLocation();
                 var text = inv.Syntax.ToString();
-                if (inv.TargetMethod.Name is "Ensures" or "Requires" or "LoopInvariant" or "Decreases")
+                if (inv.TargetMethod.Name is "Ensures" or "EnsuresWhen" or "Requires" or "RequiresWhen" or "LoopInvariant" or "Decreases")
                     specs.AnnotationCalls.Add(inv.Syntax);
 
-                var because = inv.Arguments.Length >= 2
-                    ? ExtractConstantStringArg(inv.Arguments[1].Value)
+                var isWhen = inv.TargetMethod.Name is "RequiresWhen" or "EnsuresWhen";
+                var becauseIdx = isWhen ? 2 : 1;
+                var because = inv.Arguments.Length > becauseIdx
+                    ? ExtractConstantStringArg(GetOrderedArgOp(inv, becauseIdx))
                     : null;
 
                 switch (inv.TargetMethod.Name)
                 {
                     case "Requires" when inv.Arguments.Length is 1 or 2:
-                        specs.Requires.Add(new RequiresSpec(inv.Arguments[0].Value, loc, text, because));
+                        specs.Requires.Add(new RequiresSpec(GetOrderedArgOp(inv, 0), loc, text, because));
+                        return;
+
+                    case "RequiresWhen" when inv.Arguments.Length is 2 or 3:
+                        specs.Requires.Add(new RequiresSpec(GetOrderedArgOp(inv, 1), loc, text, because, GuardCondition: GetOrderedArgOp(inv, 0)));
                         return;
 
                     case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 1 or 2:
@@ -494,7 +527,7 @@ internal sealed partial class CfgSsaLowerer
                             return;
                         }
 
-                        if (!TryExtractLambdaPredicate(inv.Arguments[0].Value, out var lambdaParam, out var bodyExpr, out var lambdaError))
+                        if (!TryExtractLambdaPredicate(GetOrderedArgOp(inv, 0), out var lambdaParam, out var bodyExpr, out var lambdaError))
                         {
                             specs.Errors.Add((text, loc, lambdaError!));
                             return;
@@ -505,7 +538,31 @@ internal sealed partial class CfgSsaLowerer
                     }
 
                     case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 1 or 2:
-                        specs.Ensures.Add(new EnsuresSpec(null, inv.Arguments[0].Value, loc, text, because));
+                        specs.Ensures.Add(new EnsuresSpec(null, GetOrderedArgOp(inv, 0), loc, text, because));
+                        return;
+
+                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 2 or 3:
+                    {
+                        var declaredType = inv.TargetMethod.TypeArguments[0];
+                        if (!SymbolEqualityComparer.Default.Equals(declaredType, method.ReturnType))
+                        {
+                            specs.Errors.Add((text, loc,
+                                $"Spec.EnsuresWhen<{declaredType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}> type argument does not match method return type '{method.ReturnType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)}'."));
+                            return;
+                        }
+
+                        if (!TryExtractLambdaPredicate(GetOrderedArgOp(inv, 1), out var lambdaParam, out var bodyExpr, out var lambdaError))
+                        {
+                            specs.Errors.Add((text, loc, lambdaError!));
+                            return;
+                        }
+
+                        specs.Ensures.Add(new EnsuresSpec(lambdaParam, bodyExpr!, loc, text, because, GuardCondition: GetOrderedArgOp(inv, 0)));
+                        return;
+                    }
+
+                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 2 or 3:
+                        specs.Ensures.Add(new EnsuresSpec(null, GetOrderedArgOp(inv, 1), loc, text, because, GuardCondition: GetOrderedArgOp(inv, 0)));
                         return;
 
                     case "LoopInvariant" when inv.Arguments.Length is 1 or 2:
@@ -514,7 +571,7 @@ internal sealed partial class CfgSsaLowerer
                             specs.Errors.Add((text, loc, "Spec.LoopInvariant(...) must be called inside a loop body."));
                             return;
                         }
-                        loopGroups[enclosingLoop].LoopInvariants.Add((inv.Arguments[0].Value, loc, text, because));
+                        loopGroups[enclosingLoop].LoopInvariants.Add((GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
 
                     case "Decreases" when inv.Arguments.Length is 1 or 2:
@@ -523,7 +580,7 @@ internal sealed partial class CfgSsaLowerer
                             specs.Errors.Add((text, loc, "Spec.Decreases(...) must be called inside a loop body."));
                             return;
                         }
-                        loopGroups[enclosingLoop].Decreases.Add((inv.Arguments[0].Value, loc, text, because));
+                        loopGroups[enclosingLoop].Decreases.Add((GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
                 }
             }
@@ -1043,13 +1100,20 @@ internal sealed partial class CfgSsaLowerer
                 }
                 ensEnv.SpecResult = retTerm;
 
-                var goal = LowerExpression(ens.BodyExpr, gamma, ensEnv, emitObligations: false);
-                var clauses = ExtractGoalClauses(ens.BodyExpr, gamma, ensEnv);
+                var effectiveGamma = gamma;
+                if (ens.GuardCondition is not null)
+                {
+                    var guardTerm = LowerExpression(ens.GuardCondition, gamma, ensEnv, emitObligations: false);
+                    effectiveGamma = CombineAnd(gamma, guardTerm.Term);
+                }
+
+                var goal = LowerExpression(ens.BodyExpr, effectiveGamma, ensEnv, emitObligations: false);
+                var clauses = ExtractGoalClauses(ens.BodyExpr, effectiveGamma, ensEnv);
                 AddObligation(
                     "Postcondition",
                     ens.DisplayText,
                     retLoc,
-                    gamma,
+                    effectiveGamma,
                     goal.Term,
                     ens.Because,
                     contractLocation: ens.Location,
@@ -1061,6 +1125,20 @@ internal sealed partial class CfgSsaLowerer
             {
                 _errors.Add((ens.DisplayText, ens.Location, ex.Message));
             }
+        }
+
+        if (VerifiableSymbolHelpers.IsNonDefaultReturn(_method, _nonDefaultImmutableArrays) &&
+            _types.TryGetSequenceInfo(retTerm.Type, out _, out var retSeqId, out _, out var retIsImmArr) &&
+            retIsImmArr)
+        {
+            AddObligation(
+                "Postcondition",
+                $"[NonDefault] return of '{_method.Name}'",
+                retLoc,
+                gamma,
+                $"(not (seq_is_default_{retSeqId} {retTerm.Term}))",
+                "Return value must be an initialized ImmutableArray (not default).",
+                resultSmtTerm: retTerm.Term);
         }
 
         EmitReturnInvariantObligations(retTerm, gamma, retLoc);
@@ -1076,7 +1154,20 @@ internal sealed partial class CfgSsaLowerer
             var valField = resComp.Fields.First(f => f.Name == "Value");
             var successCond = $"({isSuccessField.AccessorName} {retTerm.Term})";
             var valTerm = new SmtTypedTerm($"({valField.AccessorName} {retTerm.Term})", valField.Type);
-            EmitValueInvariantObligations(valTerm, CombineAnd(gamma, successCond), retLoc);
+            var effectiveGamma = CombineAnd(gamma, successCond);
+            if (_nonDefaultImmutableArrays &&
+                _types.TryGetSequenceInfo(valTerm.Type, out _, out var resSeqId, out _, out var resIsImmArr) &&
+                resIsImmArr)
+            {
+                AddObligation(
+                    "TypeInvariant",
+                    $"[NonDefault] Result payload of '{_method.Name}'",
+                    retLoc,
+                    effectiveGamma,
+                    $"(not (seq_is_default_{resSeqId} {valTerm.Term}))",
+                    "Success payload ImmutableArray must be initialized (not default).");
+            }
+            EmitValueInvariantObligations(valTerm, effectiveGamma, retLoc);
             return;
         }
 
@@ -1171,7 +1262,22 @@ internal sealed partial class CfgSsaLowerer
         {
             foreach (var f in comp!.Fields)
             {
-                if (SmtTypeSystem.HasAnyInvariants(f.Type) || HasAnyClosedEnum(f.Type))
+                if ((f.IsNonDefault || _nonDefaultImmutableArrays) &&
+                    _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
+                    fIsImmArr)
+                {
+                    AddObligation(
+                        "TypeInvariant",
+                        $"[NonDefault] field '{value.Type.Name}.{f.Name}'",
+                        loc,
+                        gamma,
+                        $"(not (seq_is_default_{fSeqId} ({f.AccessorName} {value.Term})))",
+                        $"Field '{f.Name}' on '{value.Type.Name}' must be an initialized ImmutableArray (not default).");
+                }
+
+                if (SmtTypeSystem.HasAnyInvariants(f.Type) ||
+                    HasAnyClosedEnum(f.Type) ||
+                    SmtTypeSystem.HasAnyNonDefaultImmutableArray(f.Type, _nonDefaultImmutableArrays))
                 {
                     EmitValueInvariantObligations(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), gamma, loc);
                 }
@@ -2049,6 +2155,19 @@ internal sealed partial class CfgSsaLowerer
         {
             if (overrides.TryGetValue(f.Name, out var ov))
             {
+                if (emitObligations &&
+                    (f.IsNonDefault || _nonDefaultImmutableArrays) &&
+                    _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
+                    fIsImmArr)
+                {
+                    EmitSafetyObligation(
+                        "TypeInvariant",
+                        $"[NonDefault] field '{withOp.Type!.Name}.{f.Name}'",
+                        withOp.Syntax.GetLocation(),
+                        gamma,
+                        $"(not (seq_is_default_{fSeqId} {ov.Term}))",
+                        $"Field '{f.Name}' on '{withOp.Type!.Name}' must be an initialized ImmutableArray (not default).");
+                }
                 fieldTerms.Add(ov.Term);
             }
             else
@@ -2110,8 +2229,27 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm(comp.ConstructorName, targetType);
         }
 
-        var args = comp.Fields.Select(f =>
-            argMap.TryGetValue(f.Name, out var v) ? _translator.ConvertTo(v, f.Type).Term : _types.GetDefaultTerm(f.Type));
+        var args = new List<string>(comp.Fields.Count);
+        foreach (var f in comp.Fields)
+        {
+            var fieldTerm = argMap.TryGetValue(f.Name, out var v)
+                ? _translator.ConvertTo(v, f.Type).Term
+                : _types.GetDefaultTerm(f.Type);
+            if (emitObligations &&
+                (f.IsNonDefault || _nonDefaultImmutableArrays) &&
+                _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
+                fIsImmArr)
+            {
+                EmitSafetyObligation(
+                    "TypeInvariant",
+                    $"[NonDefault] field '{targetType.Name}.{f.Name}'",
+                    objCreate.Syntax.GetLocation(),
+                    gamma,
+                    $"(not (seq_is_default_{fSeqId} {fieldTerm}))",
+                    $"Field '{f.Name}' on '{targetType.Name}' must be an initialized ImmutableArray (not default).");
+            }
+            args.Add(fieldTerm);
+        }
 
         var constructed = new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", args)})", targetType);
         return BindSsaValue("new_" + SmtTypeSystem.SanitizeName(targetType.Name), constructed);
@@ -2182,7 +2320,7 @@ internal sealed partial class CfgSsaLowerer
             {
                 if (env.SpecResult is null)
                 {
-                    throw new ContractLoweringException("Spec.Result<TResult>() can only be used inside Spec.Ensures(...).");
+                    throw new ContractLoweringException("Spec.Result<TResult>() can only be used inside Spec.Ensures(...) or Spec.EnsuresWhen(...).");
                 }
                 if (method.TypeArguments.Length == 1 &&
                     !SymbolEqualityComparer.Default.Equals(method.TypeArguments[0], env.SpecResult.Type))
@@ -2192,7 +2330,19 @@ internal sealed partial class CfgSsaLowerer
                 return env.SpecResult;
             }
 
-            // Requires / Ensures / LoopInvariant / Decreases are compile-time annotations processed outside statement simulation
+            if (method.Name == "Implies" && inv.Arguments.Length == 2)
+            {
+                var ant = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
+                var cons = LowerExpression(GetOrderedArgOp(inv, 1), CombineAnd(gamma, ant.Term), env, emitObligations, inlineDepth);
+                return new SmtTypedTerm($"(=> {ant.Term} {cons.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            }
+
+            if (method.Name is "ForAll" or "Exists" && inv.Arguments.Length == 3)
+            {
+                return LowerSpecQuantifier(inv, isForAll: method.Name == "ForAll", gamma, env, emitObligations, inlineDepth);
+            }
+
+            // Requires / RequiresWhen / Ensures / EnsuresWhen / LoopInvariant / Decreases are compile-time annotations processed outside statement simulation
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
@@ -2404,6 +2554,43 @@ internal sealed partial class CfgSsaLowerer
                     recvTerm.Type);
                 return BindSsaValue("seqSet", updated);
             }
+            if (method.Name == "RemoveAt" && argValues.Count == 1)
+            {
+                if (seqIsImmArr && (emitObligations || _inQuantifierDepth > 0))
+                {
+                    EmitImmutableArrayNonDefaultObligation(recvTerm, $"ImmutableArray must not be default before RemoveAt in '{inv.Syntax}'", loc, gamma);
+                }
+                var idxTerm = _translator.IntTermForIndex(argValues[0]);
+                var inBounds = $"(and (>= {idxTerm} 0) (< {idxTerm} (seq_count_{seqId} {recvTerm.Term})))";
+                if (emitObligations || _inQuantifierDepth > 0)
+                {
+                    EmitSafetyObligation("CollectionBounds", "Sequence index within bounds for RemoveAt", loc, gamma, inBounds);
+                }
+                var remElems = $"(lambda ((__ver_rm Int)) (ite (< __ver_rm {idxTerm}) (select (seq_elems_{seqId} {recvTerm.Term}) __ver_rm) (select (seq_elems_{seqId} {recvTerm.Term}) (+ __ver_rm 1))))";
+                var updated = new SmtTypedTerm(
+                    _types.BuildSequenceTerm(seqSort, remElems, $"(- (seq_count_{seqId} {recvTerm.Term}) 1)", seqIsImmArr, isDefault: false),
+                    recvTerm.Type);
+                return BindSsaValue("seqRem", updated);
+            }
+            if (method.Name == "Insert" && argValues.Count == 2)
+            {
+                if (seqIsImmArr && (emitObligations || _inQuantifierDepth > 0))
+                {
+                    EmitImmutableArrayNonDefaultObligation(recvTerm, $"ImmutableArray must not be default before Insert in '{inv.Syntax}'", loc, gamma);
+                }
+                var idxTerm = _translator.IntTermForIndex(argValues[0]);
+                var v = _translator.ConvertTo(argValues[1], seqElemType!);
+                var inBounds = $"(and (>= {idxTerm} 0) (<= {idxTerm} (seq_count_{seqId} {recvTerm.Term})))";
+                if (emitObligations || _inQuantifierDepth > 0)
+                {
+                    EmitSafetyObligation("CollectionBounds", "Sequence index within bounds for Insert", loc, gamma, inBounds);
+                }
+                var insElems = $"(lambda ((__ver_ins Int)) (ite (< __ver_ins {idxTerm}) (select (seq_elems_{seqId} {recvTerm.Term}) __ver_ins) (ite (= __ver_ins {idxTerm}) {v.Term} (select (seq_elems_{seqId} {recvTerm.Term}) (- __ver_ins 1)))))";
+                var updated = new SmtTypedTerm(
+                    _types.BuildSequenceTerm(seqSort, insElems, $"(+ (seq_count_{seqId} {recvTerm.Term}) 1)", seqIsImmArr, isDefault: false),
+                    recvTerm.Type);
+                return BindSsaValue("seqIns", updated);
+            }
         }
 
         // 5. ImmutableHashSet<T> methods
@@ -2521,6 +2708,15 @@ internal sealed partial class CfgSsaLowerer
                     loc, gamma, BuildClosedEnumFormula(args[i].Term, paramEnumVals),
                     $"Argument passed to closed enum parameter '{paramEnum!.Name}' must be a declared member.");
             }
+            if (VerifiableSymbolHelpers.IsNonDefaultParameter(method.Parameters[i], _nonDefaultImmutableArrays) &&
+                _types.TryGetSequenceInfo(args[i].Type, out _, out var argSeqId, out _, out var argIsImmArr) &&
+                argIsImmArr)
+            {
+                EmitSafetyObligation("Precondition",
+                    $"[NonDefault] argument '{method.Parameters[i].Name}' for '{method.ContainingType?.Name}.{method.Name}'",
+                    loc, gamma, $"(not (seq_is_default_{argSeqId} {args[i].Term}))",
+                    $"Parameter '{method.Parameters[i].Name}' is marked [NonDefault] and cannot receive default(ImmutableArray).");
+            }
         }
 
         foreach (var req in specs.Requires)
@@ -2584,6 +2780,18 @@ internal sealed partial class CfgSsaLowerer
             AddAssertion($"(=> {gamma} (= {retTerm.Term} {definition.Term}))", "HelperBody", method.Name, loc);
         EmitTypeAssumptions(retTerm, loc);
 
+        if (!_nonDefaultImmutableArrays &&
+            VerifiableSymbolHelpers.IsNonDefaultReturn(method, globalNonDefault: false) &&
+            _types.TryGetSequenceInfo(retTerm.Type, out _, out var retSeqId, out _, out var retIsImmArr) &&
+            retIsImmArr)
+        {
+            AddAssertion(
+                $"(=> {gamma} (not (seq_is_default_{retSeqId} {retTerm.Term})))",
+                "NonDefault",
+                $"[NonDefault] return of '{method.ContainingType?.Name}.{method.Name}'",
+                loc);
+        }
+
         if (specs.Ensures.Count > 0)
         {
             calleeEnv.SpecResult = retTerm;
@@ -2596,10 +2804,16 @@ internal sealed partial class CfgSsaLowerer
 
                 try
                 {
-                    var ensTerm = LowerExpression(ens.BodyExpr, gamma, calleeEnv, emitObligations: false);
+                    var effectiveGamma = gamma;
+                    if (ens.GuardCondition is not null)
+                    {
+                        var guardTerm = LowerExpression(ens.GuardCondition, gamma, calleeEnv, emitObligations: false);
+                        effectiveGamma = CombineAnd(gamma, guardTerm.Term);
+                    }
+                    var ensTerm = LowerExpression(ens.BodyExpr, effectiveGamma, calleeEnv, emitObligations: false);
                     var ensLoc = ens.Location != Location.None ? ens.Location : loc;
                     AddAssertion(
-                        $"(=> {gamma} {ensTerm.Term})",
+                        $"(=> {effectiveGamma} {ensTerm.Term})",
                         "CalleeEnsures",
                         $"{method.ContainingType?.Name}.{method.Name}: {ens.DisplayText}",
                         ensLoc,
@@ -2638,7 +2852,11 @@ internal sealed partial class CfgSsaLowerer
             if (cur is IArgumentOperation arg && arg.Parent is IInvocationOperation inv)
             {
                 var orig = inv.TargetMethod.ContainingType?.OriginalDefinition.ToDisplayString();
-                return orig is "System.Linq.Enumerable" or "System.Linq.ImmutableArrayExtensions";
+                if (orig is "System.Linq.Enumerable" or "System.Linq.ImmutableArrayExtensions")
+                {
+                    return true;
+                }
+                return orig == VerifiableSymbolHelpers.SpecTypeName && inv.TargetMethod.Name is "ForAll" or "Exists";
             }
             if (cur is not (IDelegateCreationOperation or IConversionOperation))
             {
@@ -2688,13 +2906,20 @@ internal sealed partial class CfgSsaLowerer
         {
             try
             {
-                var reqTerm = LowerExpression(req.Condition, gamma, calleeEnv, emitObligations: false);
-                var clauses = ExtractGoalClauses(req.Condition, gamma, calleeEnv);
+                var effectiveGamma = gamma;
+                if (req.GuardCondition is not null)
+                {
+                    var guardTerm = LowerExpression(req.GuardCondition, gamma, calleeEnv, emitObligations: false);
+                    effectiveGamma = CombineAnd(gamma, guardTerm.Term);
+                }
+
+                var reqTerm = LowerExpression(req.Condition, effectiveGamma, calleeEnv, emitObligations: false);
+                var clauses = ExtractGoalClauses(req.Condition, effectiveGamma, calleeEnv);
                 AddObligation(
                     "Precondition",
                     $"{req.DisplayText} on {callee.ContainingType?.Name}.{callee.Name}",
                     callLoc,
-                    gamma,
+                    effectiveGamma,
                     reqTerm.Term,
                     req.Because,
                     contractLocation: req.Location,
@@ -2754,6 +2979,11 @@ internal sealed partial class CfgSsaLowerer
             {
                 AddAssertion($"(=> (seq_is_default_{seqId} {value.Term}) (= (seq_count_{seqId} {value.Term}) 0))",
                     "CollectionAxiom", $"{value.Type.Name} default array has zero length", loc);
+                if (_nonDefaultImmutableArrays)
+                {
+                    AddAssertion($"(not (seq_is_default_{seqId} {value.Term}))",
+                        "NonDefault", $"{value.Type.Name} is non-default", loc);
+                }
             }
         }
         else if (_types.TryGetSetInfo(value.Type, out _, out var setId, out var setElem))
@@ -2821,7 +3051,15 @@ internal sealed partial class CfgSsaLowerer
         {
             foreach (var f in comp!.Fields)
             {
-                EmitTypeAssumptions(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), loc);
+                var fieldTerm = new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type);
+                EmitTypeAssumptions(fieldTerm, loc);
+                if (f.IsNonDefault && !_nonDefaultImmutableArrays &&
+                    _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
+                    fIsImmArr)
+                {
+                    AddAssertion($"(not (seq_is_default_{fSeqId} {fieldTerm.Term}))",
+                        "NonDefault", $"[NonDefault] field '{value.Type.Name}.{f.Name}'", loc);
+                }
             }
         }
     }
@@ -2888,6 +3126,19 @@ internal sealed partial class CfgSsaLowerer
             return;
         }
 
+        if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out _, out var elIsImmArr) && elIsImmArr)
+        {
+            AddAssertion($"(=> {guardCond} (>= (seq_count_{elSeqId} {element.Term}) 0))",
+                "CollectionAxiom", $"{element.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(=> {guardCond} (=> (seq_is_default_{elSeqId} {element.Term}) (= (seq_count_{elSeqId} {element.Term}) 0)))",
+                "CollectionAxiom", $"{element.Type.Name} default array has zero length", loc);
+            if (_nonDefaultImmutableArrays)
+            {
+                AddAssertion($"(=> {guardCond} (not (seq_is_default_{elSeqId} {element.Term})))",
+                    "NonDefault", $"{element.Type.Name} is non-default", loc);
+            }
+        }
+
         if (SmtTypeSystem.TryGetIsValidMethod(element.Type, out var isValidMethod) &&
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
@@ -2936,7 +3187,15 @@ internal sealed partial class CfgSsaLowerer
         {
             foreach (var f in comp!.Fields)
             {
-                EmitOnDemandElementAssumptions(guardCond, new SmtTypedTerm($"({f.AccessorName} {element.Term})", f.Type), loc);
+                var fieldTerm = new SmtTypedTerm($"({f.AccessorName} {element.Term})", f.Type);
+                EmitOnDemandElementAssumptions(guardCond, fieldTerm, loc);
+                if (f.IsNonDefault && !_nonDefaultImmutableArrays &&
+                    _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
+                    fIsImmArr)
+                {
+                    AddAssertion($"(=> {guardCond} (not (seq_is_default_{fSeqId} {fieldTerm.Term})))",
+                        "NonDefault", $"[NonDefault] field '{element.Type.Name}.{f.Name}'", loc);
+                }
             }
         }
     }

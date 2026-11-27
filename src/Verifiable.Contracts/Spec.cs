@@ -85,6 +85,98 @@ public static class Spec
     }
 
     /// <summary>
+    /// Declares a conditional method precondition that must hold whenever <paramref name="condition"/> is true.
+    /// Equivalent to <c>Spec.Requires(Spec.Implies(condition, requirement), because)</c>.
+    /// </summary>
+    /// <param name="condition">Guard condition under which <paramref name="requirement"/> applies.</param>
+    /// <param name="requirement">A pure C# boolean expression that must hold when <paramref name="condition"/> is true.</param>
+    /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    [Conditional("VERIFIABLE_SPEC")]
+    [PureAxiom]
+    public static void RequiresWhen(bool condition, bool requirement, string? because = null)
+    {
+        _ = condition;
+        _ = requirement;
+        _ = because;
+    }
+
+    /// <summary>
+    /// Declares a conditional method postcondition over the return value <typeparamref name="TResult"/>
+    /// that must hold on every return path where <paramref name="condition"/> was true at method entry.
+    /// </summary>
+    /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
+    /// <param name="condition">Guard condition over method inputs under which <paramref name="predicate"/> must hold.</param>
+    /// <param name="predicate">A pure lambda predicate referencing the return value and method inputs.</param>
+    /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    [Conditional("VERIFIABLE_SPEC")]
+    [PureAxiom]
+    public static void EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)
+    {
+        _ = condition;
+        _ = predicate;
+        _ = because;
+    }
+
+    /// <summary>
+    /// Declares a conditional method postcondition over <see cref="Result{TResult}"/>
+    /// that must hold on every return path where <paramref name="condition"/> was true at method entry.
+    /// </summary>
+    /// <param name="condition">Guard condition over method inputs under which <paramref name="postcondition"/> must hold.</param>
+    /// <param name="postcondition">A pure C# boolean expression referencing <see cref="Result{TResult}"/> and method inputs.</param>
+    /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    [Conditional("VERIFIABLE_SPEC")]
+    [PureAxiom]
+    public static void EnsuresWhen(bool condition, bool postcondition, string? because = null)
+    {
+        _ = condition;
+        _ = postcondition;
+        _ = because;
+    }
+
+    /// <summary>
+    /// Logical implication (<c>antecedent =&gt; consequent</c>). Lowered directly to SMT-LIB <c>(=&gt; antecedent consequent)</c>
+    /// and equivalent to <c>!antecedent || consequent</c> at runtime.
+    /// </summary>
+    /// <param name="antecedent">Condition that, when true, requires <paramref name="consequent"/> to be true.</param>
+    /// <param name="consequent">Consequence that must hold whenever <paramref name="antecedent"/> is true.</param>
+    [PureAxiom]
+    public static bool Implies(bool antecedent, bool consequent) => !antecedent || consequent;
+
+    /// <summary>
+    /// Quantifies universally over every integer index <c>i</c> in the half-open range
+    /// <c>[startInclusive, endExclusive)</c>. Lowered by Z3 to a bounded <c>forall</c> quantifier.
+    /// </summary>
+    /// <param name="startInclusive">Inclusive lower index bound.</param>
+    /// <param name="endExclusive">Exclusive upper index bound.</param>
+    /// <param name="predicate">Pure predicate evaluated for each index <c>i</c>.</param>
+    [PureAxiom]
+    public static bool ForAll(int startInclusive, int endExclusive, Func<int, bool> predicate)
+    {
+        for (var i = startInclusive; i < endExclusive; i++)
+        {
+            if (!predicate(i)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Quantifies existentially over integer indices <c>i</c> in the half-open range
+    /// <c>[startInclusive, endExclusive)</c>. Lowered by Z3 to a bounded <c>exists</c> quantifier.
+    /// </summary>
+    /// <param name="startInclusive">Inclusive lower index bound.</param>
+    /// <param name="endExclusive">Exclusive upper index bound.</param>
+    /// <param name="predicate">Pure predicate evaluated for each index <c>i</c>.</param>
+    [PureAxiom]
+    public static bool Exists(int startInclusive, int endExclusive, Func<int, bool> predicate)
+    {
+        for (var i = startInclusive; i < endExclusive; i++)
+        {
+            if (predicate(i)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Declares a non-negative 64-bit integer ranking expression that strictly decreases on every iteration of the enclosing loop.
     /// </summary>
     /// <param name="measure">A non-negative <see cref="long"/> expression that strictly decreases per iteration.</param>

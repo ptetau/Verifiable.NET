@@ -124,7 +124,7 @@ internal static class AnalyzerTestHarness
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
         var options = new CompilationWithAnalyzersOptions(
-            options: null,
+            options: new AnalyzerOptions(ImmutableArray<AdditionalText>.Empty),
             onAnalyzerException: null,
             concurrentAnalysis: true,
             logAnalyzerExecutionTime: false,
@@ -187,7 +187,7 @@ internal static class AnalyzerTestHarness
     {
         private readonly DictionaryConfigOptions _global = new(props);
         public override AnalyzerConfigOptions GlobalOptions => _global;
-        public override AnalyzerConfigOptions GetOptions(SyntaxTree tree) => DictionaryConfigOptions.Empty;
+        public override AnalyzerConfigOptions GetOptions(SyntaxTree tree) => _global;
         public override AnalyzerConfigOptions GetOptions(AdditionalText textFile) => DictionaryConfigOptions.Empty;
     }
 

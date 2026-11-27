@@ -41,6 +41,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             globalOptions.TryGetValue("build_property.VerifiableZ3Path", out var msbuildZ3Path);
             globalOptions.TryGetValue("build_property.VerifiableAgent", out var msbuildAgent);
             globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var msbuildClosedEnums);
+            globalOptions.TryGetValue("build_property.VerifiableNonDefaultImmutableArrays", out var msbuildNonDefaultImmArr);
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
@@ -49,6 +50,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
             var closedEnums =
                 msbuildClosedEnums == "1" || string.Equals(msbuildClosedEnums, "true", StringComparison.OrdinalIgnoreCase);
+
+            var globalNonDefaultImmArr =
+                msbuildNonDefaultImmArr == "1" || string.Equals(msbuildNonDefaultImmArr, "true", StringComparison.OrdinalIgnoreCase);
 
             var reportedUnavailable = 0;
 
@@ -68,13 +72,27 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
-                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums))
+                var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
+                var nonDefaultImmArr = globalNonDefaultImmArr;
+                if (sourceTree is not null &&
+                    opCtx.Options.AnalyzerConfigOptionsProvider.GetOptions(sourceTree)
+                        .TryGetValue("verifiable.non_default_immutable_arrays", out var treeNonDefault) &&
+                    !string.IsNullOrWhiteSpace(treeNonDefault))
+                {
+                    nonDefaultImmArr =
+                        treeNonDefault == "1" || string.Equals(treeNonDefault, "true", StringComparison.OrdinalIgnoreCase);
+                }
+
+                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums, nonDefaultImmArr))
                 {
                     return;
                 }
 
-                var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
-                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method, closedEnums: closedEnums);
+                var lowerer = new CfgSsaLowerer(
+                    opCtx.Compilation,
+                    method,
+                    closedEnums: closedEnums,
+                    nonDefaultImmutableArrays: nonDefaultImmArr);
 
                 var allObligations = new List<ProofObligation>();
                 var allErrors = new List<(string Contract, Location Location, string Error)>();
@@ -213,14 +231,21 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return sb.ToString();
     }
 
-    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks, bool closedEnums)
+    private static bool MethodNeedsSmtCheck(
+        Compilation compilation,
+        IMethodSymbol method,
+        ImmutableArray<IOperation> blocks,
+        bool closedEnums,
+        bool nonDefaultImmutableArrays)
     {
         if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             (method.ContainingAssembly is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
             SmtTypeSystem.HasAnyInvariants(method.ReturnType) ||
             IsResultWithInvariantPayload(method.ReturnType) ||
-            IsClosedEnumType(method.ReturnType, closedEnums))
+            IsClosedEnumType(method.ReturnType, closedEnums) ||
+            VerifiableSymbolHelpers.IsNonDefaultReturn(method, nonDefaultImmutableArrays) ||
+            SmtTypeSystem.HasAnyNonDefaultImmutableArray(method.ReturnType, nonDefaultImmutableArrays))
         {
             return true;
         }
@@ -230,6 +255,18 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             foreach (var op in b.DescendantsAndSelf())
             {
                 if (op is IConversionOperation convOp && CfgSsaLowerer.IsConversionChecked(convOp, compilation))
+                {
+                    return true;
+                }
+
+                if (op is IObjectCreationOperation objOp && objOp.Type is not null &&
+                    SmtTypeSystem.HasAnyNonDefaultImmutableArray(objOp.Type, nonDefaultImmutableArrays))
+                {
+                    return true;
+                }
+
+                if (op is IWithOperation withOp && withOp.Type is not null &&
+                    SmtTypeSystem.HasAnyNonDefaultImmutableArray(withOp.Type, nonDefaultImmutableArrays))
                 {
                     return true;
                 }
@@ -255,7 +292,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         return true;
                     }
 
-                    if (inv.TargetMethod.Parameters.Any(p => IsClosedEnumType(p.Type, closedEnums)))
+                    if (inv.TargetMethod.Parameters.Any(p =>
+                        IsClosedEnumType(p.Type, closedEnums) ||
+                        VerifiableSymbolHelpers.IsNonDefaultParameter(p, nonDefaultImmutableArrays)))
                     {
                         return true;
                     }
@@ -267,7 +306,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     }
 
                     if (ctOrig == "System.Collections.Immutable.ImmutableArray<T>" &&
-                        inv.TargetMethod.Name is "Add" or "SetItem")
+                        inv.TargetMethod.Name is "Add" or "SetItem" or "RemoveAt" or "Insert")
+                    {
+                        return true;
+                    }
+
+                    if (ctOrig == "System.Collections.Immutable.ImmutableList<T>" &&
+                        inv.TargetMethod.Name is "SetItem" or "RemoveAt" or "Insert")
                     {
                         return true;
                     }

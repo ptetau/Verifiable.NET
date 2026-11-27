@@ -617,17 +617,71 @@ internal sealed partial class CfgSsaLowerer
         string guard,
         List<string> obligations,
         Location loc,
-        string gamma)
+        string gamma,
+        string idxSort = "Int")
     {
         foreach (var ob in obligations)
         {
             EmitSafetyObligation(
                 "Precondition",
-                "LINQ lambda element safety condition",
+                "Quantified lambda safety condition",
                 loc,
                 gamma,
-                $"(forall (({idxVar} Int)) (=> {guard} {ob}))");
+                $"(forall (({idxVar} {idxSort})) (=> {guard} {ob}))");
         }
+    }
+
+    private SmtTypedTerm LowerSpecQuantifier(
+        IInvocationOperation inv,
+        bool isForAll,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
+    {
+        var loc = inv.Syntax.GetLocation();
+        var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
+        var intType = _compilation.GetSpecialType(SpecialType.System_Int32);
+
+        var startTerm = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
+        var endTerm = LowerExpression(GetOrderedArgOp(inv, 1), gamma, env, emitObligations, inlineDepth);
+        var predArg = GetOrderedArgOp(inv, 2);
+
+        if (!TryExtractSingleParamLambda(predArg, out var idxParam, out var predBody))
+        {
+            var fnName = isForAll ? "Spec.ForAll" : "Spec.Exists";
+            throw new ContractLoweringException($"{fnName} predicate must be a single-expression lambda in '{inv.Syntax}'.");
+        }
+
+        var idxVar = $"__ver_q_{++_quantifierCounter}";
+        string idxSort;
+        string inRange;
+        if (_types.UseBitVec)
+        {
+            idxSort = "(_ BitVec 32)";
+            var startBv = _translator.ConvertTo(startTerm, intType).Term;
+            var endBv = _translator.ConvertTo(endTerm, intType).Term;
+            inRange = $"(and (bvsge {idxVar} {startBv}) (bvslt {idxVar} {endBv}))";
+        }
+        else
+        {
+            idxSort = "Int";
+            var startInt = _translator.IntTermForIndex(startTerm);
+            var endInt = _translator.IntTermForIndex(endTerm);
+            inRange = $"(and (>= {idxVar} {startInt}) (< {idxVar} {endInt}))";
+        }
+
+        var idxTyped = new SmtTypedTerm(idxVar, intType);
+        var (pTerm, obligations) = LowerLambdaInQuantifier(idxParam!, predBody!, idxTyped, CombineAnd(gamma, inRange), env, inlineDepth);
+        if (emitObligations || _inQuantifierDepth > 0)
+        {
+            EmitQuantifiedLambdaObligations(idxVar, inRange, obligations, loc, gamma, idxSort);
+        }
+
+        var quantified = isForAll
+            ? $"(forall (({idxVar} {idxSort})) (=> {inRange} {pTerm.Term}))"
+            : $"(exists (({idxVar} {idxSort})) (and {inRange} {pTerm.Term}))";
+        return new SmtTypedTerm(quantified, boolType);
     }
 
     private bool TryExtractSingleParamLambda(

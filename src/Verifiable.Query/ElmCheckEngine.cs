@@ -48,6 +48,7 @@ internal static class ElmCheckEngine
         var analyzers = ImmutableArray.Create<DiagnosticAnalyzer>(
             new VerifiableGatekeeperAnalyzer(),
             new LinearObligationAnalyzer(),
+            new SpecQualityAnalyzer(),
             new VerifiableSmtAnalyzer(),
             new VerifiableNullabilitySuppressor());
 

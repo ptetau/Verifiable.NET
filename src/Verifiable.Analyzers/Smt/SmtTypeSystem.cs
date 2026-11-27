@@ -11,7 +11,8 @@ namespace Verifiable.Analyzers.Smt;
 internal sealed record SmtFieldInfo(
     string Name,
     ITypeSymbol Type,
-    string AccessorName);
+    string AccessorName,
+    bool IsNonDefault = false);
 
 internal sealed record SmtCompositeInfo(
     string SortName,
@@ -502,6 +503,54 @@ internal sealed class SmtTypeSystem
         return false;
     }
 
+    public static bool HasAnyNonDefaultImmutableArray(ITypeSymbol type, bool globalNonDefault, HashSet<ITypeSymbol>? visited = null)
+    {
+        visited ??= new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        if (!visited.Add(type))
+        {
+            return false;
+        }
+
+        if (VerifiableSymbolHelpers.IsImmutableArrayType(type))
+        {
+            return globalNonDefault;
+        }
+
+        if (type is INamedTypeSymbol named)
+        {
+            if (named.OriginalDefinition.ToDisplayString() == "Verifiable.Contracts.Result<T, TError>" &&
+                named.TypeArguments.Length == 2)
+            {
+                return HasAnyNonDefaultImmutableArray(named.TypeArguments[0], globalNonDefault, visited);
+            }
+
+            if (!named.IsGenericType)
+            {
+                foreach (var prop in named.GetMembers().OfType<IPropertySymbol>())
+                {
+                    if (!prop.IsStatic && !prop.IsIndexer && prop.Name != "EqualityContract" &&
+                        (VerifiableSymbolHelpers.IsNonDefaultMember(prop, named, globalNonDefault) ||
+                         HasAnyNonDefaultImmutableArray(prop.Type, globalNonDefault, visited)))
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (var field in named.GetMembers().OfType<IFieldSymbol>())
+                {
+                    if (!field.IsStatic && !field.IsImplicitlyDeclared && field.AssociatedSymbol is null &&
+                        (VerifiableSymbolHelpers.IsNonDefaultMember(field, named, globalNonDefault) ||
+                         HasAnyNonDefaultImmutableArray(field.Type, globalNonDefault, visited)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
     public static bool TryExtractSingleReturnOperation(
         Compilation compilation,
         ISymbol member,
@@ -553,7 +602,9 @@ internal sealed class SmtTypeSystem
                             s is ExpressionStatementSyntax stmt &&
                             model.GetOperation(stmt.Expression) is IInvocationOperation inv &&
                             (VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Requires") ||
-                             VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Ensures"))))) &&
+                             VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "RequiresWhen") ||
+                             VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "Ensures") ||
+                             VerifiableSymbolHelpers.IsSpecCall(inv.TargetMethod, "EnsuresWhen"))))) &&
                     model.GetOperation(ret) is IReturnOperation returnOperation)
                 {
                     returnOp = returnOperation.ReturnedValue;
@@ -667,7 +718,8 @@ internal sealed class SmtTypeSystem
             {
                 if (IsStoredProperty(p, ctorParamNames) && seen.Add(p.Name))
                 {
-                    fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SanitizeName(p.Name)}"));
+                    var isNonDefault = VerifiableSymbolHelpers.IsNonDefaultMember(p, cur, globalNonDefault: false);
+                    fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SanitizeName(p.Name)}", isNonDefault));
                 }
             }
 
@@ -677,7 +729,8 @@ internal sealed class SmtTypeSystem
                     !VerifiableSymbolHelpers.HasAttribute(f, VerifiableSymbolHelpers.GhostAttr) &&
                     seen.Add(f.Name))
                 {
-                    fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SanitizeName(f.Name)}"));
+                    var isNonDefault = VerifiableSymbolHelpers.IsNonDefaultMember(f, cur, globalNonDefault: false);
+                    fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SanitizeName(f.Name)}", isNonDefault));
                 }
             }
         }

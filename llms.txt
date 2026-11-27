@@ -52,8 +52,12 @@ Proved on return values by Z3 and enforced at runtime inside `[InboundPort]` gat
 
 ### Method & Loop Contracts (`Spec.*`)
 - `Spec.Requires(bool condition, string? because = null)`
+- `Spec.RequiresWhen(bool condition, bool requirement, string? because = null)`
 - `Spec.Ensures<TResult>(Func<TResult, bool> predicate, string? because = null)`
 - `Spec.Ensures(bool condition, string? because = null)` (use `Spec.Result<TResult>()` if needed)
+- `Spec.EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)` / `Spec.EnsuresWhen(bool condition, bool postcondition, string? because = null)`
+- `Spec.Implies(bool antecedent, bool consequent)` (`(=> antecedent consequent)` in Z3)
+- `Spec.ForAll(int startInclusive, int endExclusive, Func<int, bool> predicate)` / `Spec.Exists(int startInclusive, int endExclusive, Func<int, bool> predicate)` (bounded Z3 `forall` / `exists` over integer indices)
 - `Spec.LoopInvariant(bool condition, string? because = null)` (inside `while` loop)
 - `Spec.Decreases(int|long measure, string? because = null)` (inside `while` loop; proves termination)
 
@@ -76,12 +80,12 @@ Return `Result<T, TError>` (`Result<T, E>.Ok(v)` / `Result<T, E>.Fail(e)`) inste
 
 ## 3. Supported SMT Fragment (`VER101`–`VER104`)
 
-- Types: `bool`, signed/unsigned ints (Int or BitVec under `[CheckedArithmetic]`), `decimal`/`float`/`double` (`Real`), `string`, `Guid`, enums (with unconditional underlying integral bounds; opt-in closed-domain axioms via `-p:VerifiableClosedEnums=true` or `[Verifiable]` on non-`[Flags]` enums), `DateOnly`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `Nullable<T>`, immutable `readonly record struct` / `record`, write-once boundary DTO classes (field access/projections; reference `==`/`Equals` rejected), `Result<T, E>`, `ImmutableList<T>`, `ImmutableArray<T>` (distinct `IsDefault` state), `IImmutableList<T>`, `IReadOnlyList<T>`, `ImmutableDictionary<K, V>`, `ImmutableHashSet<T>`, constrained `[TypeAlias<T>]` / `[Refined<T>]`.
-- Expressions: local SSA, `if/else`, ternary `?:`, switch expressions, `with`, object initializers (`new State { ... }`), `while` loops with `LoopInvariant` + `Decreases`, pure `[Verifiable]`/`[PureAxiom]` modular calls (`Spec.Requires` + `Spec.Ensures` instantiation).
+- Types: `bool`, signed/unsigned ints (Int or BitVec under `[CheckedArithmetic]`), `decimal`/`float`/`double` (`Real`), `string`, `Guid`, enums (with unconditional underlying integral bounds; opt-in closed-domain axioms via `-p:VerifiableClosedEnums=true` or `[Verifiable]` on non-`[Flags]` enums), `DateOnly`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `Nullable<T>`, immutable `readonly record struct` / `record`, write-once boundary DTO classes (field access/projections; reference `==`/`Equals` rejected), `Result<T, E>`, `ImmutableList<T>`, `ImmutableArray<T>` (distinct `IsDefault` state; use `[NonDefault]` on params/fields/returns or `-p:VerifiableNonDefaultImmutableArrays=true` / `.editorconfig` `verifiable.non_default_immutable_arrays = true` to assume initialized and reject `default` at call sites/returns), `IImmutableList<T>`, `IReadOnlyList<T>`, `ImmutableDictionary<K, V>`, `ImmutableHashSet<T>`, constrained `[TypeAlias<T>]` / `[Refined<T>]`.
+- Expressions: local SSA, `if/else`, ternary `?:`, switch expressions, `with`, object initializers (`new State { ... }`), `while` loops with `LoopInvariant` + `Decreases`, pure `[Verifiable]`/`[PureAxiom]` modular calls (`Spec.Requires`/`Spec.RequiresWhen` + `Spec.Ensures`/`Spec.EnsuresWhen` instantiation), `Spec.Implies`, `Spec.ForAll`/`Spec.Exists`, sequence `Add`/`SetItem`/`RemoveAt`/`Insert`.
 - Text & Regex: `string.IsNullOrEmpty`, `string.IsNullOrWhiteSpace`, `Trim()`, `Contains`/`StartsWith`/`EndsWith` (ordinal only), bounded `string.Join` (<= 32 elements), static `Regex.IsMatch` and `[GeneratedRegex]` factories via Z3 `str.in_re` (non-null obligations always enforced).
 - Pure LINQ: `Any`, `All`, `Count`, `Where`, `Select`, and `GroupBy` uniqueness (`g => g.Count() > 1` / `== 1`) over immutable sequences (`ImmutableList<T>`, `ImmutableArray<T>`, `IImmutableList<T>`, `IReadOnlyList<T>`).
 - Decimal & Calendar: `decimal.Round`/`Truncate`/`Floor`/`Ceiling` (constant decimals `0..28`, all `MidpointRounding` modes) and pure `DateOnly`/`DateTime`/`DateTimeOffset`/`TimeSpan` arithmetic with range/overflow checks (ambient `Now`/`UtcNow`/`Today` remain `VER004`).
-- Source-visible (and cross-assembly exported via `[assembly: VerifiableContractMetadata]`) nonrecursive `[Verifiable]` helpers can specify their result with `=> expr` or a single `return expr;` after leading `Spec.Requires` / `Spec.Ensures` statements, including both positional constructors and object initializers. Omitted arguments use their C# defaults at the call site; the callee is still verified for *all* argument values satisfying its preconditions.
+- Source-visible (and cross-assembly exported via `[assembly: VerifiableContractMetadata]`) nonrecursive `[Verifiable]` helpers can specify their result with `=> expr` or a single `return expr;` after leading `Spec.Requires`/`Spec.RequiresWhen` / `Spec.Ensures`/`Spec.EnsuresWhen` statements, including both positional constructors and object initializers. Omitted arguments use their C# defaults at the call site; the callee is still verified for *all* argument values satisfying its preconditions.
 - A `Spec.*` expression may call a supported helper (same-compilation or cross-assembly exported), including a `[Ghost]` method; the analyzer checks its preconditions on the path to the call. Ghost methods are for specification use, not executable calls from verified code. Inlining requires a supported expression and statically known target, not a generic method, recursive definition, or unexported private/metadata-only implementation. More complex executable helpers still need explicit contracts. The query CLI proves call preconditions and safety obligations (`Overflow`, `DivisionByZero`, `CollectionBounds`) separately before checking the claim; an unproved safety obligation makes the query inconclusive.
 
 ## 4. Elm-Style Diagnostics & Agent JSON Schema
@@ -100,6 +104,8 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.
 - `VER104` (`Z3 SOLVER NOT FOUND`): missing Z3 binary (warning).
 - `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
+- `VER301` (`COMPLEX CONTRACT`, default `Info`, configurable via `.editorconfig` / `VerifiableMaxSpecClauses`): `Spec.Requires`/`Spec.Ensures` exceeds max top-level `&&` clauses (default 3; includes CodeFix to split) or uses nested ternaries.
+- `VER302` (`MISSING CONTRACT EXPLANATION`, default `Info`): missing or blank `because` argument on `[Verifiable]` `Spec.Requires`/`Spec.Ensures` calls.
 
 ## 5. Packages
 

@@ -9,6 +9,7 @@ internal static class VerifiableDescriptors
     private const string GatekeeperCategory = "Verifiable.Gatekeeper";
     private const string LinearCategory = "Verifiable.LinearTypes";
     private const string SmtCategory = "Verifiable.SMT";
+    private const string SpecQualityCategory = "Verifiable.SpecQuality";
 
     public static readonly DiagnosticDescriptor HeapAliasingOrMutableState = new(
         id: "VER001",
@@ -96,6 +97,22 @@ internal static class VerifiableDescriptors
         messageFormat: "{0}",
         category: SmtCategory,
         defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor SpecTooComplex = new(
+        id: "VER301",
+        title: "Contract specification clause is overly complex",
+        messageFormat: "{0}",
+        category: SpecQualityCategory,
+        defaultSeverity: DiagnosticSeverity.Info,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor MissingSpecExplanation = new(
+        id: "VER302",
+        title: "Contract specification is missing a plain-English 'because' explanation",
+        messageFormat: "{0}",
+        category: SpecQualityCategory,
+        defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true);
 
     public static Diagnostic CreateScoped(
