@@ -36,11 +36,33 @@ public class KernelBehaviourTests
     }
 
     [Fact]
+    public void BlocksBuild_OnlyProvedPasses_MissingSolverNeedsOptOut()
+    {
+        foreach (var verdict in Enum.GetValues<ObligationVerdict>())
+        {
+            Assert.Equal(verdict != ObligationVerdict.Proved, ProofKernel.BlocksBuild(verdict, allowMissingSolver: false));
+            Assert.Equal(
+                verdict is not (ObligationVerdict.Proved or ObligationVerdict.SolverMissing),
+                ProofKernel.BlocksBuild(verdict, allowMissingSolver: true));
+        }
+    }
+
+    [Fact]
     public void IsCacheable_OnlyDefinitiveAnswers()
     {
         foreach (var status in AllStatuses)
         {
             Assert.Equal(status is SmtStatus.Unsat or SmtStatus.Sat, ProofKernel.IsCacheable(status));
+        }
+    }
+
+    [Fact]
+    public void AcceptCachedAnswer_NeedsSignatureAndDefinitiveAnswer()
+    {
+        foreach (var status in AllStatuses)
+        {
+            Assert.False(ProofKernel.AcceptCachedAnswer(false, status));
+            Assert.Equal(status is SmtStatus.Unsat or SmtStatus.Sat, ProofKernel.AcceptCachedAnswer(true, status));
         }
     }
 

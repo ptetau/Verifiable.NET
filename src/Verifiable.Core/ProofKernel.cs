@@ -55,6 +55,22 @@ internal static class ProofKernel
     }
 
     /// <summary>
+    /// Whether a verdict must stop the build. Only a proved obligation passes. A missing solver
+    /// passes only when the project has explicitly opted out of proof checking.
+    /// </summary>
+    internal static bool BlocksBuild(ObligationVerdict verdict, bool allowMissingSolver)
+    {
+        Spec.Ensures<bool>(
+            r => r == !(verdict == ObligationVerdict.Proved ||
+                        (verdict == ObligationVerdict.SolverMissing && allowMissingSolver)),
+            "A build passes only when every obligation is proved; skipping proofs because Z3 is missing needs an explicit opt-out.");
+
+        if (verdict == ObligationVerdict.Proved) return false;
+        if (verdict == ObligationVerdict.SolverMissing) return !allowMissingSolver;
+        return true;
+    }
+
+    /// <summary>
     /// Whether a solver answer may be cached and replayed. Only definitive answers are cached, so a
     /// timeout or crash is always retried instead of being remembered.
     /// </summary>
@@ -65,6 +81,19 @@ internal static class ProofKernel
             "Only definitive solver answers (unsat or sat) may be cached; timeouts and errors must be retried.");
 
         return status == SmtStatus.Unsat || status == SmtStatus.Sat;
+    }
+
+    /// <summary>
+    /// Whether an answer read back from the disk cache may stand in for a Z3 call. It must carry a valid
+    /// signature for its own query, and be an answer the kernel would have cached in the first place.
+    /// </summary>
+    internal static bool AcceptCachedAnswer(bool signatureValid, SmtStatus status)
+    {
+        Spec.Ensures<bool>(
+            r => r == (signatureValid && (status == SmtStatus.Unsat || status == SmtStatus.Sat)),
+            "A cached answer replaces a proof only if it is signed for this exact query and is a definitive unsat or sat.");
+
+        return signatureValid && IsCacheable(status);
     }
 
     /// <summary>

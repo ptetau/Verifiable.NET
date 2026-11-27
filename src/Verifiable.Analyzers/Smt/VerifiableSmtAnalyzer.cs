@@ -44,6 +44,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             globalOptions.TryGetValue("build_property.VerifiableAgent", out var msbuildAgent);
             globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var msbuildClosedEnums);
             globalOptions.TryGetValue("build_property.VerifiableNonDefaultImmutableArrays", out var msbuildNonDefaultImmArr);
+            globalOptions.TryGetValue("build_property.VerifiableAllowMissingZ3", out var msbuildAllowMissingZ3);
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
@@ -55,6 +56,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
             var globalNonDefaultImmArr =
                 msbuildNonDefaultImmArr == "1" || string.Equals(msbuildNonDefaultImmArr, "true", StringComparison.OrdinalIgnoreCase);
+
+            var allowMissingSolver =
+                msbuildAllowMissingZ3 == "1" || string.Equals(msbuildAllowMissingZ3, "true", StringComparison.OrdinalIgnoreCase);
 
             var reportedUnavailable = 0;
 
@@ -145,15 +149,28 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         if (Interlocked.Exchange(ref reportedUnavailable, 1) == 0)
                         {
                             var z3Loc = method.Locations.FirstOrDefault() ?? ob.Location;
+                            var blocks = ProofKernel.BlocksBuild(verdict, allowMissingSolver);
                             var elmMissing = ElmDiagnosticFormatter.Format(
                                 "Z3 SOLVER NOT FOUND",
                                 z3Loc,
-                                "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped.",
+                                blocks
+                                    ? "The Z3 SMT solver executable could not be found, so the proofs that need it were not checked. The build stops because unchecked code must not pass as verified."
+                                    : "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped (`VerifiableAllowMissingZ3` is set).",
                                 explanation: "Checked `VERIFIABLE_Z3_PATH`, `.tools/z3`, `~/.verifiable/z3`, and `PATH`.",
-                                fixHint: "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.");
+                                fixHint: blocks
+                                    ? "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`."
+                                    : "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.",
+                                summary: blocks
+                                    ? "Z3 not found, so proofs were not checked. Install Z3 (Verifiable.Z3 package, scripts/install-z3, VERIFIABLE_Z3_PATH or PATH), or set <VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3> to build without proofs."
+                                    : "Z3 not found; proof checks skipped because VerifiableAllowMissingZ3 is set.");
+                            // Reported once per compilation and without a source location, so a `#pragma` or per-file
+                            // setting in whichever file happened to reach Z3 first cannot switch off the whole check.
                             opCtx.ReportDiagnostic(Diagnostic.Create(
                                 VerifiableDescriptors.Z3SolverUnavailable,
-                                z3Loc,
+                                Location.None,
+                                blocks ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,
+                                additionalLocations: null,
+                                properties: null,
                                 elmMissing));
                         }
                         return;

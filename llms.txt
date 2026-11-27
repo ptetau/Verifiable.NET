@@ -102,7 +102,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER102` (`PROOF FAILED`): Z3 refutation (`SAT`) with counterexample, `Why this rule exists:`, and under `VERIFIABLE_AGENT=1`:
   `<verifiable-counterexample>{"rule":"VER102","symbol":"...","kind":"...","contract":"...","reason":"...","counterexample":{...},"smtHash":"...","fix":"Fix: ..."}</verifiable-counterexample>`
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.
-- `VER104` (`Z3 SOLVER NOT FOUND`): missing Z3 binary (warning).
+- `VER104` (`Z3 SOLVER NOT FOUND`): missing Z3 binary, so nothing was proved. Error by default; `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` downgrades it to a warning.
 - `VER105` (`CONTRADICTORY PREMISES`): the method's assumptions contradict each other, so every proof in it would be vacuous; lists the clashing `Spec.Requires` / `[Invariant]` / `[TypeAlias<T>]` rules.
 - `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
 - `VER301` (`COMPLEX CONTRACT`, default `Info`, configurable via `.editorconfig` / `VerifiableMaxSpecClauses`): `Spec.Requires`/`Spec.Ensures` exceeds max top-level `&&` clauses (default 3; includes CodeFix to split) or uses nested ternaries.

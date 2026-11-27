@@ -12,9 +12,14 @@ matching versions instead of `Verifiable.NET`. Use the component `.nupkg` files
 from the GitHub release assets (or pack this checkout) in your own feed.
 The component packages do not
 require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
-`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes both
-`VerifiableZ3Path` and `VerifiableAgent` to the compiler; no hand-written
-`CompilerVisibleProperty` entries are needed.
+`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes
+`VerifiableZ3Path`, `VerifiableAgent` and `VerifiableAllowMissingZ3` to the
+compiler; no hand-written `CompilerVisibleProperty` entries are needed.
+
+If Z3 cannot be found, `VER104` stops the build, because nothing was proved.
+To build without proofs on purpose (for example on a machine that only packs),
+set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`. `VER104` then
+stays a warning, even under `TreatWarningsAsErrors` or `-warnaserror`.
 
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
 
@@ -314,7 +319,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER101` | `UNSUPPORTED CONTRACT` | Contract could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. |
 | `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
 | `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |
-| `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`). Warning only; proof checks resume once Z3 is present. |
+| `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`), so no proof was checked. Build error by default, because unchecked code must not pass as verified. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` (downgrades it to a warning). |
 | `VER105` | `CONTRADICTORY PREMISES` | No input satisfies a method's assumptions (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, callee guarantees, ...), so Z3 would "prove" any contract in it. The error lists the assumptions that clash. Fix the conflicting rule. Ordinary dead branches are not reported, but a `Spec.Requires` counts as an entry precondition wherever it appears in the method. A contradiction that arises on only one branch is not detected (see `docs/trusted-core.md`). |
 | `VER201` | `INVALID CONSTRAINED TYPE` | Type with `[TypeAlias<T>]` / `[Refined<T>]` is missing `readonly partial record struct` modifiers. |
 | `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |

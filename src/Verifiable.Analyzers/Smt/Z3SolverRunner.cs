@@ -40,8 +40,18 @@ internal static class Z3SolverRunner
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> UnixChmodChecked = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Test seam: when set on the current async flow, discovery behaves as if no Z3 is installed.
+    /// </summary>
+    internal static readonly AsyncLocal<bool> SimulateMissingSolver = new();
+
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
     {
+        if (SimulateMissingSolver.Value)
+        {
+            return null;
+        }
+
         var envPath = Environment.GetEnvironmentVariable("VERIFIABLE_Z3_PATH");
         if (!string.IsNullOrWhiteSpace(envPath) && File.Exists(envPath))
         {
@@ -200,7 +210,7 @@ internal static class Z3SolverRunner
         IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs)
     {
         var sb = new StringBuilder(smtScriptBody.Length + 128);
-        sb.Append(z3Path).Append('\n');
+        sb.Append(Z3Identity(z3Path)).Append('\n');
         if (!string.IsNullOrEmpty(mode)) sb.Append(mode).Append('\n');
         sb.Append(timeoutMs).Append('\n').Append(smtScriptBody);
         if (satEvalExprs is { Count: > 0 })
@@ -214,59 +224,41 @@ internal static class Z3SolverRunner
         return sb.ToString();
     }
 
-    private static string GetDiskCacheDirectory() =>
-        Path.Combine(Path.GetTempPath(), "verifiable-smt-cache-v1");
+    private static readonly Lazy<SignedAnswerCache?> DiskCache =
+        new(() => SignedAnswerCache.Open(SignedAnswerCache.DefaultDirectory()));
 
     private static bool TryLoadDiskCache(string hash, out SmtQueryResult? result)
     {
         result = null;
-        try
-        {
-            var path = Path.Combine(GetDiskCacheDirectory(), hash + ".cache");
-            if (!File.Exists(path)) return false;
-
-            var lines = File.ReadAllLines(path, Encoding.UTF8);
-            if (lines.Length == 0) return false;
-
-            if (!Enum.TryParse<SmtStatus>(lines[0], out var status)) return false;
-            // A cache entry can only replay an answer the kernel allows to be cached.
-            if (!Enum.IsDefined(typeof(SmtStatus), status) || !ProofKernel.IsCacheable(status)) return false;
-            var model = new Dictionary<string, string>(StringComparer.Ordinal);
-            for (var i = 1; i < lines.Length; i++)
-            {
-                var eq = lines[i].IndexOf('=');
-                if (eq > 0)
-                {
-                    model[lines[i].Substring(0, eq)] = lines[i].Substring(eq + 1);
-                }
-            }
-
-            result = new SmtQueryResult(status, hash, model, null);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        return DiskCache.Value?.TryLoad(hash, out result) == true;
     }
 
-    private static void TrySaveDiskCache(string hash, SmtQueryResult result)
+    private static void TrySaveDiskCache(string hash, SmtQueryResult result) =>
+        DiskCache.Value?.Save(hash, result);
+
+    private static readonly System.Reflection.MethodInfo? ResolveLinkTargetMethod =
+        typeof(File).GetMethod("ResolveLinkTarget", new[] { typeof(string), typeof(bool) });
+
+    /// <summary>
+    /// Identifies the Z3 binary by its resolved path, size and timestamp, so replacing Z3 (directly or behind a
+    /// symlink) invalidates cached answers. Computed on every query: a long-lived compiler server may outlive a Z3 upgrade.
+    /// </summary>
+    internal static string Z3Identity(string z3Path)
     {
         try
         {
-            var dir = GetDiskCacheDirectory();
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, hash + ".cache");
-            var lines = new List<string>(result.Model.Count + 1) { result.Status.ToString() };
-            foreach (var kv in result.Model)
+            var target = z3Path;
+            if (ResolveLinkTargetMethod?.Invoke(null, new object[] { z3Path, true }) is FileSystemInfo resolved)
             {
-                lines.Add($"{kv.Key}={kv.Value.Replace('\r', ' ').Replace('\n', ' ')}");
+                target = resolved.FullName;
             }
-            File.WriteAllLines(path, lines, Encoding.UTF8);
+
+            var info = new FileInfo(target);
+            return $"{z3Path}|{target}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
         }
         catch
         {
-            // Cache write failures are non-fatal
+            return z3Path;
         }
     }
 
