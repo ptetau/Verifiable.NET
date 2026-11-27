@@ -39,6 +39,7 @@ internal static class Z3SolverRunner
     private static readonly ConcurrentDictionary<string, SmtDetailedResult> DetailedMemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> UnixChmodChecked = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, string> Z3Identities = new(StringComparer.Ordinal);
 
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
     {
@@ -200,7 +201,7 @@ internal static class Z3SolverRunner
         IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs)
     {
         var sb = new StringBuilder(smtScriptBody.Length + 128);
-        sb.Append(z3Path).Append('\n');
+        sb.Append(Z3Identity(z3Path)).Append('\n');
         if (!string.IsNullOrEmpty(mode)) sb.Append(mode).Append('\n');
         sb.Append(timeoutMs).Append('\n').Append(smtScriptBody);
         if (satEvalExprs is { Count: > 0 })
@@ -214,61 +215,34 @@ internal static class Z3SolverRunner
         return sb.ToString();
     }
 
-    private static string GetDiskCacheDirectory() =>
-        Path.Combine(Path.GetTempPath(), "verifiable-smt-cache-v1");
+    private static readonly Lazy<SignedAnswerCache?> DiskCache =
+        new(() => SignedAnswerCache.Open(SignedAnswerCache.DefaultDirectory()));
 
     private static bool TryLoadDiskCache(string hash, out SmtQueryResult? result)
     {
         result = null;
-        try
-        {
-            var path = Path.Combine(GetDiskCacheDirectory(), hash + ".cache");
-            if (!File.Exists(path)) return false;
-
-            var lines = File.ReadAllLines(path, Encoding.UTF8);
-            if (lines.Length == 0) return false;
-
-            if (!Enum.TryParse<SmtStatus>(lines[0], out var status)) return false;
-            // A cache entry can only replay an answer the kernel allows to be cached.
-            if (!Enum.IsDefined(typeof(SmtStatus), status) || !ProofKernel.IsCacheable(status)) return false;
-            var model = new Dictionary<string, string>(StringComparer.Ordinal);
-            for (var i = 1; i < lines.Length; i++)
-            {
-                var eq = lines[i].IndexOf('=');
-                if (eq > 0)
-                {
-                    model[lines[i].Substring(0, eq)] = lines[i].Substring(eq + 1);
-                }
-            }
-
-            result = new SmtQueryResult(status, hash, model, null);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+        return DiskCache.Value?.TryLoad(hash, out result) == true;
     }
 
-    private static void TrySaveDiskCache(string hash, SmtQueryResult result)
-    {
-        try
+    private static void TrySaveDiskCache(string hash, SmtQueryResult result) =>
+        DiskCache.Value?.Save(hash, result);
+
+    /// <summary>
+    /// Identifies the Z3 binary by path, size and timestamp, so replacing Z3 in place invalidates cached answers.
+    /// </summary>
+    private static string Z3Identity(string z3Path) =>
+        Z3Identities.GetOrAdd(z3Path, static p =>
         {
-            var dir = GetDiskCacheDirectory();
-            Directory.CreateDirectory(dir);
-            var path = Path.Combine(dir, hash + ".cache");
-            var lines = new List<string>(result.Model.Count + 1) { result.Status.ToString() };
-            foreach (var kv in result.Model)
+            try
             {
-                lines.Add($"{kv.Key}={kv.Value.Replace('\r', ' ').Replace('\n', ' ')}");
+                var info = new FileInfo(p);
+                return $"{p}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
             }
-            File.WriteAllLines(path, lines, Encoding.UTF8);
-        }
-        catch
-        {
-            // Cache write failures are non-fatal
-        }
-    }
+            catch
+            {
+                return p;
+            }
+        });
 
     internal static Dictionary<string, string> ParseModel(string modelOutput)
     {

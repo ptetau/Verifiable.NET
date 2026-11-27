@@ -31,6 +31,7 @@ public class KernelSelfVerificationTests
     {
         { "ProofKernel.cs", "if (status == SmtStatus.Sat) return ObligationVerdict.Refuted;", "if (status == SmtStatus.Sat) return ObligationVerdict.Proved;", "ProofKernel.Decide" },
         { "ProofKernel.cs", "return status == SmtStatus.Unsat || status == SmtStatus.Sat;", "return status != SmtStatus.SolverUnavailable;", "ProofKernel.IsCacheable" },
+        { "ProofKernel.cs", "return signatureValid && IsCacheable(status);", "return IsCacheable(status);", "ProofKernel.AcceptCachedAnswer" },
         { "ProofKernel.cs", "if (line == \"unsat\") return SolverLine.Unsat;", "if (line.Contains(\"unsat\")) return SolverLine.Unsat;", "ProofKernel.ClassifyStatusLine" },
         { "ProofKernel.cs", "if (kind != SolverLine.Noise)", "if (kind == SolverLine.Unsat || kind == SolverLine.Sat)", "ProofKernel.ReadCheckSatAnswer" },
         { "ProofKernel.cs", "return preamble + \"\\n(assert (not \" + goal + \"))\\n\";", "return preamble + \"\\n(assert \" + goal + \")\\n\";", "ProofKernel.BuildRefutationQuery" },

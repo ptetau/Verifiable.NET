@@ -68,6 +68,19 @@ internal static class ProofKernel
     }
 
     /// <summary>
+    /// Whether an answer read back from the disk cache may stand in for a Z3 call. It must carry a valid
+    /// signature for its own query, and be an answer the kernel would have cached in the first place.
+    /// </summary>
+    internal static bool AcceptCachedAnswer(bool signatureValid, SmtStatus status)
+    {
+        Spec.Ensures<bool>(
+            r => r == (signatureValid && (status == SmtStatus.Unsat || status == SmtStatus.Sat)),
+            "A cached answer replaces a proof only if it is signed for this exact query and is a definitive unsat or sat.");
+
+        return signatureValid && IsCacheable(status);
+    }
+
+    /// <summary>
     /// Classifies one trimmed line of Z3 output.
     /// </summary>
     internal static SolverLine ClassifyStatusLine(string line)

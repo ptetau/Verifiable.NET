@@ -45,7 +45,7 @@ All Gatekeeper (`VER001`–`VER007`), SMT (`VER101`–`VER104`), and Source Gene
 4. `~/.verifiable/z3/z3(.exe)` (default target of `scripts/install-z3.ps1` and `scripts/install-z3.sh`)
 5. `PATH`
 
-Queries run over persistent `z3 -in` worker processes with `(echo "__VERIFIABLE_DONE__")` sentinels, `(set-option :timeout 2500)`, and SHA-256 in-memory + `%TEMP%/verifiable-smt-cache-v1` caching.
+Queries run over persistent `z3 -in` worker processes with `(echo "__VERIFIABLE_DONE__")` sentinels, `(set-option :timeout 2500)`, and SHA-256 in-memory caching plus a signed disk cache in `<LocalApplicationData>/Verifiable/smt-cache-v2` (owner-only folder; each entry carries an HMAC-SHA256 over its query hash and answer, keyed with a per-user secret; entries that fail to verify are ignored). The query hash includes the Z3 binary's path, size and timestamp, so replacing Z3 invalidates old answers.
 
 ## 3. GalaxyCheck Integration (`external/GalaxyCheck`)
 
