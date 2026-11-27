@@ -30,6 +30,7 @@ public class CalendarArithmeticTests
             public static decimal Dynamic(decimal x, int places) {
                 Spec.Requires(places >= 0 && places <= 28);
                 Spec.Ensures<decimal>(r => r == decimal.Round(x, places));
+                Spec.Ensures(Spec.Result<decimal>() == decimal.Round(x, places));
                 return decimal.Round(decimals: places, d: x);
             }
             """));

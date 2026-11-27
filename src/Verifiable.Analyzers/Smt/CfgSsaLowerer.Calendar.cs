@@ -29,6 +29,7 @@ internal sealed partial class CfgSsaLowerer
             IUnaryOperation { OperatorKind: UnaryOperatorKind.Plus or UnaryOperatorKind.Minus } u =>
                 u.Operand.Type?.SpecialType != SpecialType.System_Decimal,
             IConversionOperation c => c.Operand.Type?.SpecialType != SpecialType.System_Decimal,
+            IInvocationOperation result when VerifiableSymbolHelpers.IsSpecCall(result.TargetMethod, "Result") => false,
             _ => true
         })
             _inexactDecimalProducer = op;
