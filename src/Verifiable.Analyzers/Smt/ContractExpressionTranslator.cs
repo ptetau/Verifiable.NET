@@ -91,6 +91,23 @@ internal sealed class ContractExpressionTranslator
     {
         var srcSort = _types.GetSort(value.Type);
         var dstSort = _types.GetSort(targetType);
+        if ((value.Type.TypeKind == TypeKind.Enum || targetType.TypeKind == TypeKind.Enum) &&
+            !SymbolEqualityComparer.Default.Equals(value.Type, targetType) &&
+            !_types.TryGetNullableInfo(targetType, out _, out _, out _))
+        {
+            var width = IntegralWidth(targetType);
+            if (IntegralWidth(value.Type) == 0 || width == 0)
+                throw new ContractLoweringException($"Unsupported enum conversion from '{value.Type}' to '{targetType}'.");
+            // The enum sort is Int, but CLR enum casts use the destination
+            // integral width and signedness (including unchecked narrowing).
+            var number = IntTermForIndex(value);
+            var bits = $"((_ int2bv {width}) {number})";
+            if (IsBitVecSort(dstSort)) return new SmtTypedTerm(bits, targetType);
+            var target = (targetType as INamedTypeSymbol)?.EnumUnderlyingType ?? targetType;
+            var signed = target.SpecialType is SpecialType.System_SByte or SpecialType.System_Int16 or
+                SpecialType.System_Int32 or SpecialType.System_Int64;
+            return new SmtTypedTerm(signed ? BitVecToInt(bits, width) : $"(bv2int {bits})", targetType);
+        }
         if (srcSort == dstSort)
         {
             return new SmtTypedTerm(value.Term, targetType);
@@ -148,6 +165,16 @@ internal sealed class ContractExpressionTranslator
 
         return new SmtTypedTerm(value.Term, targetType);
     }
+
+    private static int IntegralWidth(ITypeSymbol type) =>
+        ((type as INamedTypeSymbol)?.EnumUnderlyingType ?? type).SpecialType switch
+        {
+            SpecialType.System_Byte or SpecialType.System_SByte => 8,
+            SpecialType.System_Int16 or SpecialType.System_UInt16 or SpecialType.System_Char => 16,
+            SpecialType.System_Int32 or SpecialType.System_UInt32 => 32,
+            SpecialType.System_Int64 or SpecialType.System_UInt64 => 64,
+            _ => 0
+        };
 
     public (string Left, string Right, ITypeSymbol UnifiedType) UnifyNumericPair(SmtTypedTerm left, SmtTypedTerm right)
     {
@@ -279,8 +306,19 @@ internal sealed class ContractExpressionTranslator
         return isNeg ? $"(- {term})" : term;
     }
 
-    public static string EscapeSmtString(string text) =>
-        "\"" + text.Replace("\"", "\"\"") + "\"";
+    public static string EscapeSmtString(string text)
+    {
+        // Encode .NET UTF-16 code units individually, including surrogate pairs.
+        // A literal backslash must never introduce a solver-side \u{...} escape.
+        var literal = new System.Text.StringBuilder("\"");
+        foreach (var c in text)
+        {
+            if (c == '"') literal.Append("\"\"");
+            else if (c is >= ' ' and <= '~' && c != '\\') literal.Append(c);
+            else literal.Append("\\u{").Append(((int)c).ToString("x", CultureInfo.InvariantCulture)).Append('}');
+        }
+        return literal.Append('"').ToString();
+    }
 
     public static bool IsBitVecSort(string sort) =>
         sort is "(_ BitVec 32)" or "(_ BitVec 64)";

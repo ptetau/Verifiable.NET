@@ -12,8 +12,8 @@ matching versions instead of `Verifiable.NET`. Use the component `.nupkg` files
 from the GitHub release assets (or pack this checkout) in your own feed.
 The component packages do not
 require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
-`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes both
-`VerifiableZ3Path` and `VerifiableAgent` to the compiler; no hand-written
+`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes
+`VerifiableZ3Path`, `VerifiableAgent`, and `VerifiableClosedEnums` to the compiler; no hand-written
 `CompilerVisibleProperty` entries are needed.
 
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
@@ -170,6 +170,40 @@ public static class Orders
 `Adapt` calls `Project` with `includeExtras: true`; the default is **not** a precondition on `Project`. Explicit callers can still pass `false`. The verifier can expand a supported, statically resolved, non-generic helper with an expression body or a single return after leading `Spec.Requires` or `Spec.Ensures` statements. Recursive definitions are not expanded. Use `[Ghost]` for a helper intended only for specifications. A call inside a specification must still satisfy the helper's preconditions.
 
 Nullable expressions work in both the implementation and the contract. For `decimal? value`, `value >= 10m` is false when `value` is null, and `value ?? 0m` returns zero in that case. For a struct instance method, use a boolean postcondition such as `Spec.Ensures(Spec.Result<bool>() == (Left != 0 || Right != 0));` to avoid capturing `this` in a lambda.
+
+### Checking that enum cases are exhaustive
+
+C# enum values are not necessarily named members: a cast, a zero-initialized field, or deserialized data can introduce other values. By default, the prover therefore leaves enum inputs open. If your application validates them **before** calling verified methods, opt in to the closed-input assumption with `<VerifiableClosedEnums>true</VerifiableClosedEnums>` in the consuming project. This is a build-time proof assumption, **not** runtime validation.
+
+```csharp
+public enum Status { Draft, Submitted }
+
+[Verifiable]
+public static bool Handled(Status status)
+{
+    Spec.Ensures<bool>(result => result, "Handle every declared status.");
+    return status == Status.Draft || status == Status.Submitted;
+}
+```
+
+With the option enabled, adding `Cancelled` without updating the return expression produces `VER102`. The assumption applies to non-flags enum inputs and their stored enum fields, not `[Flags]` combinations or arbitrary integer-to-enum casts within the method.
+
+### Text and collection predicates
+
+* `string.IsNullOrWhiteSpace` accepts null; parameterless `Trim()` removes .NET whitespace from both ends. Use `Contains` for ordinal substring checks. For a string prefix or suffix, specify `StringComparison.Ordinal`: `text.StartsWith("INV-", StringComparison.Ordinal)`. The single-string `StartsWith` and `EndsWith` overloads use the current culture, so an ordinal proof would not establish their runtime behavior.
+* `string.Join` supports a bounded list of inline string elements (up to 32). A null separator or null element contributes the empty string, as at runtime. This does not model arbitrary enumerable iteration or element `ToString()` calls.
+* For pattern matching, use static `Regex.IsMatch(input, constantPattern)` or a parameterless `[GeneratedRegex]` factory followed by `.IsMatch(input)`. The prover models search, not just whole-string matching: use anchors when the whole input matters. The supported subset includes literal characters, positive character classes and ranges, `\d`, grouping, alternation, and quantifiers. Backreferences, lookarounds and culture-sensitive options are not supported.
+* On `ImmutableArray<T>` and `ImmutableList<T>`, compose `Where` and `Select` with `Any`, `All`, or `Count`, using inline, side-effect-free lambdas. For duplicate keys, use `items.GroupBy(x => x.Key).Any(g => g.Count() > 1)`: the prover checks for **two distinct indices** with equal keys. This is not a general model of `IGrouping`, deferred execution, or custom comparers. `IReadOnlyList<T>` alone is not proof that a collection is immutable.
+
+### Mapping DTOs with initializers
+
+A mapper may return `new OrderResponse { Id = dto.Id, Total = dto.Total }` and prove `Spec.Ensures<OrderResponse>(r => r.Id == dto.Id && r.Total == dto.Total)`. These are proofs about the values of stored properties, not reference identity. Init-only auto-property projections can also be expanded in helper contracts. A DTO with mutable setters must be constructed and returned in the same expression: saving it in a local and mutating or aliasing it later is not supported. Use plain source-defined types with scalar auto-properties, not arbitrary constructors, virtual setters, or property initializers with executable behavior.
+
+### Rounding and calendar arithmetic
+
+Use `decimal.Round(amount, scale) == amount` to express that an amount is unchanged by rounding. Midpoints round to even, including for negative amounts; a variable scale must be provably between 0 and 28. This is a numeric property, not a check on the stored number of trailing zeros in a `decimal`.
+
+Pass dates and durations into the method rather than reading the clock. `DateOnly` uses day numbers; `DateTime` and `TimeSpan` use ticks. Calendar operations must stay in range. For example, guard `day.AddDays(1)` with `Spec.Requires(day < DateOnly.MaxValue)`. The model supports comparisons, day-of-week, differences between `DateTime` values, and comparisons of `TimeSpan.TotalSeconds` to constants. It does not model time-zone conversion or arbitrary floating-point calculations. Ambient `DateTime.Now`, `UtcNow`, and `Today` remain disallowed.
 
 ---
 

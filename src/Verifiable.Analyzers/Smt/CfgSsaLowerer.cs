@@ -52,11 +52,12 @@ internal sealed record LoweringOutcome(
     IReadOnlyList<ProofObligation> Obligations,
     IReadOnlyList<(string Contract, Location Location, string Error)> Errors);
 
-internal sealed class CfgSsaLowerer
+internal sealed partial class CfgSsaLowerer
 {
     private readonly Compilation _compilation;
     private readonly IMethodSymbol _method;
     private readonly bool _trackProofPremises;
+    private readonly bool _closedEnums;
     private readonly SmtTypeSystem _types;
     private readonly ContractExpressionTranslator _translator;
 
@@ -131,11 +132,12 @@ internal sealed class CfgSsaLowerer
     private readonly Dictionary<ISymbol, SmtTypedTerm> _entryParamVars = new(SymbolEqualityComparer.Default);
     private SmtTypedTerm? _entryThis;
 
-    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false)
+    public CfgSsaLowerer(Compilation compilation, IMethodSymbol method, bool trackProofPremises = false, bool closedEnums = false)
     {
         _compilation = compilation;
         _method = method;
         _trackProofPremises = trackProofPremises;
+        _closedEnums = closedEnums;
         var useBitVec = HasCheckedArithmetic(method);
         _types = new SmtTypeSystem(useBitVec);
         _translator = new ContractExpressionTranslator(compilation, _types);
@@ -202,6 +204,7 @@ internal sealed class CfgSsaLowerer
             _entryThis = thisTerm;
             entryEnv.ThisOverride = thisTerm;
             EmitTypeAssumptions(thisTerm, methodLoc);
+            AssumeEntryEnumDomains(thisTerm, methodLoc);
         }
 
         foreach (var p in _method.Parameters)
@@ -214,6 +217,7 @@ internal sealed class CfgSsaLowerer
             entryEnv.Vars[p] = pTerm;
             _entryParamVars[p] = pTerm;
             EmitTypeAssumptions(pTerm, p.Locations.FirstOrDefault() ?? methodLoc);
+            AssumeEntryEnumDomains(pTerm, p.Locations.FirstOrDefault() ?? methodLoc);
         }
 
         _currentSpecs = ExtractMethodSpecs(_compilation, _method, rawOperationBlocks);
@@ -1124,6 +1128,9 @@ internal sealed class CfgSsaLowerer
         switch (op)
         {
             case IConversionOperation conv:
+                if (conv.OperatorMethod is not null &&
+                    (conv.Type?.TypeKind == TypeKind.Enum || conv.Operand.Type?.TypeKind == TypeKind.Enum))
+                    throw new ContractLoweringException($"Unsupported user-defined enum conversion in '{conv.Syntax}'.");
                 // In the CFG the ?? arms and their conversions are separate operations;
                 // do not reinterpret unsupported conversions (e.g. boxing) as identity.
                 var inCoalesce = conv.Syntax.AncestorsAndSelf().Any(s => s.IsKind(SyntaxKind.CoalesceExpression));
@@ -1222,6 +1229,15 @@ internal sealed class CfgSsaLowerer
 
             case IUnaryOperation un:
                 var uOp = LowerExpression(un.Operand, gamma, env, emitObligations, inlineDepth);
+                if (CalendarArithmetic.CalendarType(uOp.Type) is not null)
+                    return un.OperatorKind switch
+                    {
+                        UnaryOperatorKind.Plus => uOp,
+                        UnaryOperatorKind.Minus => CheckedCalendar($"(- {uOp.Term})", uOp.Type, gamma, un.Syntax.GetLocation()),
+                        _ => throw new ContractLoweringException($"Unsupported calendar operator '{un.Syntax}'.")
+                    };
+                if (uOp.Type.TypeKind == TypeKind.Enum)
+                    throw new ContractLoweringException($"Unsupported enum operation '{un.OperatorKind}'.");
                 if (un.OperatorKind == UnaryOperatorKind.Not)
                     return new SmtTypedTerm($"(not {uOp.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 if (un.OperatorKind == UnaryOperatorKind.Minus)
@@ -1246,6 +1262,11 @@ internal sealed class CfgSsaLowerer
                 return uOp;
 
             case IBinaryOperation bin:
+                if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
+                    (UsesDtoIdentity(bin.LeftOperand.Type) || UsesDtoIdentity(bin.RightOperand.Type)))
+                    throw new ContractLoweringException("Reference identity of class DTOs is not modeled; compare their stored properties instead.");
+                if (TryCompareTotalSeconds(bin, gamma, env, emitObligations, inlineDepth) is { } seconds)
+                    return seconds;
                 if (bin.IsLifted)
                     return LowerLiftedComparison(bin, gamma, env, emitObligations, inlineDepth);
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalAnd)
@@ -1388,6 +1409,8 @@ internal sealed class CfgSsaLowerer
                 return new SmtTypedTerm($"opt-none-{optId}", type);
             return new SmtTypedTerm("str-null", _compilation.GetSpecialType(SpecialType.System_String));
         }
+        if (type.TypeKind == TypeKind.Enum)
+            return new SmtTypedTerm(FormatEnumConstant(val), type);
         if (val is bool b)
             return new SmtTypedTerm(b ? "true" : "false", type);
         if (val is int iv)
@@ -1398,12 +1421,8 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm(ContractExpressionTranslator.FormatDecimalLiteral(dv), type);
         if (val is string sv)
             return new SmtTypedTerm($"(str-val {ContractExpressionTranslator.EscapeSmtString(sv)})", type);
-        if (type.TypeKind == TypeKind.Enum)
-        {
-            var num = Convert.ToInt64(val, CultureInfo.InvariantCulture);
-            return new SmtTypedTerm(num < 0 ? $"(- {-num})" : num.ToString(CultureInfo.InvariantCulture), type);
-        }
-
+        if (val is ulong ul)
+            return new SmtTypedTerm(ul.ToString(CultureInfo.InvariantCulture), type);
         return new SmtTypedTerm(Convert.ToInt64(val, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture), type);
     }
 
@@ -1416,6 +1435,15 @@ internal sealed class CfgSsaLowerer
         Location loc,
         bool emitObligations = true)
     {
+        if (CalendarArithmetic.CalendarType(left.Type) is not null || CalendarArithmetic.CalendarType(right.Type) is not null)
+            return LowerCalendarBinary(kind, left, right, resultType, gamma, loc);
+
+        if ((left.Type.TypeKind == TypeKind.Enum || right.Type.TypeKind == TypeKind.Enum) &&
+            kind is not (BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals or
+                BinaryOperatorKind.LessThan or BinaryOperatorKind.LessThanOrEqual or
+                BinaryOperatorKind.GreaterThan or BinaryOperatorKind.GreaterThanOrEqual))
+            throw new ContractLoweringException($"Unsupported enum operation '{kind}'.");
+
         if (kind == BinaryOperatorKind.Add &&
             (resultType.SpecialType == SpecialType.System_String ||
              left.Type.SpecialType == SpecialType.System_String ||
@@ -1621,6 +1649,14 @@ internal sealed class CfgSsaLowerer
         int inlineDepth)
     {
         var prop = propRef.Property;
+        if (propRef.Instance is null && VerifiableSymbolHelpers.IsNondeterministicMember(prop, out var ambient))
+            throw new ContractLoweringException($"Ambient property '{ambient}' is not deterministic.");
+        if (CalendarArithmetic.CalendarType(prop.ContainingType) is { } calendar)
+        {
+            if (propRef.Instance is null) return CalendarConstant(calendar, prop.Name, prop.Type);
+            var receiver = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
+            return CalendarMember(calendar, receiver.Term, prop.Name, prop.Type);
+        }
 
         if (prop.IsIndexer && propRef.Instance is not null && propRef.Arguments.Length == 1)
         {
@@ -1687,8 +1723,17 @@ internal sealed class CfgSsaLowerer
         int inlineDepth)
     {
         var field = fieldRef.Field;
+        if (CalendarArithmetic.CalendarType(field.ContainingType) is { } calendar && !field.HasConstantValue)
+            return CalendarConstant(calendar, field.Name, field.Type);
         if (fieldRef.Instance is null)
         {
+            if (field.ContainingType.SpecialType == SpecialType.System_String && field.Name == "Empty")
+                return new SmtTypedTerm("(str-val \"\")", field.Type);
+            if (field.HasConstantValue && field.Type.SpecialType == SpecialType.System_String)
+                return new SmtTypedTerm(field.ConstantValue is string s
+                    ? $"(str-val {ContractExpressionTranslator.EscapeSmtString(s)})" : "str-null", field.Type);
+            if (field.ConstantValue is char c)
+                return new SmtTypedTerm(((int)c).ToString(CultureInfo.InvariantCulture), field.Type);
             var containing = field.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
             if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && field.Name == "Empty")
             {
@@ -1702,8 +1747,7 @@ internal sealed class CfgSsaLowerer
             {
                 if (field.Type.TypeKind == TypeKind.Enum)
                 {
-                    var num = Convert.ToInt64(field.ConstantValue, CultureInfo.InvariantCulture);
-                    return new SmtTypedTerm(num < 0 ? $"(- {-num})" : num.ToString(CultureInfo.InvariantCulture), field.Type);
+                    return new SmtTypedTerm(FormatEnumConstant(field.ConstantValue), field.Type);
                 }
                 if (field.ConstantValue is int iv) return new SmtTypedTerm(_translator.FormatIntLiteral(iv, 32), field.Type);
                 if (field.ConstantValue is long lv) return new SmtTypedTerm(_translator.FormatLongLiteral(lv), field.Type);
@@ -1785,13 +1829,26 @@ internal sealed class CfgSsaLowerer
 
     private SmtTypedTerm LowerObjectCreation(IObjectCreationOperation objCreate, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
+        // Roslyn splits a body initializer into a fresh capture plus member writes.
+        // Recover its original tree to validate the lifetime and setter semantics.
+        var hasInitializer = objCreate.Syntax is BaseObjectCreationExpressionSyntax { Initializer: { } initSyntax } &&
+            initSyntax.IsKind(SyntaxKind.ObjectInitializerExpression);
+        if (hasInitializer)
+        {
+            var original = objCreate.Initializer is not null ? objCreate :
+                _compilation.GetSemanticModel(objCreate.Syntax.SyntaxTree).GetOperation(objCreate.Syntax) as IObjectCreationOperation;
+            if (original is null || !InitializerProjection.IsSupported(original, allowBoundaryDto: true))
+                throw new ContractLoweringException($"Unsupported constructor, setter, or non-write-once projection in '{objCreate.Syntax}'.");
+        }
         var targetType = objCreate.Type!;
+        if (CalendarArithmetic.CalendarType(targetType) is { } calendar)
+            return LowerCalendarConstructor(calendar, objCreate, gamma, env, emitObligations, inlineDepth);
         if (!_types.TryGetComposite(targetType, out var comp))
         {
             return new SmtTypedTerm(_types.GetDefaultTerm(targetType), targetType);
         }
 
-        var argMap = new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
+        var argMap = new Dictionary<string, SmtTypedTerm>(hasInitializer ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
         foreach (var arg in objCreate.Arguments)
         {
             if (arg.Parameter is not null)
@@ -1896,7 +1953,25 @@ internal sealed class CfgSsaLowerer
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
+        if (VerifiableSymbolHelpers.IsLinqProvider(method))
+            return LowerImmutableQuery(inv, gamma, env, emitObligations, inlineDepth);
+
+        if (RegexModel.IsMatchMethod(method))
+        {
+            var (input, regex) = RegexModel.Describe(inv);
+            var value = LowerExpression(input, gamma, env, emitObligations, inlineDepth);
+            if (emitObligations)
+                AddObligation("Precondition", "Regex.IsMatch input must not be null", loc, gamma, $"(not (= {value.Term} str-null))");
+            return new SmtTypedTerm($"(str.in_re (str-text {value.Term}) {regex})", method.ReturnType);
+        }
+
+        if (CalendarArithmetic.CalendarType(containing) is not null ||
+            containing?.SpecialType == SpecialType.System_Decimal && method.Name == "Round")
+            return LowerCalendarInvocation(inv, gamma, env, emitObligations, inlineDepth);
+
         var recvTerm = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
+        if (StringIntrinsics.Handles(method))
+            return LowerStringIntrinsic(inv, recvTerm, gamma, env, emitObligations, inlineDepth);
 
         // The CFG for `nullable ?? fallback` extracts the present payload with this call.
         if (recvTerm is not null && containing?.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
@@ -2100,17 +2175,11 @@ internal sealed class CfgSsaLowerer
             }
         }
 
-        if (containing?.SpecialType == SpecialType.System_String && method.Name == "IsNullOrEmpty" && argValues.Count == 1)
-        {
-            var s = _translator.UnwrapRefinedIfApplicable(argValues[0]);
-            return new SmtTypedTerm(
-                $"(or (= {s.Term} str-null) (= (str.len (str-text {s.Term})) 0))",
-                _compilation.GetSpecialType(SpecialType.System_Boolean));
-        }
-
         if (method.Name == "Equals" && recvTerm is not null && argValues.Count == 1 &&
             (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
+            if (UsesDtoIdentity(recvTerm.Type) || UsesDtoIdentity(method.ContainingType))
+                throw new ContractLoweringException("Reference identity of class DTOs is not modeled; compare their stored properties instead.");
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
             return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
@@ -2180,6 +2249,15 @@ internal sealed class CfgSsaLowerer
 
         if (specs.Ensures.Count > 0)
         {
+            // A summary proved under entry assumptions does not describe calls
+            // with unnamed enum arguments (including those in record fields).
+            var summaryGuard = gamma;
+            if (_closedEnums && VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable)
+            {
+                foreach (var input in receiver is null ? args : args.Concat(new[] { receiver }))
+                    foreach (var domain in EntryEnumDomains(input))
+                        summaryGuard = $"(and {summaryGuard} {domain})";
+            }
             calleeEnv.SpecResult = retTerm;
             foreach (var ens in specs.Ensures)
             {
@@ -2193,7 +2271,7 @@ internal sealed class CfgSsaLowerer
                     var ensTerm = LowerExpression(ens.BodyExpr, gamma, calleeEnv, emitObligations: false);
                     var ensLoc = ens.Location != Location.None ? ens.Location : loc;
                     AddAssertion(
-                        $"(=> {gamma} {ensTerm.Term})",
+                        $"(=> {summaryGuard} {ensTerm.Term})",
                         "CalleeEnsures",
                         $"{method.ContainingType?.Name}.{method.Name}: {ens.DisplayText}",
                         ensLoc,
@@ -2210,16 +2288,24 @@ internal sealed class CfgSsaLowerer
     }
 
     private bool CanUseHelperBody(IOperation body) =>
-        !body.DescendantsAndSelf().Any(op => op is IAssignmentOperation or IIncrementOrDecrementOperation
+        !body.DescendantsAndSelf().Any(op => op is IAssignmentOperation &&
+            op.Parent is not IObjectOrCollectionInitializerOperation { Parent: IObjectCreationOperation } ||
+            op is IIncrementOrDecrementOperation
             or ILocalReferenceOperation or IAnonymousFunctionOperation ||
             op is IConversionOperation { OperatorMethod: not null } ||
             op is IBinaryOperation { OperatorMethod: { } binary } && !IsBuiltInValueOperator(binary) ||
             op is IUnaryOperation { OperatorMethod: { } unary } && !IsBuiltInValueOperator(unary) ||
-            op is IObjectCreationOperation obj && !IsPositionalProjection(obj));
+            op is IObjectCreationOperation obj && !(obj.Initializer is null
+                ? IsPositionalProjection(obj)
+                : InitializerProjection.IsSupported(obj, allowBoundaryDto: false)));
 
     private static bool IsBuiltInValueOperator(IMethodSymbol method) =>
         method.ContainingType.SpecialType is SpecialType.System_Decimal or SpecialType.System_String ||
         method.IsImplicitlyDeclared && method.ContainingType.IsRecord;
+
+    private static bool UsesDtoIdentity(ITypeSymbol? type) => type is INamedTypeSymbol
+        { TypeKind: TypeKind.Class, IsRecord: false } named &&
+        (named.SpecialType == SpecialType.System_Object || !named.DeclaringSyntaxReferences.IsEmpty);
 
     private bool IsPositionalProjection(IObjectCreationOperation obj)
     {
@@ -2272,8 +2358,59 @@ internal sealed class CfgSsaLowerer
         }
     }
 
+    private static string FormatEnumConstant(object constant)
+    {
+        var text = Convert.ToString(constant, CultureInfo.InvariantCulture)!;
+        return text.StartsWith("-", StringComparison.Ordinal) ? $"(- {text.Substring(1)})" : text;
+    }
+
+    private void AssumeEntryEnumDomains(SmtTypedTerm value, Location loc)
+    {
+        if (!_closedEnums) return;
+        foreach (var domain in EntryEnumDomains(value))
+            AddAssertion(domain, "EnumDomain", $"closed enum domain in {value.Type.Name}", loc);
+    }
+
+    private IEnumerable<string> EntryEnumDomains(SmtTypedTerm value, HashSet<ITypeSymbol>? ancestors = null)
+    {
+        if (value.Type.TypeKind == TypeKind.Enum)
+        {
+            if (value.Type.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "System.FlagsAttribute"))
+                yield break;
+
+            var members = value.Type.GetMembers().OfType<IFieldSymbol>()
+                .Where(f => f.HasConstantValue && f.ConstantValue is not null)
+                .Select(f => FormatEnumConstant(f.ConstantValue!)).Distinct()
+                .Select(n => $"(= {value.Term} {n})").ToArray();
+            // An empty enum must not make every proof vacuously true.
+            if (members.Length > 0)
+                yield return members.Length == 1 ? members[0] : $"(or {string.Join(" ", members)})";
+        }
+        else if (_types.TryGetComposite(value.Type, out var composite))
+        {
+            ancestors ??= new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+            if (!ancestors.Add(value.Type)) yield break;
+            var fields = value.Type.GetMembers().OfType<IFieldSymbol>().Where(field => !field.IsStatic).ToArray();
+            foreach (var f in composite!.Fields)
+            {
+                // The general composite model also has synthetic selectors and
+                // opaque/computed properties. Only assume facts about storage.
+                if (!fields.Any(field => field.Name == f.Name || field.AssociatedSymbol?.Name == f.Name))
+                    continue;
+                foreach (var domain in EntryEnumDomains(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), ancestors))
+                    yield return domain;
+            }
+            ancestors.Remove(value.Type);
+        }
+    }
+
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (CalendarArithmetic.CalendarType(value.Type) is { } calendar)
+        {
+            AddAssertion(CalendarArithmetic.InRange(calendar, value.Term), "CalendarRange", $"{calendar} range", loc);
+            return;
+        }
         if (_types.TryGetDictionaryInfo(value.Type, out _, out var dictId, out var kType, out _))
         {
             var kSort = _types.GetSort(kType!);

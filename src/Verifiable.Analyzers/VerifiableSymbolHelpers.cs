@@ -230,6 +230,24 @@ internal static class VerifiableSymbolHelpers
         return false;
     }
 
+    internal static bool IsLinqProvider(IMethodSymbol method)
+    {
+        if (!method.IsStatic) return false;
+        var assembly = method.ContainingAssembly.Identity;
+        return (method.ContainingType.ToDisplayString(), assembly.Name) switch
+        {
+            ("System.Linq.Enumerable", "System.Linq") or
+            ("System.Linq.ImmutableArrayExtensions", "System.Collections.Immutable") =>
+                IsFrameworkLinqAssembly(assembly),
+            ("System.Linq.Enumerable", "System.Core") =>
+                assembly.PublicKeyToken.SequenceEqual(new byte[] { 0xb7, 0x7a, 0x5c, 0x56, 0x19, 0x34, 0xe0, 0x89 }),
+            _ => false
+        };
+    }
+
+    internal static bool IsFrameworkLinqAssembly(AssemblyIdentity assembly) =>
+        assembly.PublicKeyToken.SequenceEqual(new byte[] { 0xb0, 0x3f, 0x5f, 0x7f, 0x11, 0xd5, 0x0a, 0x3a });
+
     public static bool IsTrustedPureMethod(IMethodSymbol method)
     {
         if (HasAttribute(method, PureAxiomAttr))
@@ -266,6 +284,8 @@ internal static class VerifiableSymbolHelpers
         var ns = containingType.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var typeFull = containingType.OriginalDefinition.ToDisplayString();
 
+        if (Smt.CalendarArithmetic.Supports(method)) return true;
+
         // Default display names use C# aliases. Match pure helpers by symbol identity;
         // trusting whole primitive types would also admit culture-sensitive and mutating APIs.
         if (method.IsStatic && (containingType.SpecialType switch
@@ -285,13 +305,15 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
+        if (IsLinqProvider(method))
+            return method.Name is "Any" or "All" or "Count" or "Where" or "Select" or "GroupBy";
+
         if (typeFull is
             "System.Math" or
             "System.MathF" or
             "System.Guid" or
             "System.Enum" or
             "System.ValueTuple" or
-            "System.Linq.Enumerable" or
             "System.Collections.Generic.Comparer<T>" or
             "System.Collections.Generic.EqualityComparer<T>" or
             "System.Collections.Generic.KeyValuePair<TKey, TValue>" or

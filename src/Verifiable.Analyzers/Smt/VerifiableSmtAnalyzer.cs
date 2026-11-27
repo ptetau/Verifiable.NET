@@ -40,6 +40,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             var globalOptions = compilationCtx.Options.AnalyzerConfigOptionsProvider.GlobalOptions;
             globalOptions.TryGetValue("build_property.VerifiableZ3Path", out var msbuildZ3Path);
             globalOptions.TryGetValue("build_property.VerifiableAgent", out var msbuildAgent);
+            globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var enumOption);
+            var closedEnums = bool.TryParse(enumOption, out var enabled) && enabled;
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
@@ -69,7 +71,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
-                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method);
+                var lowerer = new CfgSsaLowerer(opCtx.Compilation, method, closedEnums: closedEnums);
 
                 var allObligations = new List<ProofObligation>();
                 var allErrors = new List<(string Contract, Location Location, string Error)>();
@@ -193,9 +195,31 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         {
             foreach (var op in b.DescendantsAndSelf())
             {
+                if (op is IInvocationOperation cal && (CalendarArithmetic.CalendarType(cal.TargetMethod.ContainingType) is not null ||
+                    cal.TargetMethod.ContainingType.SpecialType == SpecialType.System_Decimal && cal.TargetMethod.Name == "Round") ||
+                    op is IObjectCreationOperation ctor && CalendarArithmetic.CalendarType(ctor.Type) is not null ||
+                    op is IBinaryOperation bin && CalendarArithmetic.CalendarType(bin.Type) is not null ||
+                    op is IUnaryOperation unary && CalendarArithmetic.CalendarType(unary.Type) is not null ||
+                    op is IPropertyReferenceOperation property && CalendarArithmetic.CalendarType(property.Property.ContainingType) is not null)
+                    return true;
+
                 if (op is IInvocationOperation inv)
                 {
+                    if (RegexModel.IsMatchMethod(inv.TargetMethod))
+                        return true;
+
+                    // Instance string searches and Trim require a non-null receiver
+                    // even when the method has no explicit specification.
+                    if (StringIntrinsics.Handles(inv.TargetMethod) &&
+                        (!inv.TargetMethod.IsStatic || inv.TargetMethod.Name == "Join"))
+                        return true;
+
                     if (inv.TargetMethod.ContainingType?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
+                    {
+                        return true;
+                    }
+
+                    if (VerifiableSymbolHelpers.IsLinqProvider(inv.TargetMethod))
                     {
                         return true;
                     }

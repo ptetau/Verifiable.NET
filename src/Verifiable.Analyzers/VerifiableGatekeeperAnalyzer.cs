@@ -301,9 +301,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 break;
 
+            case IIncrementOrDecrementOperation { Target: IMemberReferenceOperation updated }:
+                context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                    VerifiableDescriptors.HeapAliasingOrMutableState, op.Syntax.GetLocation(),
+                    isCandidate, null, $"mutation of '{updated.Member.Name}'"));
+                break;
 
             case IArrayCreationOperation arrCreate:
-                if (!(arrCreate.IsImplicit && arrCreate.Parent is IArgumentOperation { Parameter.IsParams: true }))
+                if (!(arrCreate.IsImplicit && arrCreate.Parent is IArgumentOperation { Parameter.IsParams: true }) &&
+                    !(arrCreate.Parent is IArgumentOperation { Parameter.Ordinal: 1, Parent: IInvocationOperation join } &&
+                        StringIntrinsics.TryGetJoinElements(join, out _)))
                 {
                     var arrDisplay = arrCreate.Type?.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat) ?? "T[]";
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -344,6 +351,14 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         null,
                         objCreate.Type.Name));
                 }
+                else if (objCreate.Syntax is BaseObjectCreationExpressionSyntax { Initializer: { } init } &&
+                         init.IsKind(SyntaxKind.ObjectInitializerExpression) &&
+                         !InitializerProjection.IsSupported(objCreate, allowBoundaryDto: true))
+                {
+                    context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                        VerifiableDescriptors.HeapAliasingOrMutableState, op.Syntax.GetLocation(),
+                        isCandidate, null, $"unsupported constructor, setter, or non-write-once initializer of '{objCreate.Type.Name}'"));
+                }
                 break;
 
             case IDefaultValueOperation defOp when !defOp.IsImplicit && defOp.Type is not null:
@@ -380,6 +395,8 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 break;
 
             case IInvocationOperation inv:
+                if (Smt.RegexModel.IsSupportedInvocation(inv))
+                    break;
                 if (VerifiableSymbolHelpers.IsNondeterministicMember(inv.TargetMethod, out var invDisplay))
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -417,7 +434,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 else if (VerifiableSymbolHelpers.HasAttribute(inv.TargetMethod, VerifiableSymbolHelpers.GhostAttr)
                     ? !IsSpecificationUse(inv, context.OwningSymbol)
-                    : !VerifiableSymbolHelpers.IsTrustedPureMethod(inv.TargetMethod))
+                    : !VerifiableSymbolHelpers.IsTrustedPureMethod(inv.TargetMethod) && !StringIntrinsics.IsSupported(inv))
                 {
                     context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
                         VerifiableDescriptors.UnverifiedCallOrDynamic,

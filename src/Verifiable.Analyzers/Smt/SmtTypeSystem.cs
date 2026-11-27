@@ -54,6 +54,9 @@ internal sealed class SmtTypeSystem
         if (type.SpecialType == SpecialType.System_Decimal)
             return Cache(type, "Real");
 
+        if (CalendarArithmetic.CalendarType(type) is not null)
+            return Cache(type, "Int");
+
         if (type.SpecialType == SpecialType.System_String)
             return Cache(type, "VerStr");
 
