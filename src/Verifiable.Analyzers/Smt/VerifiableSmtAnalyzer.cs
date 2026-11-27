@@ -195,12 +195,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         {
             foreach (var op in b.DescendantsAndSelf())
             {
-                if (op is IInvocationOperation cal && (CalendarArithmetic.CalendarType(cal.TargetMethod.ContainingType) is not null ||
-                    cal.TargetMethod.ContainingType.SpecialType == SpecialType.System_Decimal && cal.TargetMethod.Name == "Round") ||
-                    op is IObjectCreationOperation ctor && CalendarArithmetic.CalendarType(ctor.Type) is not null ||
-                    op is IBinaryOperation bin && CalendarArithmetic.CalendarType(bin.Type) is not null ||
-                    op is IUnaryOperation unary && CalendarArithmetic.CalendarType(unary.Type) is not null ||
-                    op is IPropertyReferenceOperation property && CalendarArithmetic.CalendarType(property.Property.ContainingType) is not null)
+                if (CalendarArithmetic.NeedsCheck(op))
                     return true;
 
                 if (op is IInvocationOperation inv)

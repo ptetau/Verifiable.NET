@@ -21,6 +21,16 @@ internal static class CalendarArithmetic
         method.ContainingType.SpecialType == SpecialType.System_Decimal && method.Name == "Round" &&
         method.Parameters.Length == 2 && method.Parameters[1].Type.SpecialType == SpecialType.System_Int32;
 
+    internal static bool NeedsCheck(IOperation operation) => operation switch
+    {
+        IInvocationOperation call => CalendarType(call.TargetMethod.ContainingType) != null ||
+            call.TargetMethod.ContainingType.SpecialType == SpecialType.System_Decimal && call.TargetMethod.Name == "Round",
+        IObjectCreationOperation or IBinaryOperation or IUnaryOperation or ICompoundAssignmentOperation =>
+            CalendarType(operation.Type) != null,
+        IPropertyReferenceOperation property => CalendarType(property.Property.ContainingType) != null,
+        _ => false
+    };
+
     internal static bool Supports(IMethodSymbol method)
     {
         if (IsRound(method)) return true;

@@ -10,7 +10,7 @@ public class ImmutableQueryTests
 {
     private static async Task<Diagnostic[]> Analyze(string method)
     {
-        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync("""
+        var diagnostics = await AnalyzerTestHarness.AnalyzeWithReferencesAsync("""
             using System.Collections.Generic;
             using System.Collections.Immutable;
             using System.Linq;
@@ -18,7 +18,8 @@ public class ImmutableQueryTests
             public readonly record struct LineItem(int CategoryId, decimal Amount);
             [Verifiable]
             public static class Rules {
-            """ + "\n" + method + "\n}", new VerifiableGatekeeperAnalyzer(), new VerifiableSmtAnalyzer());
+            """ + "\n" + method + "\n}", null, [typeof(Enumerable), typeof(IQueryable<>), typeof(Queryable)],
+            new VerifiableGatekeeperAnalyzer(), new VerifiableSmtAnalyzer());
         return diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error || d.Id == "AD0001").ToArray();
     }
 
@@ -98,9 +99,6 @@ public class ImmutableQueryTests
     [Fact]
     public async Task QueryableProviderIsNotTrustedAsEnumerable()
     {
-        // AnalyzerTestHarness builds metadata references from currently loaded assemblies.
-        Assert.NotNull(typeof(IQueryable<>).Assembly);
-        Assert.NotNull(typeof(Queryable).Assembly);
         var errors = await Analyze("public static bool Any(IQueryable<int> xs) => xs.Any();");
         Assert.Contains(errors, d => d.Id == "VER006");
         Assert.DoesNotContain(errors, d => d.Id.StartsWith("CS") || d.Id == "AD0001");

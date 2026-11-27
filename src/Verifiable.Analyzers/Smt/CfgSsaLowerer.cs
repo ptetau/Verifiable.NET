@@ -1128,6 +1128,9 @@ internal sealed partial class CfgSsaLowerer
         switch (op)
         {
             case IConversionOperation conv:
+                if (conv.Conversion.IsUserDefined &&
+                    (CalendarArithmetic.CalendarType(conv.Type) != null || CalendarArithmetic.CalendarType(conv.Operand.Type) != null))
+                    throw new ContractLoweringException($"Unsupported user-defined calendar conversion '{conv.Syntax}'.");
                 if (conv.OperatorMethod is not null &&
                     (conv.Type?.TypeKind == TypeKind.Enum || conv.Operand.Type?.TypeKind == TypeKind.Enum))
                     throw new ContractLoweringException($"Unsupported user-defined enum conversion in '{conv.Syntax}'.");
@@ -1649,7 +1652,8 @@ internal sealed partial class CfgSsaLowerer
         int inlineDepth)
     {
         var prop = propRef.Property;
-        if (propRef.Instance is null && VerifiableSymbolHelpers.IsNondeterministicMember(prop, out var ambient))
+        if (propRef.Instance is null && prop.Name is "Now" or "UtcNow" or "Today" &&
+            VerifiableSymbolHelpers.IsNondeterministicMember(prop, out var ambient))
             throw new ContractLoweringException($"Ambient property '{ambient}' is not deterministic.");
         if (CalendarArithmetic.CalendarType(prop.ContainingType) is { } calendar)
         {
@@ -2300,6 +2304,7 @@ internal sealed partial class CfgSsaLowerer
                 : InitializerProjection.IsSupported(obj, allowBoundaryDto: false)));
 
     private static bool IsBuiltInValueOperator(IMethodSymbol method) =>
+        CalendarArithmetic.CalendarType(method.ContainingType) != null ||
         method.ContainingType.SpecialType is SpecialType.System_Decimal or SpecialType.System_String ||
         method.IsImplicitlyDeclared && method.ContainingType.IsRecord;
 

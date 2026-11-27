@@ -19,9 +19,16 @@ internal static class AnalyzerTestHarness
         params DiagnosticAnalyzer[] analyzers) =>
         AnalyzeWithOptionsAsync(source, null, analyzers);
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAsync(
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeWithOptionsAsync(
         string source,
         IReadOnlyDictionary<string, string>? buildProperties,
+        params DiagnosticAnalyzer[] analyzers) =>
+        AnalyzeWithReferencesAsync(source, buildProperties, [], analyzers);
+
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithReferencesAsync(
+        string source,
+        IReadOnlyDictionary<string, string>? buildProperties,
+        Type[] referenceTypes,
         params DiagnosticAnalyzer[] analyzers)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
@@ -29,7 +36,10 @@ internal static class AnalyzerTestHarness
 
         var refs = AppDomain.CurrentDomain.GetAssemblies()
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
-            .Select(a => MetadataReference.CreateFromFile(a.Location))
+            .Select(a => a.Location)
+            .Concat(referenceTypes.Select(t => t.Assembly.Location))
+            .Distinct(StringComparer.Ordinal)
+            .Select(path => MetadataReference.CreateFromFile(path))
             .ToList<MetadataReference>();
 
         refs.Add(MetadataReference.CreateFromFile(typeof(VerifiableAttribute).Assembly.Location));
