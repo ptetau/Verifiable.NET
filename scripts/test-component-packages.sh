@@ -39,13 +39,16 @@ fi
 grep -F 'error VER102: Postcondition of Sample.Same fails: deliberately false; x = ' build.log
 grep -Fq '<verifiable-counterexample>' proof.sarif
 
-# A reference exposes constants, but not a predicate body to the consumer's prover.
+# A library compiled with Verifiable.Generators exports canonical contract metadata for public pure predicates,
+# while helpers relying on private non-constant implementations fail closed with VER101.
 cat > Sample.cs <<'EOF'
 using Verifiable.Contracts;
 [Verifiable]
 public static class Bounds {
     public const decimal Min = -100m, Max = 100m;
     public static bool IsValid(decimal x) => x >= Min && x <= Max;
+    private static bool Secret(decimal x) => x >= 0m;
+    public static bool UsesSecret(decimal x) => Secret(x);
 }
 EOF
 dotnet build --no-restore -p:VerifiableZ3Path="$z3" -o library
@@ -54,17 +57,23 @@ using Verifiable.Contracts;
 [Verifiable]
 public static class Consumer {
     public static decimal Keep(decimal x) {
-        Spec.Requires(x >= Bounds.Min && x <= Bounds.Max);
-        Spec.Ensures<decimal>(r => r == x);
+        Spec.Requires(Bounds.IsValid(x));
+        Spec.Ensures<decimal>(r => r == x && r >= -100m && r <= 100m);
         return x;
     }
 }
 EOF
 sed -i '/<TargetFramework>/a\  <PropertyGroup><AssemblyName>Consumer</AssemblyName></PropertyGroup>\n  <ItemGroup><Reference Include="Smoke"><HintPath>library/Smoke.dll</HintPath></Reference></ItemGroup>' Smoke.csproj
 dotnet build --no-restore -p:VerifiableZ3Path="$z3"
-sed -i 's/x >= Bounds.Min \&\& x <= Bounds.Max/Bounds.IsValid(x)/' Sample.cs
+sed -i 's/r == x && r >= -100m && r <= 100m/r >= 0m/' Sample.cs
+if dotnet build --no-restore -p:VerifiableZ3Path="$z3" > external-ver102.log 2>&1; then
+    echo "The false postcondition under Bounds.IsValid(x) compiled successfully" >&2
+    exit 1
+fi
+grep -F 'error VER102' external-ver102.log
+sed -i 's/Bounds\.IsValid(x)/Bounds.UsesSecret(x)/' Sample.cs
 if dotnet build --no-restore -p:VerifiableZ3Path="$z3" > external.log 2>&1; then
-    echo "The external predicate was silently accepted" >&2
+    echo "The unexported private-helper predicate was silently accepted" >&2
     exit 1
 fi
 grep -F 'error VER101' external.log

@@ -507,11 +507,24 @@ internal sealed class SmtTypeSystem
         ISymbol member,
         out IParameterSymbol? parameterSymbol,
         out IOperation? returnOp,
+        bool allowLeadingContracts = false) =>
+        TryExtractSingleReturnOperation(compilation, member, out parameterSymbol, out returnOp, out _, allowLeadingContracts);
+
+    public static bool TryExtractSingleReturnOperation(
+        Compilation compilation,
+        ISymbol member,
+        out IParameterSymbol? parameterSymbol,
+        out IOperation? returnOp,
+        out IMethodSymbol? stubMethod,
         bool allowLeadingContracts = false)
     {
-        parameterSymbol = member is IMethodSymbol ms && ms.Parameters.Length == 1 ? ms.Parameters[0] : null;
+        var syntaxMember = member is IMethodSymbol { PartialImplementationPart: { } partialImpl }
+            ? (ISymbol)partialImpl
+            : member;
+        parameterSymbol = syntaxMember is IMethodSymbol ms && ms.Parameters.Length == 1 ? ms.Parameters[0] : null;
+        stubMethod = null;
 
-        foreach (var synRef in member.DeclaringSyntaxReferences)
+        foreach (var synRef in syntaxMember.DeclaringSyntaxReferences)
         {
             var syn = synRef.GetSyntax();
             if (!compilation.SyntaxTrees.Contains(syn.SyntaxTree))
@@ -526,7 +539,11 @@ internal sealed class SmtTypeSystem
                     model.GetOperation(arrow) is IBlockOperation arrowBlock)
                 {
                     returnOp = arrowBlock.Operations.OfType<IReturnOperation>().SingleOrDefault()?.ReturnedValue;
-                    if (returnOp is not null) return true;
+                    if (returnOp is not null)
+                    {
+                        stubMethod = !SymbolEqualityComparer.Default.Equals(syntaxMember, member) ? syntaxMember as IMethodSymbol : null;
+                        return true;
+                    }
                 }
 
                 if (md.Body is { Statements.Count: > 0 } body &&
@@ -540,7 +557,11 @@ internal sealed class SmtTypeSystem
                     model.GetOperation(ret) is IReturnOperation returnOperation)
                 {
                     returnOp = returnOperation.ReturnedValue;
-                    if (returnOp is not null) return true;
+                    if (returnOp is not null)
+                    {
+                        stubMethod = !SymbolEqualityComparer.Default.Equals(syntaxMember, member) ? syntaxMember as IMethodSymbol : null;
+                        return true;
+                    }
                 }
             }
             else if (syn is PropertyDeclarationSyntax pd)
@@ -569,6 +590,14 @@ internal sealed class SmtTypeSystem
                     }
                 }
             }
+        }
+
+        if (CrossAssemblyContractCache.TryGetBodyOperation(compilation, member, out var extParam, out var extOp, out var extStub))
+        {
+            parameterSymbol = extParam ?? parameterSymbol;
+            returnOp = extOp;
+            stubMethod = extStub;
+            return returnOp is not null;
         }
 
         returnOp = null;
@@ -668,7 +697,7 @@ internal sealed class SmtTypeSystem
 
         if (prop.DeclaringSyntaxReferences.Length == 0)
         {
-            return true;
+            return !CrossAssemblyContractCache.HasExportedBodyMetadata(prop);
         }
 
         foreach (var synRef in prop.DeclaringSyntaxReferences)

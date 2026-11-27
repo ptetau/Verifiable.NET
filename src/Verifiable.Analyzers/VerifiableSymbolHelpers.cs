@@ -166,7 +166,8 @@ internal static class VerifiableSymbolHelpers
                 if (path.EndsWith(".Refined.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".TypeAlias.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".Gate.g.cs", StringComparison.OrdinalIgnoreCase) ||
-                    path.EndsWith(".InboundPort.g.cs", StringComparison.OrdinalIgnoreCase))
+                    path.EndsWith(".InboundPort.g.cs", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".ContractMetadata.g.cs", StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -234,6 +235,33 @@ internal static class VerifiableSymbolHelpers
 
     public static bool TryGetGeneratedRegexAttribute(ISymbol symbol, out string pattern, out int options)
     {
+        if (TryGetGeneratedRegexAttributeDirect(symbol, out pattern, out options))
+        {
+            return true;
+        }
+
+        // For partial methods, the attribute may be on the defining or implementing part.
+        if (symbol is IMethodSymbol m)
+        {
+            if (m.PartialDefinitionPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialDefinitionPart, m) &&
+                TryGetGeneratedRegexAttributeDirect(m.PartialDefinitionPart, out pattern, out options))
+            {
+                return true;
+            }
+            if (m.PartialImplementationPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialImplementationPart, m) &&
+                TryGetGeneratedRegexAttributeDirect(m.PartialImplementationPart, out pattern, out options))
+            {
+                return true;
+            }
+        }
+
+        pattern = string.Empty;
+        options = 0;
+        return false;
+    }
+
+    private static bool TryGetGeneratedRegexAttributeDirect(ISymbol symbol, out string pattern, out int options)
+    {
         pattern = string.Empty;
         options = 0;
 
@@ -248,21 +276,6 @@ internal static class VerifiableSymbolHelpers
                 {
                     options = Convert.ToInt32(attr.ConstructorArguments[1].Value);
                 }
-                return true;
-            }
-        }
-
-        // For partial methods, the attribute may be on the defining or implementing part.
-        if (symbol is IMethodSymbol m)
-        {
-            if (m.PartialDefinitionPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialDefinitionPart, m) &&
-                TryGetGeneratedRegexAttribute(m.PartialDefinitionPart, out pattern, out options))
-            {
-                return true;
-            }
-            if (m.PartialImplementationPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialImplementationPart, m) &&
-                TryGetGeneratedRegexAttribute(m.PartialImplementationPart, out pattern, out options))
-            {
                 return true;
             }
         }

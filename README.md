@@ -202,8 +202,8 @@ Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xu
 
 | Package | What it ships |
 | --- | --- |
-| `Verifiable.Contracts` | Zero-dependency attributes (`[Verifiable]`, `[TypeAlias<T>]`, `[Invariant]`, `[InboundPort]`, `[MustConsume]`), `Spec.*` helpers (stripped from Release IL), `Result<T, TError>`, and `MarshalResult<T>`. |
-| `Verifiable.Generators` | Source generator that expands `[TypeAlias<T>]` / `[Refined<T>]` structs, JSON converters, and `[InboundPort]` validation wrappers. |
+| `Verifiable.Contracts` | Zero-dependency attributes (`[Verifiable]`, `[TypeAlias<T>]`, `[Invariant]`, `[InboundPort]`, `[MapTo]`, `[MustConsume]`), `Spec.*` helpers (stripped from Release IL), `Result<T, TError>`, and `MarshalResult<T>`. |
+| `Verifiable.Generators` | Source generators that expand `[TypeAlias<T>]` / `[Refined<T>]` structs, JSON converters, `[InboundPort]` validation wrappers, `[MapTo]` verified projections, and cross-assembly contract metadata. |
 | `Verifiable.Analyzers` | Gatekeeper (`VER001`–`VER006`), linear obligation checker (`VER007`), and Z3 proof engine (`VER101`–`VER104`) with Elm-style diagnostics. |
 | `Verifiable.CodeFixes` | Automated IDE/Roslyn refactorings for `[VerifiableCandidate]` migration. |
 | `Verifiable.Testing` | Deterministic state-machine drivers and fault-injected persistence test helpers. |

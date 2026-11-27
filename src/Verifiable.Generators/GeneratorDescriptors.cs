@@ -21,4 +21,12 @@ internal static class GeneratorDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidMapToDeclaration = new(
+        id: "VER203",
+        title: "Invalid [MapTo] projection declaration",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }
