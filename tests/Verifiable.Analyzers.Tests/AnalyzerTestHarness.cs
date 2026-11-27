@@ -109,6 +109,27 @@ internal static class AnalyzerTestHarness
             : analyzerDiagnostics.AddRange(genDiagnostics);
     }
 
+    /// <summary>
+    /// Compiles several source files into one assembly and returns compiler and analyzer diagnostics,
+    /// with suppressions (such as the Z3 nullability suppressor) applied.
+    /// </summary>
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeSourcesAsync(
+        IEnumerable<(string Path, string Source)> sources,
+        params DiagnosticAnalyzer[] analyzers)
+    {
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var trees = sources.Select(s => CSharpSyntaxTree.ParseText(s.Source, parseOptions, path: s.Path)).ToArray();
+
+        var compilation = CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            trees,
+            CollectDefaultReferences(null),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        var withAnalyzers = compilation.WithAnalyzers(ImmutableArray.Create(analyzers));
+        return await withAnalyzers.GetAllDiagnosticsAsync();
+    }
+
     public static async Task<ImmutableArray<Diagnostic>> AnalyzeIncludingSuppressedAsync(
         string source,
         params DiagnosticAnalyzer[] analyzers)

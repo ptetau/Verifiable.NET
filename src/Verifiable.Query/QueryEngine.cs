@@ -10,6 +10,7 @@ using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
 using Verifiable.Analyzers;
 using Verifiable.Analyzers.Smt;
+using Verifiable.Core;
 
 namespace Verifiable.Query;
 
@@ -376,9 +377,10 @@ internal static class QueryEngine
         {
             var check = Z3SolverRunner.Execute(VerifiableSmtAnalyzer.BuildQueryScript(req), z3Path,
                 req.Location.SourceTree?.FilePath, timeoutMs);
-            if (check.Status == SmtStatus.Unsat) continue;
+            var preVerdict = ProofKernel.Decide(check.Status);
+            if (preVerdict == ObligationVerdict.Proved) continue;
             return new MethodQueryResult(methodDisplay, returnTypeDisplay, assertText, assumeText, because,
-                check.Status == SmtStatus.SolverUnavailable ? QueryOutcomeStatus.Z3NotFound : QueryOutcomeStatus.Inconclusive,
+                preVerdict == ObligationVerdict.SolverMissing ? QueryOutcomeStatus.Z3NotFound : QueryOutcomeStatus.Inconclusive,
                 false, outcome.Obligations.Count, check.QueryHash, req.Location,
                 Array.Empty<QueryReason>(), Array.Empty<QueryReason>(), Array.Empty<PathCounterexample>(),
                 $"Cannot prove call precondition: {req.ContractText} (Z3: {check.Status}). {check.ErrorMessage}".TrimEnd(),
@@ -389,7 +391,7 @@ internal static class QueryEngine
         var coreTraceSteps = new List<QueryReason>();
         var seenReasons = new HashSet<string>(StringComparer.Ordinal);
         var counterexamples = new List<PathCounterexample>();
-        var anyUnknown = false;
+        var undecidedCount = 0;
         var reachableProvedCount = 0;
         var unreachableCount = 0;
         string? lastHash = null;
@@ -404,8 +406,9 @@ internal static class QueryEngine
             var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtName, ob.GoalClauses);
             var z3Res = Z3SolverRunner.ExecuteWithUnsatCore(script, z3Path, sourceFile, timeoutMs, satEvalExprs: satEvals);
             lastHash = z3Res.QueryHash;
+            var verdict = ProofKernel.Decide(z3Res.Status);
 
-            if (z3Res.Status == SmtStatus.SolverUnavailable)
+            if (verdict == ObligationVerdict.SolverMissing)
             {
                 return new MethodQueryResult(
                     methodDisplay,
@@ -425,7 +428,7 @@ internal static class QueryEngine
                     "Run `scripts/install-z3.ps1` (Windows) or `scripts/install-z3.sh` (Linux/macOS), pass `--z3 <path>`, or set `VERIFIABLE_Z3_PATH`.");
             }
 
-            if (z3Res.Status == SmtStatus.Sat)
+            if (verdict == ObligationVerdict.Refuted)
             {
                 var insight = SmtCounterexampleAnalyzer.Analyze(z3Res.Model, ob.GoalClauses);
                 var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -461,15 +464,15 @@ internal static class QueryEngine
                 continue;
             }
 
-            if (z3Res.Status is SmtStatus.Unknown or SmtStatus.Error)
+            if (verdict == ObligationVerdict.Undecided)
             {
-                anyUnknown = true;
+                undecidedCount++;
                 unknownMsg = z3Res.ErrorMessage ?? $"Z3 returned `{z3Res.Status}`.";
                 continue;
             }
 
-            // Status == Unsat
-            var usedGoal = z3Res.UnsatCore.Contains("query_negated_goal", StringComparer.Ordinal);
+            // verdict == ObligationVerdict.Proved
+            var usedGoal = z3Res.UnsatCore.Contains(ProofKernel.NegatedGoalName, StringComparer.Ordinal);
             if (!usedGoal)
             {
                 unreachableCount++;
@@ -481,7 +484,7 @@ internal static class QueryEngine
 
             foreach (var coreId in z3Res.UnsatCore)
             {
-                if (coreId == "query_negated_goal") continue;
+                if (coreId == ProofKernel.NegatedGoalName) continue;
                 if (!allPremises.TryGetValue(coreId, out var prem)) continue;
 
                 var key = $"{prem.Kind}|{prem.Label}|{prem.FilePath}|{prem.Line}";
@@ -505,7 +508,9 @@ internal static class QueryEngine
             }
         }
 
-        if (counterexamples.Count > 0)
+        var overall = QueryKernel.Aggregate(counterexamples.Count, undecidedCount, reachableProvedCount, unreachableCount);
+
+        if (overall == QueryVerdict.Refuted)
         {
             var boundaryHint = counterexamples.Select(c => c.BoundaryHint).FirstOrDefault(h => !string.IsNullOrWhiteSpace(h));
             var baseHint = "Strengthen `Spec.Requires(...)` / `--assume`, enforce a `[TypeAlias<T>]` / `[Invariant]`, or fix the implementation.";
@@ -528,7 +533,7 @@ internal static class QueryEngine
                 fullHint);
         }
 
-        if (anyUnknown)
+        if (overall == QueryVerdict.Inconclusive)
         {
             return new MethodQueryResult(
                 methodDisplay,
@@ -548,7 +553,7 @@ internal static class QueryEngine
                 "Try simplifying non-linear expressions, raising `--timeout`, or adding helper `Spec.LoopInvariant` annotations.");
         }
 
-        var vacuous = reachableProvedCount == 0 && unreachableCount > 0;
+        var vacuous = overall == QueryVerdict.ProvedVacuously;
         var hint = vacuous
             ? "Warning: the premises / `--assume` condition cannot be satisfied on any path, so the claim holds only vacuously."
             : null;
@@ -598,7 +603,7 @@ internal static class QueryEngine
             sb.Append("(assert (! ").Append(ra.SmtFormula).Append(" :named ").Append(ra.Id).AppendLine("))");
         }
 
-        sb.Append("(assert (! (not ").Append(ob.GoalTerm).AppendLine(") :named query_negated_goal))");
+        sb.Append(ProofKernel.NamedNegatedGoal(ob.GoalTerm));
         return sb.ToString();
     }
 

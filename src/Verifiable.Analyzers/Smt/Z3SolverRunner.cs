@@ -8,20 +8,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Verifiable.Core;
 
 namespace Verifiable.Analyzers.Smt;
 
 // Out-of-process Z3 execution is an intentional architectural boundary (§5.1) to avoid native P/Invoke AssemblyLoadContext crashes.
 #pragma warning disable RS1035
-
-internal enum SmtStatus
-{
-    Unsat = 0,
-    Sat = 1,
-    Unknown = 2,
-    SolverUnavailable = 3,
-    Error = 4
-}
 
 internal sealed record SmtQueryResult(
     SmtStatus Status,
@@ -155,7 +147,7 @@ internal static class Z3SolverRunner
         var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
         var result = pool.RunQuery(smtScriptBody, hash, timeoutMs, satEvalExprs);
 
-        if (result.Status is SmtStatus.Unsat or SmtStatus.Sat)
+        if (ProofKernel.IsCacheable(result.Status))
         {
             MemoryCache.TryAdd(hash, result);
             TrySaveDiskCache(hash, result);
@@ -192,7 +184,7 @@ internal static class Z3SolverRunner
         var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
         var result = pool.RunDetailedQuery(smtScriptBody, hash, timeoutMs, produceUnsatCore: true, satEvalExprs);
 
-        if (result.Status is SmtStatus.Unsat or SmtStatus.Sat)
+        if (ProofKernel.IsCacheable(result.Status))
         {
             DetailedMemoryCache.TryAdd(hash, result);
         }
@@ -237,6 +229,8 @@ internal static class Z3SolverRunner
             if (lines.Length == 0) return false;
 
             if (!Enum.TryParse<SmtStatus>(lines[0], out var status)) return false;
+            // A cache entry can only replay an answer the kernel allows to be cached.
+            if (!Enum.IsDefined(typeof(SmtStatus), status) || !ProofKernel.IsCacheable(status)) return false;
             var model = new Dictionary<string, string>(StringComparer.Ordinal);
             for (var i = 1; i < lines.Length; i++)
             {
@@ -814,25 +808,39 @@ internal static class Z3SolverRunner
 
         private static SmtStatus ParseStatus(string output, out string? error)
         {
+            // Utility: split Z3's output into trimmed lines. Core: decide which line is the answer.
+            var lines = ImmutableArrayOfTrimmedLines(output);
+            var status = ProofKernel.ReadCheckSatAnswer(lines);
+
             error = null;
+            if (status == SmtStatus.Error)
+            {
+                foreach (var line in lines)
+                {
+                    if (ProofKernel.ClassifyStatusLine(line) == SolverLine.Error)
+                    {
+                        error = line;
+                        break;
+                    }
+                }
+
+                error ??= $"Unexpected Z3 output: {output.Trim()}";
+            }
+
+            return status;
+        }
+
+        private static System.Collections.Immutable.ImmutableArray<string> ImmutableArrayOfTrimmedLines(string output)
+        {
+            var builder = System.Collections.Immutable.ImmutableArray.CreateBuilder<string>();
             using var reader = new StringReader(output);
             string? line;
             while ((line = reader.ReadLine()) is not null)
             {
-                var trimmed = line.Trim();
-                if (trimmed.Length == 0) continue;
-                if (trimmed == "unsat") return SmtStatus.Unsat;
-                if (trimmed == "sat") return SmtStatus.Sat;
-                if (trimmed == "unknown") return SmtStatus.Unknown;
-                if (trimmed.StartsWith("(error", StringComparison.Ordinal))
-                {
-                    error = trimmed;
-                    return SmtStatus.Error;
-                }
+                builder.Add(line.Trim());
             }
 
-            error = $"Unexpected Z3 output: {output.Trim()}";
-            return SmtStatus.Error;
+            return builder.ToImmutable();
         }
 
         public void Dispose()

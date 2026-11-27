@@ -30,6 +30,20 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" PrivateAssets="all" />
   </ItemGroup>
 
+  <!--
+    The trusted kernel (src/Verifiable.Core) is compiled into this DLL from the same source files that
+    Verifiable.Core proves with Z3, so what ships is exactly what was proved. Proof-only lemmas and the
+    assembly-level [Verifiable] marker stay in Verifiable.Core. The kernel's Spec.* calls bind to
+    KernelShim and are stripped from IL, as they are in user code.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Verifiable.Core\**\*.cs"
+             Exclude="..\Verifiable.Core\AssemblyInfo.cs;..\Verifiable.Core\Proofs\**;..\Verifiable.Core\obj\**;..\Verifiable.Core\bin\**"
+             Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Using Include="Verifiable.Analyzers.KernelShim.Spec" Alias="Spec" />
+    <Using Include="Verifiable.Analyzers.KernelShim.VerifiableAttribute" Alias="VerifiableAttribute" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="..\Verifiable.NET\build\Verifiable.NET.props" Pack="true" PackagePath="build\Verifiable.Analyzers.props;buildTransitive\Verifiable.Analyzers.props" Visible="false" />

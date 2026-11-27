@@ -6,6 +6,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
+using Verifiable.Core;
 
 namespace Verifiable.Analyzers;
 
@@ -16,14 +17,6 @@ namespace Verifiable.Analyzers;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 {
-    private enum ObligationState
-    {
-        Consumed = 0,
-        Live = 1,
-        MaybeLive = 2,
-        SinkParameter = 3
-    }
-
     private sealed record LinearDiag(
         Location Loc,
         Location? RelatedLoc,
@@ -865,28 +858,10 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             var hasA = a.TryGetValue(key, out var stA);
             var hasB = b.TryGetValue(key, out var stB);
 
-            if (hasA && hasB)
-            {
-                if (stA == stB)
-                {
-                    result[key] = stA;
-                }
-                else if (stA == ObligationState.SinkParameter || stB == ObligationState.SinkParameter)
-                {
-                    result[key] = ObligationState.SinkParameter;
-                }
-                else
-                {
-                    result[key] = ObligationState.MaybeLive;
-                }
-            }
-            else
-            {
-                var present = hasA ? stA : stB;
-                result[key] = present == ObligationState.Consumed
-                    ? ObligationState.Consumed
-                    : (present == ObligationState.SinkParameter ? ObligationState.SinkParameter : ObligationState.MaybeLive);
-            }
+            // The per-token merge rule is the proved kernel lattice (src/Verifiable.Core/ObligationLattice.cs).
+            result[key] = hasA && hasB
+                ? ObligationLattice.Join(stA, stB)
+                : ObligationLattice.JoinWithUntracked(hasA ? stA : stB);
         }
 
         return result.ToImmutable();

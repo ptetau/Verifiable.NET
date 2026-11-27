@@ -7,6 +7,7 @@ using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
+using Verifiable.Core;
 
 namespace Verifiable.Analyzers.Smt;
 
@@ -130,8 +131,14 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     var script = BuildQueryScript(ob);
                     var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtTerm, ob.GoalClauses);
                     var result = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
+                    var verdict = ProofKernel.Decide(result.Status);
 
-                    if (result.Status == SmtStatus.SolverUnavailable)
+                    if (verdict == ObligationVerdict.Proved)
+                    {
+                        continue;
+                    }
+
+                    if (verdict == ObligationVerdict.SolverMissing)
                     {
                         if (Interlocked.Exchange(ref reportedUnavailable, 1) == 0)
                         {
@@ -150,7 +157,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         return;
                     }
 
-                    if (result.Status == SmtStatus.Sat)
+                    if (verdict == ObligationVerdict.Refuted)
                     {
                         var dedupKey = (ob.Location.SourceSpan.Start, ob.Location.SourceSpan.Length, ob.Kind, ob.ContractText);
                         if (!reportedFailures.Add(dedupKey))
@@ -194,8 +201,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             additionalLocations: additionalLocs,
                             elmFail));
                     }
-                    else if (result.Status is SmtStatus.Unknown or SmtStatus.Error)
+                    else
                     {
+                        // ObligationVerdict.Undecided: never silently treated as proved.
                         var unknownSummary =
                             $"Z3 returned {result.Status} for {method.ContainingType?.Name}.{method.Name}: {OneLine(ob.ContractText)}" +
                             (string.IsNullOrWhiteSpace(result.ErrorMessage) ? string.Empty : $" — {OneLine(result.ErrorMessage!)}");
@@ -219,17 +227,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         });
     }
 
-    internal static string BuildQueryScript(ProofObligation ob)
-    {
-        var sb = new StringBuilder(ob.ScriptPreamble.Length + 256);
-        sb.AppendLine(ob.ScriptPreamble);
-        if (!string.IsNullOrEmpty(ob.PathCondition) && ob.PathCondition != "true")
-        {
-            sb.Append("(assert ").Append(ob.PathCondition).AppendLine(")");
-        }
-        sb.Append("(assert (not ").Append(ob.GoalTerm).AppendLine("))");
-        return sb.ToString();
-    }
+    internal static string BuildQueryScript(ProofObligation ob) =>
+        ProofKernel.BuildRefutationQuery(ob.ScriptPreamble, ob.PathCondition ?? string.Empty, ob.GoalTerm);
 
     private static bool MethodNeedsSmtCheck(
         Compilation compilation,

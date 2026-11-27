@@ -23,7 +23,7 @@ Verifiable.NET is designed so LLM coding agents can write, migrate, verify, and 
 ./scripts/verify.sh
 ```
 
-If Z3 is not installed yet:
+Z3 is required: the build proves the kernel in `src/Verifiable.Core` and stops with `VER104` without it. If Z3 is not installed yet:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
@@ -67,4 +67,5 @@ Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=loa
 
 - User guide: `README.md`
 - Reference manual: `docs/manual.md`
+- Trusted core (what decides "proved", and how it is proved): `docs/trusted-core.md`. Any change that can alter a verdict goes in `src/Verifiable.Core` with a `Spec.Ensures` and a matching break in `KernelSelfVerificationTests`.
 - Compact agent reference: `llms.txt` at the repository root (also packed at `\` inside every `Verifiable.*` NuGet package).

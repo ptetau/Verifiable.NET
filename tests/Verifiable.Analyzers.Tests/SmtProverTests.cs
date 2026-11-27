@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using GalaxyCheck;
 using GalaxyCheck.Gens;
 using Verifiable.Analyzers.Smt;
+using Verifiable.Core;
 using Xunit;
 
 namespace Verifiable.Analyzers.Tests;
