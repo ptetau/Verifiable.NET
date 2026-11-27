@@ -197,6 +197,26 @@ internal sealed partial class CfgSsaLowerer
             _obligations.Where(ob => ob.Kind is "Precondition" or "Overflow" or "DivisionByZero" or "CollectionBounds").ToList(), _errors.ToList());
     }
 
+    private Microsoft.CodeAnalysis.Text.TextSpan? _nonNullTargetSpan;
+
+    public LoweringOutcome LowerNonNullChecks(
+        ControlFlowGraph cfg,
+        ImmutableArray<IOperation> rawOperationBlocks,
+        Microsoft.CodeAnalysis.Text.TextSpan targetSpan)
+    {
+        _nonNullTargetSpan = targetSpan;
+        try
+        {
+            Lower(cfg, rawOperationBlocks);
+            var checks = _obligations.Where(ob => ob.Kind == "NonNullCheck").ToList();
+            return new LoweringOutcome(checks, _errors.ToList());
+        }
+        finally
+        {
+            _nonNullTargetSpan = null;
+        }
+    }
+
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
         try
@@ -1229,6 +1249,43 @@ internal sealed partial class CfgSsaLowerer
         BlockEnv env,
         bool emitObligations = true,
         int inlineDepth = 0)
+    {
+        var result = LowerExpressionCore(op, gamma, env, emitObligations, inlineDepth);
+
+        if (emitObligations &&
+            _nonNullTargetSpan is { } targetSpan &&
+            !op.IsImplicit &&
+            op.Syntax.Span == targetSpan)
+        {
+            if (result.Type.SpecialType == SpecialType.System_String)
+            {
+                AddObligation(
+                    "NonNullCheck",
+                    $"{op.Syntax} != null",
+                    op.Syntax.GetLocation(),
+                    gamma,
+                    $"(not (= {result.Term} str-null))");
+            }
+            else if (_types.TryGetNullableInfo(result.Type, out _, out var optId, out _))
+            {
+                AddObligation(
+                    "NonNullCheck",
+                    $"{op.Syntax} != null",
+                    op.Syntax.GetLocation(),
+                    gamma,
+                    $"(not (= {result.Term} opt-none-{optId}))");
+            }
+        }
+
+        return result;
+    }
+
+    private SmtTypedTerm LowerExpressionCore(
+        IOperation op,
+        string gamma,
+        BlockEnv env,
+        bool emitObligations,
+        int inlineDepth)
     {
         switch (op)
         {

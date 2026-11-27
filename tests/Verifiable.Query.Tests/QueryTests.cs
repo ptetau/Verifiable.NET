@@ -613,4 +613,248 @@ public sealed class QueryTests
         Assert.Equal(3, cmdRes.ExitCode);
         Assert.Contains("Did you mean `check-invariant`?", cmdRes.Stderr);
     }
+
+    [Fact]
+    public void ElmCSharpDiagnosticRewriter_CoversMissingImportsArityTaskNullableOperatorsAndSwitchArms()
+    {
+        // 1. Missing `using` discovery across referenced assemblies
+        const string missingImport = """
+            using Verifiable.Contracts;
+            [Verifiable]
+            public static class ImportDemo
+            {
+                public static int Count(ImmutableList<int> xs) => xs.Count;
+            }
+            """;
+        var impRes = RunCli(["list", "--stdin"], missingImport);
+        Assert.Equal(3, impRes.ExitCode);
+        Assert.Contains("-- MISSING IMPORT", impRes.Stderr);
+        Assert.Contains("using System.Collections.Immutable;", impRes.Stderr);
+
+        // 1b. Missing `using` discovery on CS0103 generic static member access (e.g., `ImmutableList<int>.Empty`)
+        const string missingGenericStaticImport = """
+            public static class GenericStaticImportDemo
+            {
+                public static void Make()
+                {
+                    var items = ImmutableList<int>.Empty;
+                }
+            }
+            """;
+        var impStaticRes = RunCli(["check", "--stdin", "--color", "never"], missingGenericStaticImport);
+        Assert.Equal(1, impStaticRes.ExitCode);
+        Assert.Contains("-- MISSING IMPORT", impStaticRes.Stderr);
+        Assert.Contains("ImmutableList<int>", impStaticRes.Stderr);
+        Assert.Contains("using System.Collections.Immutable;", impStaticRes.Stderr);
+
+        // 2. Arity mismatch (Elm's TOO MANY ARGS / MISSING ARGS)
+        const string arityMismatch = """
+            using Verifiable.Contracts;
+            [Verifiable]
+            public static class ArityDemo
+            {
+                public static int Add(int a, int b) => a + b;
+                public static int Bad() => Add(1, 2, 3);
+            }
+            """;
+        var arityRes = RunCli(["list", "--stdin"], arityMismatch);
+        Assert.Equal(3, arityRes.ExitCode);
+        Assert.Contains("-- TOO MANY ARGS", arityRes.Stderr);
+        Assert.Contains("expects 2 arguments, but it got 3 instead", arityRes.Stderr);
+        Assert.Contains("Add(int a, int b) -> int", arityRes.Stderr);
+
+        // 3. Task<T> vs T ("Did you forget await?")
+        const string taskMismatch = """
+            using System.Threading.Tasks;
+            public static class AsyncDemo
+            {
+                public static Task<int> Fetch() => Task.FromResult(42);
+                public static int Use() => Fetch();
+            }
+            """;
+        var taskRes = RunCli(["list", "--stdin"], taskMismatch);
+        Assert.Equal(3, taskRes.ExitCode);
+        Assert.Contains("-- TYPE MISMATCH", taskRes.Stderr);
+        Assert.Contains("Did you forget `await`", taskRes.Stderr);
+
+        // 4. Nullable<T> vs T (Elm's AnythingFromMaybe)
+        const string nullableMismatch = """
+            public static class NullDemo
+            {
+                public static int Unwrap(int? x) => x;
+            }
+            """;
+        var nullRes = RunCli(["list", "--stdin"], nullableMismatch);
+        Assert.Equal(3, nullRes.ExitCode);
+        Assert.Contains("-- TYPE MISMATCH", nullRes.Stderr);
+        Assert.Contains("can be `null`", nullRes.Stderr);
+        Assert.Contains("??", nullRes.Stderr);
+
+        // 5. Operator mismatch (decimal + double)
+        const string opMismatch = """
+            public static class OpDemo
+            {
+                public static decimal Sum(decimal a) => a + 0.5;
+            }
+            """;
+        var opRes = RunCli(["list", "--stdin"], opMismatch);
+        Assert.Equal(3, opRes.ExitCode);
+        Assert.Contains("-- OPERATOR MISMATCH", opRes.Stderr);
+        Assert.Contains("0.5m", opRes.Stderr);
+
+        // 6. Switch expression arm mismatch (CS8506)
+        const string switchMismatch = """
+            public static class SwitchDemo
+            {
+                public static object Pick(int x)
+                {
+                    var chosen = x switch
+                    {
+                        0 => 1,
+                        _ => "other"
+                    };
+                    return chosen;
+                }
+            }
+            """;
+        var swRes = RunCli(["list", "--stdin"], switchMismatch);
+        Assert.Equal(3, swRes.ExitCode);
+        Assert.Contains("-- BRANCH TYPE MISMATCH", swRes.Stderr);
+        Assert.Contains("Arm 1: `int`", swRes.Stderr);
+        Assert.Contains("Arm 2: `string`", swRes.Stderr);
+    }
+
+    [Fact]
+    public void CheckCommand_RunsAnalyzersSuppressorAndAnsiColorOutput()
+    {
+        // Clean code whose CS8602 is proved safe and suppressed by Z3
+        const string cleanWithNullProof = """
+            using Verifiable.Contracts;
+
+            namespace CheckClean;
+
+            [Verifiable]
+            public static class SafeText
+            {
+                public static int Measure(string? s)
+                {
+                    Spec.Requires(!string.IsNullOrEmpty(s), "Input text must be non-empty.");
+                    return s.Length;
+                }
+            }
+            """;
+
+        var ok = RunCli(["check", "--stdin", "--color", "always"], cleanWithNullProof);
+        Assert.Equal(0, ok.ExitCode);
+        Assert.Contains("-- CHECK PASSED", ok.Stdout);
+        Assert.Contains("automatically suppressed after Z3 proved non-null", ok.Stdout);
+        Assert.Contains("\x1b[36m", ok.Stdout, StringComparison.Ordinal); // Cyan ANSI banner
+
+        // Broken code with VER102 failure -> full multi-line Elm output with ANSI colors
+        const string broken = """
+            using Verifiable.Contracts;
+
+            namespace CheckBroken;
+
+            [Verifiable]
+            public static class BrokenVault
+            {
+                public static decimal Withdraw(decimal balance, decimal amount)
+                {
+                    Spec.Requires(amount > 0m);
+                    Spec.Ensures<decimal>(r => r >= 0m, "No overdrafts.");
+                    return balance - amount;
+                }
+            }
+            """;
+
+        var failColor = RunCli(["check", "--stdin", "--color", "always"], broken);
+        Assert.Equal(1, failColor.ExitCode);
+        Assert.Contains("-- PROOF FAILED", failColor.Stderr);
+        Assert.Contains("No overdrafts.", failColor.Stderr);
+        Assert.Contains("\x1b[36m", failColor.Stderr, StringComparison.Ordinal); // Cyan banner
+        Assert.Contains("\x1b[31m", failColor.Stderr, StringComparison.Ordinal); // Red carets
+
+        var failJson = RunCli(["check", "--stdin", "--format", "json"], broken);
+        Assert.Equal(1, failJson.ExitCode);
+        Assert.DoesNotContain("\x1b[", failJson.Stdout, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(failJson.Stdout);
+        Assert.Equal(1, doc.RootElement.GetProperty("errors").GetInt32());
+        Assert.Equal("VER102", doc.RootElement.GetProperty("diagnostics")[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public void CheckSarif_PresentsMultiLineVerAndEnrichedCsDiagnosticsWithColor()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"verifiable-sarif-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var csPath = Path.Combine(tempDir, "Sample.cs");
+            File.WriteAllText(csPath, """
+                using Verifiable.Contracts;
+                [Verifiable]
+                public static class Sample
+                {
+                    public static decimal Tax() => 0.15;
+                }
+                """);
+
+            var sarifPath = Path.Combine(tempDir, "build.sarif");
+            var sarifJson = $$"""
+                {
+                  "version": "2.1.0",
+                  "runs": [
+                    {
+                      "results": [
+                        {
+                          "ruleId": "VER102",
+                          "level": "error",
+                          "message": {
+                            "text": "Postcondition fails; x = 0\n-- PROOF FAILED ------------------------------------------- Sample.cs\n\nZ3 found inputs that break a postcondition.\n\n  |\n5 |     return x;\n  |     ^^^^^^^^^\n\nFix: Add a precondition."
+                          },
+                          "locations": [
+                            {
+                              "physicalLocation": {
+                                "artifactLocation": { "uri": "{{new Uri(csPath).AbsoluteUri}}" },
+                                "region": { "startLine": 5, "startColumn": 5, "endLine": 5, "endColumn": 14 }
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "ruleId": "CS0664",
+                          "level": "error",
+                          "message": {
+                            "text": "Literal of type double cannot be implicitly converted to type 'decimal'"
+                          },
+                          "locations": [
+                            {
+                              "physicalLocation": {
+                                "artifactLocation": { "uri": "{{new Uri(csPath).AbsoluteUri}}" },
+                                "region": { "startLine": 5, "startColumn": 36, "endLine": 5, "endColumn": 40 }
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """;
+            File.WriteAllText(sarifPath, sarifJson);
+
+            var res = RunCli(["check", "--sarif", sarifPath, "--file", csPath, "--color", "always"]);
+            Assert.Equal(1, res.ExitCode);
+            Assert.Contains("-- PROOF FAILED", res.Stderr);
+            Assert.Contains("-- TYPE MISMATCH", res.Stderr);
+            Assert.Contains("0.15m", res.Stderr);
+            Assert.Contains("\x1b[36m", res.Stderr, StringComparison.Ordinal);
+            Assert.Contains("\x1b[31m", res.Stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

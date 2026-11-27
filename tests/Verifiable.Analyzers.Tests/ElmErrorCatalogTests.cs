@@ -270,4 +270,47 @@ public sealed class ElmErrorCatalogTests
         Assert.Contains("Boundary hit:", msg);
         Assert.Contains(">=", msg);
     }
+
+    [Fact]
+    public async Task NullabilitySuppressor_SuppressesZ3ProvedCS8602AndCS8604_AndPreservesUnprovedWarnings()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+
+            namespace SuppressorCatalog;
+
+            [Verifiable]
+            public static class NullProofs
+            {
+                private static int Consume(string value) => value.Length;
+
+                public static int ProvedDeref(string? name)
+                {
+                    Spec.Requires(!string.IsNullOrEmpty(name), "Name must be non-empty.");
+                    return name.Length;
+                }
+
+                public static int ProvedArg(string? name)
+                {
+                    Spec.Requires(name != null, "Name must not be null.");
+                    return Consume(name);
+                }
+
+                public static int UnprovedDeref(string? maybeNull)
+                {
+                    return maybeNull.Length;
+                }
+            }
+            """;
+
+        var diags = await AnalyzerTestHarness.AnalyzeIncludingSuppressedAsync(source, new VerifiableNullabilitySuppressor());
+
+        var cs8602s = diags.Where(d => d.Id == "CS8602").OrderBy(d => d.Location.GetLineSpan().StartLinePosition.Line).ToList();
+        Assert.Equal(2, cs8602s.Count);
+        Assert.True(cs8602s[0].IsSuppressed, "Expected Z3-proved CS8602 in ProvedDeref to be suppressed.");
+        Assert.False(cs8602s[1].IsSuppressed, "Expected unproved CS8602 in UnprovedDeref to remain active.");
+
+        var cs8604 = Assert.Single(diags, d => d.Id == "CS8604");
+        Assert.True(cs8604.IsSuppressed, "Expected Z3-proved CS8604 in ProvedArg to be suppressed.");
+    }
 }

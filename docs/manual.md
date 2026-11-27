@@ -191,6 +191,8 @@ When a rule breaks, Verifiable.NET formats compiler and query diagnostics in an 
 
 When `VERIFIABLE_AGENT=1` is set in CI or AI agent environments, `VER102` appends one single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` JSON payload containing `"reason"`, `"counterexample"`, `"smtHash"`, and `"fix"`.
 
+For full ANSI-colored multi-line Elm output (without MSBuild's single-line console truncation) and Elm-style rewriting of standard C# (`CS*`) compiler errors, run `verifiable-query check --project MyProject.csproj`, `verifiable-query build MyProject.csproj`, or `verifiable-query check --sarif build.sarif` (`--color auto|always|never`, honoring `NO_COLOR`). Inside `[Verifiable]` methods, `VerifiableNullabilitySuppressor` also automatically suppresses redundant C# `CS8602`/`CS8604` nullable warnings whenever Z3 formally proves the expression is non-null.
+
 ---
 
 ## 5. Validating HTTP and wire data cleanly (`[InboundPort]`)
