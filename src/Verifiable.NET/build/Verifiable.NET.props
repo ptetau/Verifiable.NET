@@ -7,4 +7,12 @@
     <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
     <CompilerVisibleProperty Include="VerifiableMaxSpecClauses" />
   </ItemGroup>
+
+  <!-- With VerifiableAllowMissingZ3, VER104 is a warning; keep it one under TreatWarningsAsErrors / -warnaserror. -->
+  <Target Name="_VerifiableAllowMissingZ3" BeforeTargets="CoreCompile"
+          Condition="'$(VerifiableAllowMissingZ3)' == 'true' or '$(VerifiableAllowMissingZ3)' == '1'">
+    <PropertyGroup>
+      <WarningsNotAsErrors>$(WarningsNotAsErrors);VER104</WarningsNotAsErrors>
+    </PropertyGroup>
+  </Target>
 </Project>

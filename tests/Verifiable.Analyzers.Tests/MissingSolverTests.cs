@@ -47,8 +47,43 @@ public class MissingSolverTests
 
         var missing = Assert.Single(diags, d => d.Id == "VER104");
         Assert.Equal(DiagnosticSeverity.Error, missing.Severity);
-        Assert.Contains("VerifiableAllowMissingZ3", missing.GetMessage());
+        Assert.Equal(Location.None, missing.Location);
+        // MSBuild prints only the first line, so it must carry the fix and the opt-out.
+        var firstLine = missing.GetMessage().Split('\n')[0];
+        Assert.Contains("install", firstLine, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("VerifiableAllowMissingZ3", firstLine);
         Assert.DoesNotContain(diags, d => d.Id == "VER102");
+    }
+
+    [Fact]
+    public async Task MissingSolver_CannotBeSilencedByAPragmaInOneFile()
+    {
+        var quiet = """
+            #pragma warning disable VER104
+            using Verifiable.Contracts;
+            [Verifiable] public static class Quiet { public static int F(int x) { Spec.Ensures<int>(r => r > x, "grows"); return x; } }
+            """;
+        var loud = """
+            using Verifiable.Contracts;
+            [Verifiable] public static class Loud { public static int G(int x) { Spec.Ensures<int>(r => r > x, "grows"); return x; } }
+            """;
+
+        // Analysis is concurrent, so whichever file reaches Z3 first varies; try several times.
+        for (var run = 0; run < 8; run++)
+        {
+            Z3SolverRunner.SimulateMissingSolver.Value = true;
+            try
+            {
+                var diags = await AnalyzerTestHarness.AnalyzeSourcesAsync(
+                    [("Quiet.cs", quiet), ("Loud.cs", loud)],
+                    new VerifiableSmtAnalyzer());
+                Assert.Contains(diags, d => d.Id == "VER104" && d.Severity == DiagnosticSeverity.Error);
+            }
+            finally
+            {
+                Z3SolverRunner.SimulateMissingSolver.Value = false;
+            }
+        }
     }
 
     [Theory]

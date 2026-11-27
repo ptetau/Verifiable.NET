@@ -12,9 +12,14 @@ matching versions instead of `Verifiable.NET`. Use the component `.nupkg` files
 from the GitHub release assets (or pack this checkout) in your own feed.
 The component packages do not
 require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
-`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes both
-`VerifiableZ3Path` and `VerifiableAgent` to the compiler; no hand-written
-`CompilerVisibleProperty` entries are needed.
+`-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes
+`VerifiableZ3Path`, `VerifiableAgent` and `VerifiableAllowMissingZ3` to the
+compiler; no hand-written `CompilerVisibleProperty` entries are needed.
+
+If Z3 cannot be found, `VER104` stops the build, because nothing was proved.
+To build without proofs on purpose (for example on a machine that only packs),
+set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`. `VER104` then
+stays a warning, even under `TreatWarningsAsErrors` or `-warnaserror`.
 
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
 
