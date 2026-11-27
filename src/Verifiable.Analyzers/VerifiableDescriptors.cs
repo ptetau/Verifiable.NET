@@ -96,7 +96,7 @@ internal static class VerifiableDescriptors
         title: "Z3 SMT solver executable not found",
         messageFormat: "{0}",
         category: SmtCategory,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
     public static readonly DiagnosticDescriptor SpecTooComplex = new(

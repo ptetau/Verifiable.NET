@@ -314,7 +314,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER101` | `UNSUPPORTED CONTRACT` | Contract could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. |
 | `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
 | `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |
-| `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`). Warning only; proof checks resume once Z3 is present. |
+| `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`), so no proof was checked. Build error by default, because unchecked code must not pass as verified. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` (downgrades it to a warning). |
 | `VER201` | `INVALID CONSTRAINED TYPE` | Type with `[TypeAlias<T>]` / `[Refined<T>]` is missing `readonly partial record struct` modifiers. |
 | `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |
 | `VER203` | `INVALID MAPTO PROJECTION` | `[MapTo]` declaration is malformed, missing a matching source member for a target field/parameter, or requires narrowing/validation (use `[InboundPort]` for `[TypeAlias<T>]` targets). |

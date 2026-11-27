@@ -1,6 +1,7 @@
 <Project>
   <ItemGroup>
     <CompilerVisibleProperty Include="VerifiableZ3Path" />
+    <CompilerVisibleProperty Include="VerifiableAllowMissingZ3" />
     <CompilerVisibleProperty Include="VerifiableAgent" />
     <CompilerVisibleProperty Include="VerifiableClosedEnums" />
     <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
