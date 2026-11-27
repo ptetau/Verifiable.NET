@@ -11,7 +11,8 @@ internal static class ElmGeneratorFormatter
         Location location,
         string intro,
         string? explanation,
-        string fixHint)
+        string fixHint,
+        string? summary = null)
     {
         var sb = new StringBuilder();
         var fileLabel = string.Empty;
@@ -55,6 +56,7 @@ internal static class ElmGeneratorFormatter
             }
         }
 
+        sb.AppendLine(ToSingleLine(string.IsNullOrWhiteSpace(summary) ? intro : summary!));
         sb.Append(BuildHeader(title, fileLabel));
         sb.AppendLine();
         sb.AppendLine();
@@ -80,6 +82,9 @@ internal static class ElmGeneratorFormatter
         sb.Append(trimmedFix.StartsWith("Fix:", StringComparison.OrdinalIgnoreCase) ? trimmedFix : $"Fix: {trimmedFix}");
         return sb.ToString();
     }
+
+    private static string ToSingleLine(string text) =>
+        text.Trim().Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ');
 
     private static string BuildHeader(string title, string fileLabel)
     {

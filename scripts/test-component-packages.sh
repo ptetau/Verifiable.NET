@@ -76,4 +76,5 @@ if dotnet build --no-restore -p:VerifiableZ3Path="$z3" > external.log 2>&1; then
     echo "The unexported private-helper predicate was silently accepted" >&2
     exit 1
 fi
-grep -F 'error VER101' external.log
+grep -F 'error VER101: Unsupported contract in Consumer.Keep:' external.log
+grep -F 'UsesSecret' external.log
