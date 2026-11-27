@@ -143,6 +143,28 @@ public class ClosedEnumDomainTests
     }
 
     [Fact]
+    public async Task OpenEnumInputsFitTheirStorageButCanBeUnnamed()
+    {
+        await Check("""
+            public enum E : byte { One = 1 }
+            [Verifiable]
+            public static class C
+            {
+                public static long Widen(E e)
+                {
+                    Spec.Ensures<long>(r => r >= 0 && r <= 255);
+                    return checked((long)e);
+                }
+                public static bool Named(E e)
+                {
+                    Spec.Ensures<bool>(r => r);
+                    return e == E.One;
+                }
+            }
+            """, null, 1, "Spec.Ensures<bool>");
+    }
+
+    [Fact]
     public async Task CheckedNarrowingNeedsARangeProofEvenWhenThereAreNoContracts()
     {
         await Check("""

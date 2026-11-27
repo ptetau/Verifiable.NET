@@ -2540,6 +2540,11 @@ internal sealed partial class CfgSsaLowerer
 
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (value.Type.TypeKind == TypeKind.Enum)
+        {
+            AddAssertion(ContractExpressionTranslator.FitsIntegralType(value.Term, value.Type), "EnumRange", $"{value.Type.Name} underlying range", loc);
+            return;
+        }
         if (CalendarArithmetic.CalendarType(value.Type) is { } calendar)
         {
             AddAssertion(CalendarArithmetic.InRange(calendar, value.Term), "CalendarRange", $"{calendar} range", loc);
