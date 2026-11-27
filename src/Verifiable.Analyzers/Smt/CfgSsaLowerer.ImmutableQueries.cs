@@ -65,6 +65,8 @@ internal sealed partial class CfgSsaLowerer
         var stages = new Stack<IInvocationOperation>();
         while (source is IInvocationOperation stage && VerifiableSymbolHelpers.IsLinqProvider(stage.TargetMethod))
         {
+            if (stages.Count >= 32)
+                throw new ContractLoweringException("Immutable LINQ query exceeds the 32-stage pipeline limit.");
             if (stage.TargetMethod.Name is not ("Select" or "Where"))
                 throw UnsupportedQuery(stage);
             stages.Push(stage);
@@ -77,6 +79,9 @@ internal sealed partial class CfgSsaLowerer
             !_types.TryGetSequenceInfo(source.Type, out _, out var seqId, out var elemType))
             throw UnsupportedQuery(source);
         var sequence = LowerExpression(source, gamma, env, emitObligations, inlineDepth);
+        if (source.Type.IsValueType)
+            AddObligation("Precondition", "ImmutableArray must not be default before enumeration", source.Syntax.GetLocation(),
+                gamma, $"(not (= {sequence.Term} default-{_types.GetSort(source.Type)}))");
         var count = $"(seq_count_{seqId} {sequence.Term})";
         var index = "linq_i";
         var domain = $"(and (<= 0 {index}) (< {index} {count}))";
@@ -121,8 +126,11 @@ internal sealed partial class CfgSsaLowerer
             if (!SymbolEqualityComparer.Default.Equals(lambda.Param.Type, element.Type))
                 throw UnsupportedQuery(lambda.Body);
             var scope = env.Clone();
-            scope.Vars[lambda.Param] = element;
-            return LowerQueryValue(lambda.Body, scope);
+            // Repeated references to the parameter must not duplicate the whole
+            // preceding Select pipeline (e.g. a chain of Select(x => x == x)).
+            scope.Vars[lambda.Param] = new SmtTypedTerm("linq_value", element.Type);
+            var body = LowerQueryValue(lambda.Body, scope);
+            return new SmtTypedTerm($"(let ((linq_value {element.Term})) {body.Term})", body.Type);
         }
 
         string CountMatches(string matches)

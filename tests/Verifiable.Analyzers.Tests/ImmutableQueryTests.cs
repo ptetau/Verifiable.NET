@@ -41,6 +41,7 @@ public class ImmutableQueryTests
     {
         Assert.Empty(await Analyze("""
             public static bool High(ImmutableArray<LineItem> items, int minimum) {
+                Spec.Requires(!items.IsDefault);
                 Spec.Ensures<bool>(r => r == !items.All(i => i.CategoryId <= minimum));
                 return items.Select(i => i.CategoryId).Where(c => c > minimum).Any();
             }
@@ -102,5 +103,46 @@ public class ImmutableQueryTests
         var errors = await Analyze("public static bool Any(IQueryable<int> xs) => xs.Any();");
         Assert.Contains(errors, d => d.Id == "VER006");
         Assert.DoesNotContain(errors, d => d.Id.StartsWith("CS") || d.Id == "AD0001");
+    }
+
+    [Theory]
+    [InlineData("return default(ImmutableArray<int>).Any();")]
+    [InlineData("var xs = default(ImmutableArray<int>); return xs.Any();")]
+    [InlineData("return input.Any();")]
+    public async Task DefaultImmutableArrayCannotBeEnumerated(string body)
+    {
+        var errors = await Analyze($"public static bool F(ImmutableArray<int> input) {{ {body} }}");
+        Assert.Contains(errors, d => d.Id == "VER102" && d.GetMessage().Contains("must not be default"));
+        Assert.DoesNotContain(errors, d => d.Id.StartsWith("CS") || d.Id == "AD0001");
+    }
+
+    [Fact]
+    public async Task InitializedEmptyIsDistinctFromDefault()
+    {
+        Assert.Empty(await Analyze("""
+            public static bool Empty() {
+                Spec.Ensures<bool>(r => !r);
+                return ImmutableArray<int>.Empty.Any();
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task LongCountRemainsAvailableInOrdinaryImplementation()
+    {
+        Assert.Empty(await Analyze("public static long Size(ImmutableList<int> xs) => xs.LongCount();"));
+    }
+
+    [Theory]
+    [InlineData(32, false)]
+    [InlineData(33, true)]
+    public async Task PipelineExpansionIsBounded(int stages, bool exceedsLimit)
+    {
+        var query = "xs" + string.Concat(Enumerable.Repeat(".Select(x => x == x)", stages)) + ".Any(x => x)";
+        var errors = await Analyze($"public static bool F(ImmutableList<bool> xs) {{ Spec.Ensures<bool>(r => r == (xs.Count > 0)); return {query}; }}");
+        if (exceedsLimit)
+            Assert.Contains(errors, d => d.Id == "VER101" && d.GetMessage().Contains("pipeline limit"));
+        else
+            Assert.Empty(errors);
     }
 }

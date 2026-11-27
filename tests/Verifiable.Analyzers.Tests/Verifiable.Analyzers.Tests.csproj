@@ -24,4 +24,9 @@
     <ProjectReference Include="..\..\src\Verifiable.Analyzers\Verifiable.Analyzers.csproj" />
   </ItemGroup>
 
+  <Target Name="CopySdkRegexGeneratorForIntegrationTest" AfterTargets="Build">
+    <Copy SourceFiles="@(Analyzer->WithMetadataValue('Filename', 'System.Text.RegularExpressions.Generator'))"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

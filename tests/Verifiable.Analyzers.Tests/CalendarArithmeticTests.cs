@@ -36,6 +36,29 @@ public class CalendarArithmeticTests
     }
 
     [Fact]
+    public async Task RoundOnStoredFieldIsSupported()
+    {
+        Assert.Empty(await Errors("""
+            public readonly record struct Price(decimal Amount);
+            public static bool F(Price p) {
+                Spec.Ensures<bool>(r => r == (decimal.Round(p.Amount, 2) == p.Amount));
+                var amount = p.Amount;
+                return decimal.Round(amount, 2) == amount;
+            }
+            """));
+    }
+
+    [Theory]
+    [InlineData("var x = n / 3m; return decimal.Round(x, 28) != x;")]
+    [InlineData("var x = n; x /= 3m; return decimal.Round(x, 28) != x;")]
+    [InlineData("return decimal.Round(n / 3m, 28) != n / 3m;")]
+    public async Task RoundRejectsRealArithmeticEvenThroughSsa(string body)
+    {
+        const string prefix = "public static bool F(decimal n) { Spec.Requires(n == 1m); Spec.Ensures<bool>(r => r); ";
+        Assert.Contains(await Errors(prefix + body + "}"), e => e.Contains("VER101") && e.Contains("decimal intermediate precision"));
+    }
+
+    [Fact]
     public async Task CalendarValuesAreExactAndBounded()
     {
         Assert.Empty(await Errors("""

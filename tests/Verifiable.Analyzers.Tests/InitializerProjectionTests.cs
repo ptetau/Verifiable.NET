@@ -28,6 +28,28 @@ public class InitializerProjectionTests
     }
 
     [Theory]
+    [InlineData("new Box(new D { X = 1 }) == new Box(new D { X = 1 })")]
+    [InlineData("new Box(new D { X = 1 }).Equals(new Box(new D { X = 1 }))")]
+    [InlineData("new Outer(new Box(new D { X = 1 })) == new Outer(new Box(new D { X = 1 }))")]
+    public async Task SynthesizedRecordEqualityDoesNotEraseNestedIdentity(string comparison)
+    {
+        await Check($$"""
+            using Verifiable.Contracts;
+            public sealed class D { public int X { get; init; } }
+            public readonly record struct Box(D Value);
+            public sealed record Outer(Box Inner);
+            [Verifiable] public static class Mapper
+            {
+                public static bool Compare()
+                {
+                    Spec.Ensures<bool>(r => r);
+                    return {{comparison}};
+                }
+            }
+            """, "VER101", allowUnverifiedCall: true);
+    }
+
+    [Theory]
     [InlineData("readonly record struct State", "d.Id", null)]
     [InlineData("record State", "d.Other", "VER102")]
     [InlineData("sealed class State", "d.Id", null)]

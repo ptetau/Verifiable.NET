@@ -65,7 +65,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
-                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks))
+                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums))
                 {
                     return;
                 }
@@ -180,7 +180,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return sb.ToString();
     }
 
-    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks)
+    private static bool MethodNeedsSmtCheck(Compilation compilation, IMethodSymbol method, ImmutableArray<IOperation> blocks, bool closedEnums)
     {
         if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr) ||
             (method.ContainingType is not null && VerifiableSymbolHelpers.HasAttribute(method.ContainingType, VerifiableSymbolHelpers.CheckedArithmeticAttr)) ||
@@ -191,11 +191,27 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             return true;
         }
 
+        SmtTypeSystem? enumTypes = null;
         foreach (var b in blocks)
         {
             foreach (var op in b.DescendantsAndSelf())
             {
                 if (CalendarArithmetic.NeedsCheck(op))
+                    return true;
+
+                if (op is IConversionOperation { IsChecked: true } cast &&
+                    (cast.Type?.TypeKind == TypeKind.Enum || cast.Operand.Type?.TypeKind == TypeKind.Enum))
+                    return true;
+
+                var callee = op switch
+                {
+                    IInvocationOperation call => call.TargetMethod,
+                    IObjectCreationOperation creation => creation.Constructor,
+                    _ => null
+                };
+                if (closedEnums && callee is not null &&
+                    VerifiableSymbolHelpers.GetScope(callee) == VerificationScope.Verifiable &&
+                    CfgSsaLowerer.HasEnumEntryDomains(callee, enumTypes ??= new SmtTypeSystem(false)))
                     return true;
 
                 if (op is IInvocationOperation inv)
@@ -214,7 +230,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         return true;
                     }
 
-                    if (VerifiableSymbolHelpers.IsLinqProvider(inv.TargetMethod))
+                    if (VerifiableSymbolHelpers.IsLinqQueryOperator(inv.TargetMethod))
                     {
                         return true;
                     }

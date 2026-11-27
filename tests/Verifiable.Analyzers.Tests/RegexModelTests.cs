@@ -1,5 +1,7 @@
 using System;
+using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
@@ -55,8 +57,6 @@ public class RegexModelTests
     [Fact]
     public async Task GeneratedAndStaticPostalValidatorsProveEquivalent()
     {
-        // The harness only runs Verifiable's generators. Supply the factory part that
-        // the framework generator normally contributes to the compilation.
         const string source = """
             using System.Text.RegularExpressions;
             using Verifiable.Contracts;
@@ -65,8 +65,6 @@ public class RegexModelTests
                 public const string Postal = @"^\d{5}(-\d{4})?$";
                 [GeneratedRegex(Postal)]
                 public static partial Regex PostalRegex();
-                [System.CodeDom.Compiler.GeneratedCode("System.Text.RegularExpressions.Generator", "10.0")]
-                public static partial Regex PostalRegex() => new Regex(Postal);
             }
             [Verifiable]
             public static class Validator
@@ -79,9 +77,41 @@ public class RegexModelTests
                 }
             }
             """;
-        _ = typeof(GeneratedRegexAttribute).Assembly;
-        var ds = await AnalyzerTestHarness.AnalyzeAsync(source, new VerifiableGatekeeperAnalyzer(), new VerifiableSmtAnalyzer());
+        var assembly = Assembly.LoadFrom(Path.Combine(AppContext.BaseDirectory, "System.Text.RegularExpressions.Generator.dll"));
+        var generator = (IIncrementalGenerator)Activator.CreateInstance(
+            assembly.GetType("System.Text.RegularExpressions.Generator.RegexGenerator", throwOnError: true)!)!;
+        var ds = await AnalyzerTestHarness.AnalyzeWithGeneratorAsync(source, null, [typeof(Regex)], generator.AsSourceGenerator(),
+            new VerifiableGatekeeperAnalyzer(), new VerifiableSmtAnalyzer());
         Assert.Empty(ds.Where(d => d.Id == "AD0001" || d.Severity == DiagnosticSeverity.Error));
+    }
+
+    [Fact]
+    public async Task HandwrittenFactoryCannotProveItsAdvertisedPattern()
+    {
+        const string source = """
+            using System.Text.RegularExpressions;
+            using Verifiable.Contracts;
+            public static partial class Patterns
+            {
+                [GeneratedRegex("^x$")]
+                public static partial Regex X();
+                [System.CodeDom.Compiler.GeneratedCode("System.Text.RegularExpressions.Generator", "10.0")]
+                public static partial Regex X() => new Regex("^y$");
+            }
+            [Verifiable] public static class C
+            {
+                public static bool Check()
+                {
+                    Spec.Ensures<bool>(r => r);
+                    return Patterns.X().IsMatch("x");
+                }
+            }
+            """;
+        var ds = await AnalyzerTestHarness.AnalyzeWithReferencesAsync(source, null, [typeof(Regex)],
+            new VerifiableGatekeeperAnalyzer(), new VerifiableSmtAnalyzer());
+        Assert.DoesNotContain(ds, d => d.Id == "AD0001" || d.Id.StartsWith("CS", StringComparison.Ordinal) && d.Severity == DiagnosticSeverity.Error);
+        Assert.Contains(ds, d => d.Id == "VER006");
+        Assert.Contains(ds, d => d.Id == "VER101");
     }
 
     [Fact]

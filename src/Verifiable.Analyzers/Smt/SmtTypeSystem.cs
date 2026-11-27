@@ -116,7 +116,8 @@ internal sealed class SmtTypeSystem
                 var seqSort = $"Seq_{id}";
                 Cache(type, seqSort);
                 _seqTypes[type] = (seqSort, elem);
-                _declarations.Add($"(declare-datatype {seqSort} ((mk-{seqSort} (seq_elems_{id} (Array Int {eSort})) (seq_count_{id} Int))))");
+                var uninitialized = colNamed.IsValueType ? $" (default-{seqSort})" : "";
+                _declarations.Add($"(declare-datatype {seqSort} ((mk-{seqSort} (seq_elems_{id} (Array Int {eSort})) (seq_count_{id} Int)){uninitialized}))");
                 return seqSort;
             }
 
@@ -257,6 +258,13 @@ internal sealed class SmtTypeSystem
         return false;
     }
 
+    public string GetEmptyCollectionTerm(ITypeSymbol type)
+    {
+        if (!TryGetSequenceInfo(type, out var sort, out _, out var elem))
+            return GetDefaultTerm(type);
+        return $"(mk-{sort} ((as const (Array Int {GetSort(elem!)})) {GetDefaultTerm(elem!)}) 0)";
+    }
+
     public string GetDefaultTerm(ITypeSymbol type)
     {
         var sort = GetSort(type);
@@ -283,12 +291,8 @@ internal sealed class SmtTypeSystem
             return $"(mk-{mapSort} ((as const (Array {kSort} {vSort})) {defV}) ((as const (Array {kSort} Bool)) false) 0)";
         }
 
-        if (TryGetSequenceInfo(type, out var seqSort, out _, out var elemType))
-        {
-            var eSort = GetSort(elemType!);
-            var defE = GetDefaultTerm(elemType!);
-            return $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0)";
-        }
+        if (TryGetSequenceInfo(type, out var seqSort, out _, out _))
+            return type.IsValueType ? $"default-{seqSort}" : GetEmptyCollectionTerm(type);
 
         if (TryGetSetInfo(type, out var setSort, out _, out var setElem))
         {

@@ -178,11 +178,14 @@ C# enum values are not necessarily named members: a cast, a zero-initialized fie
 ```csharp
 public enum Status { Draft, Submitted }
 
-[Verifiable]
-public static bool Handled(Status status)
+public static class StatusRules
 {
-    Spec.Ensures<bool>(result => result, "Handle every declared status.");
-    return status == Status.Draft || status == Status.Submitted;
+    [Verifiable]
+    public static bool Handled(Status status)
+    {
+        Spec.Ensures<bool>(result => result, "Handle every declared status.");
+        return status == Status.Draft || status == Status.Submitted;
+    }
 }
 ```
 
@@ -192,8 +195,8 @@ With the option enabled, adding `Cancelled` without updating the return expressi
 
 * `string.IsNullOrWhiteSpace` accepts null; parameterless `Trim()` removes .NET whitespace from both ends. Use `Contains` for ordinal substring checks. For a string prefix or suffix, specify `StringComparison.Ordinal`: `text.StartsWith("INV-", StringComparison.Ordinal)`. The single-string `StartsWith` and `EndsWith` overloads use the current culture, so an ordinal proof would not establish their runtime behavior.
 * `string.Join` supports a bounded list of inline string elements (up to 32). A null separator or null element contributes the empty string, as at runtime. This does not model arbitrary enumerable iteration or element `ToString()` calls.
-* For pattern matching, use static `Regex.IsMatch(input, constantPattern)` or a parameterless `[GeneratedRegex]` factory followed by `.IsMatch(input)`. The prover models search, not just whole-string matching: use anchors when the whole input matters. The supported subset includes literal characters, positive character classes and ranges, `\d`, grouping, alternation, and quantifiers. Backreferences, lookarounds and culture-sensitive options are not supported.
-* On `ImmutableArray<T>` and `ImmutableList<T>`, compose `Where` and `Select` with `Any`, `All`, or `Count`, using inline, side-effect-free lambdas. For duplicate keys, use `items.GroupBy(x => x.Key).Any(g => g.Count() > 1)`: the prover checks for **two distinct indices** with equal keys. This is not a general model of `IGrouping`, deferred execution, or custom comparers. `IReadOnlyList<T>` alone is not proof that a collection is immutable.
+* For pattern matching, use static `Regex.IsMatch(input, constantPattern)` or a parameterless `[GeneratedRegex]` factory followed by `.IsMatch(input)`. The prover models search, not just whole-string matching: `\A[0-9]{5}\z` requires exactly five ASCII digits, whereas `\d{5}` searches for five Unicode decimal digits. The supported subset includes literal characters, positive character classes and ranges, grouping, alternation, and bounded pattern complexity. Backreferences, lookarounds and culture-sensitive options are not supported.
+* On `ImmutableArray<T>` and `ImmutableList<T>`, compose `Where` and `Select` with `Any`, `All`, or `Count`, using inline, side-effect-free lambdas. For array inputs, `Spec.Requires(!items.IsDefault)` rules out uninitialized storage; use `ImmutableArray<T>.Empty` when you mean empty. For duplicate keys, use `items.GroupBy(x => x.Key).Any(g => g.Count() > 1)`: the prover checks for **two distinct indices** with equal keys. This is not a general model of `IGrouping`, deferred execution, or custom comparers. `IReadOnlyList<T>` alone is not proof that a collection is immutable.
 
 ### Mapping DTOs with initializers
 
@@ -202,6 +205,8 @@ A mapper may return `new OrderResponse { Id = dto.Id, Total = dto.Total }` and p
 ### Rounding and calendar arithmetic
 
 Use `decimal.Round(amount, scale) == amount` to express that an amount is unchanged by rounding. Midpoints round to even, including for negative amounts; a variable scale must be provably between 0 and 28. This is a numeric property, not a check on the stored number of trailing zeros in a `decimal`.
+
+Use this check on a decimal input, literal, or stored field. A proof that mixes `Round` with arithmetic such as `amount / 3m` may receive `VER101`: the SMT `Real` quotient is exact, whereas the CLR may have rounded it before `Round` sees it.
 
 Pass dates and durations into the method rather than reading the clock. `DateOnly` uses day numbers; `DateTime` and `TimeSpan` use ticks. Calendar operations must stay in range. For example, guard `day.AddDays(1)` with `Spec.Requires(day < DateOnly.MaxValue)`. The model supports comparisons, day-of-week, differences between `DateTime` values, and comparisons of `TimeSpan.TotalSeconds` to constants. It does not model time-zone conversion or arbitrary floating-point calculations. Ambient `DateTime.Now`, `UtcNow`, and `Today` remain disallowed.
 

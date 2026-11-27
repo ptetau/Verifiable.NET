@@ -25,10 +25,18 @@ internal static class AnalyzerTestHarness
         params DiagnosticAnalyzer[] analyzers) =>
         AnalyzeWithReferencesAsync(source, buildProperties, [], analyzers);
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithReferencesAsync(
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeWithReferencesAsync(
         string source,
         IReadOnlyDictionary<string, string>? buildProperties,
         Type[] referenceTypes,
+        params DiagnosticAnalyzer[] analyzers) =>
+        AnalyzeWithGeneratorAsync(source, buildProperties, referenceTypes, null, analyzers);
+
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithGeneratorAsync(
+        string source,
+        IReadOnlyDictionary<string, string>? buildProperties,
+        Type[] referenceTypes,
+        ISourceGenerator? additionalGenerator,
         params DiagnosticAnalyzer[] analyzers)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
@@ -51,9 +59,9 @@ internal static class AnalyzerTestHarness
             refs,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            generators: [new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator()],
-            parseOptions: parseOptions);
+        var generators = new List<ISourceGenerator> { new TypeAliasGenerator().AsSourceGenerator(), new InboundPortGenerator().AsSourceGenerator() };
+        if (additionalGenerator != null) generators.Add(additionalGenerator);
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generators, parseOptions: parseOptions);
         driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
 
         AnalyzerOptions? analyzerOptions = buildProperties is null

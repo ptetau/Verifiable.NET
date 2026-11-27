@@ -45,6 +45,12 @@ internal sealed class ContractExpressionTranslator
             return new SmtTypedTerm($"(map_count_{dictId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
+        if (receiver.Type.IsValueType && memberName == "IsDefault" &&
+            _types.TryGetSequenceInfo(receiver.Type, out var arraySort, out _, out _))
+        {
+            return new SmtTypedTerm($"(= {receiver.Term} default-{arraySort})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+        }
+
         if (_types.TryGetSequenceInfo(receiver.Type, out _, out var seqId, out _) && memberName is "Count" or "Length")
         {
             return new SmtTypedTerm($"(seq_count_{seqId} {receiver.Term})", _compilation.GetSpecialType(SpecialType.System_Int32));
@@ -103,10 +109,7 @@ internal sealed class ContractExpressionTranslator
             var number = IntTermForIndex(value);
             var bits = $"((_ int2bv {width}) {number})";
             if (IsBitVecSort(dstSort)) return new SmtTypedTerm(bits, targetType);
-            var target = (targetType as INamedTypeSymbol)?.EnumUnderlyingType ?? targetType;
-            var signed = target.SpecialType is SpecialType.System_SByte or SpecialType.System_Int16 or
-                SpecialType.System_Int32 or SpecialType.System_Int64;
-            return new SmtTypedTerm(signed ? BitVecToInt(bits, width) : $"(bv2int {bits})", targetType);
+            return new SmtTypedTerm(IsSignedIntegral(targetType) ? BitVecToInt(bits, width) : $"(bv2int {bits})", targetType);
         }
         if (srcSort == dstSort)
         {
@@ -175,6 +178,20 @@ internal sealed class ContractExpressionTranslator
             SpecialType.System_Int64 or SpecialType.System_UInt64 => 64,
             _ => 0
         };
+
+    private static bool IsSignedIntegral(ITypeSymbol type) =>
+        ((type as INamedTypeSymbol)?.EnumUnderlyingType ?? type).SpecialType is
+            SpecialType.System_SByte or SpecialType.System_Int16 or SpecialType.System_Int32 or SpecialType.System_Int64;
+
+    internal static string FitsIntegralType(string number, ITypeSymbol type)
+    {
+        var width = IntegralWidth(type);
+        var signed = IsSignedIntegral(type);
+        var limit = BigInteger.One << (signed ? width - 1 : width);
+        var lower = signed ? $"(- {limit.ToString(CultureInfo.InvariantCulture)})" : "0";
+        var upper = (limit - 1).ToString(CultureInfo.InvariantCulture);
+        return $"(and (<= {lower} {number}) (<= {number} {upper}))";
+    }
 
     public (string Left, string Right, ITypeSymbol UnifiedType) UnifyNumericPair(SmtTypedTerm left, SmtTypedTerm right)
     {

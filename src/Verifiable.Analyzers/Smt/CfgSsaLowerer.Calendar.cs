@@ -2,12 +2,45 @@ using System;
 using System.Linq;
 using System.Numerics;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
 
 namespace Verifiable.Analyzers.Smt;
 
 internal sealed partial class CfgSsaLowerer
 {
+    private bool _usesDecimalRound;
+    private IOperation? _inexactDecimalProducer;
+    private bool _reportedDecimalPrecisionError;
+
+    // Round is exact on a CLR decimal input, not on every intermediate Real in our
+    // arithmetic model. Check the entire proof context, including inlined definitions
+    // and premises, so an SSA binding or a precondition cannot hide a lossy operation.
+    private void TrackDecimalPrecisionBoundary(IOperation op)
+    {
+        if (_reportedDecimalPrecisionError) return;
+        if (op is IInvocationOperation call && CalendarArithmetic.IsRound(call.TargetMethod))
+            _usesDecimalRound = true;
+        else if (_inexactDecimalProducer == null && op.Type?.SpecialType == SpecialType.System_Decimal && op switch
+        {
+            ILiteralOperation or IDefaultValueOperation or IFieldReferenceOperation or IPropertyReferenceOperation
+                or IParameterReferenceOperation or ILocalReferenceOperation or IFlowCaptureReferenceOperation
+                or IParenthesizedOperation or ISimpleAssignmentOperation or ICoalesceOperation or IConditionalOperation => false,
+            IUnaryOperation { OperatorKind: UnaryOperatorKind.Plus or UnaryOperatorKind.Minus } u =>
+                u.Operand.Type?.SpecialType != SpecialType.System_Decimal,
+            IConversionOperation c => c.Operand.Type?.SpecialType != SpecialType.System_Decimal,
+            _ => true
+        })
+            _inexactDecimalProducer = op;
+
+        if (_usesDecimalRound && _inexactDecimalProducer is { } producer)
+        {
+            _reportedDecimalPrecisionError = true;
+            _errors.Add((_method.Name, producer.Syntax.GetLocation(),
+                $"Cannot combine Decimal.Round with '{producer.Syntax}': exact Real arithmetic does not model CLR decimal intermediate precision. Round a decimal input or stored field instead."));
+        }
+    }
+
     private SmtTypedTerm CheckedCalendar(string term, ITypeSymbol type, string gamma, Location loc)
     {
         var calendar = CalendarArithmetic.CalendarType(type)!;

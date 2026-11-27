@@ -230,6 +230,9 @@ internal static class VerifiableSymbolHelpers
         return false;
     }
 
+    internal static bool IsLinqQueryOperator(IMethodSymbol method) =>
+        method.Name is "Any" or "All" or "Count" or "Where" or "Select" or "GroupBy" && IsLinqProvider(method);
+
     internal static bool IsLinqProvider(IMethodSymbol method)
     {
         if (!method.IsStatic) return false;
@@ -306,7 +309,7 @@ internal static class VerifiableSymbolHelpers
         }
 
         if (IsLinqProvider(method))
-            return method.Name is "Any" or "All" or "Count" or "Where" or "Select" or "GroupBy";
+            return method.ContainingType.Name == "Enumerable" || IsLinqQueryOperator(method);
 
         if (typeFull is
             "System.Math" or

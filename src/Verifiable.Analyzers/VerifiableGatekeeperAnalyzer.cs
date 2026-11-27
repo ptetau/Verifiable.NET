@@ -395,7 +395,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 break;
 
             case IInvocationOperation inv:
-                if (Smt.RegexModel.IsSupportedInvocation(inv))
+                if (Smt.RegexModel.IsSupportedInvocation(inv, context.Compilation))
                     break;
                 if (VerifiableSymbolHelpers.IsNondeterministicMember(inv.TargetMethod, out var invDisplay))
                 {

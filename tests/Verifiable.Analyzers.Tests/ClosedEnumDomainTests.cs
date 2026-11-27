@@ -121,10 +121,72 @@ public class ClosedEnumDomainTests
                     return Identity((State)2);
                 }
             }
-            """, "true", 5);
+            """, "true", 6);
     }
 
-    private static async Task Check(string source, string? option, int failures)
+    [Fact]
+    public async Task VerifiedCallsCheckClosedDomainsEvenWithoutExplicitContracts()
+    {
+        await Check("""
+            public enum E { One = 1, Two = 2 }
+            public readonly record struct Box(E Value);
+            [Verifiable]
+            public static class C
+            {
+                public static int Divide(E d) => 12 / (int)d;
+                public static int DivideBox(Box b) => Divide(b.Value);
+                public static int Good() => DivideBox(new Box(E.One));
+                public static int Bad() => Divide((E)0);
+                public static int BadBox() => DivideBox(new Box((E)0));
+            }
+            """, "true", 2, "Closed enum input");
+    }
+
+    [Fact]
+    public async Task CheckedNarrowingNeedsARangeProofEvenWhenThereAreNoContracts()
+    {
+        await Check("""
+            public enum ByteEnum : byte { One = 1 }
+            [Verifiable]
+            public static class C
+            {
+                public static ByteEnum Checked(int n) => checked((ByteEnum)n);
+                public static ByteEnum InRange(int n)
+                {
+                    Spec.Requires(n >= 0 && n <= 255);
+                    return checked((ByteEnum)n);
+                }
+                public static ByteEnum Unchecked(int n) => unchecked((ByteEnum)n);
+            }
+            """, null, 1, "Checked enum cast");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("true")]
+    public async Task EnumDifferenceHasTheUnderlyingIntegralType(string? option)
+    {
+        await Check("""
+            public enum E { Min = int.MinValue, Max = int.MaxValue }
+            [Verifiable]
+            public static class C
+            {
+                public static int Self(E e)
+                {
+                    Spec.Ensures<int>(r => r == 0);
+                    return e - e;
+                }
+                public static int Difference(E a, E b)
+                {
+                    Spec.Requires(a == E.Min && b == E.Max);
+                    Spec.Ensures<int>(r => r == 1);
+                    return unchecked(a - b);
+                }
+            }
+            """, option, 0);
+    }
+
+    private static async Task Check(string source, string? option, int failures, string? failureText = null)
     {
         var options = option is null ? null : new Dictionary<string, string>
         {
@@ -136,5 +198,7 @@ public class ClosedEnumDomainTests
             d.Severity == DiagnosticSeverity.Error && d.Id != "VER102" ||
             d.Id.StartsWith("VER") && d.Id != "VER102");
         Assert.Equal(failures, diagnostics.Count(d => d.Id == "VER102"));
+        if (failureText is not null)
+            Assert.All(diagnostics.Where(d => d.Id == "VER102"), d => Assert.Contains(failureText, d.GetMessage()));
     }
 }

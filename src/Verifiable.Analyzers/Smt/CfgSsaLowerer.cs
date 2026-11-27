@@ -204,7 +204,8 @@ internal sealed partial class CfgSsaLowerer
             _entryThis = thisTerm;
             entryEnv.ThisOverride = thisTerm;
             EmitTypeAssumptions(thisTerm, methodLoc);
-            AssumeEntryEnumDomains(thisTerm, methodLoc);
+            if (_method.MethodKind != MethodKind.Constructor)
+                AssumeEntryEnumDomains(thisTerm, methodLoc);
         }
 
         foreach (var p in _method.Parameters)
@@ -1125,6 +1126,7 @@ internal sealed partial class CfgSsaLowerer
         bool emitObligations = true,
         int inlineDepth = 0)
     {
+        TrackDecimalPrecisionBoundary(op);
         switch (op)
         {
             case IConversionOperation conv:
@@ -1153,6 +1155,15 @@ internal sealed partial class CfgSsaLowerer
                     }
                 }
                 var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
+                if (conv.IsChecked && conv.Type is { } checkedTarget &&
+                    (checkedTarget.TypeKind == TypeKind.Enum || inner.Type.TypeKind == TypeKind.Enum) &&
+                    !_types.TryGetNullableInfo(checkedTarget, out _, out _, out _))
+                {
+                    var cast = _translator.ConvertTo(inner, checkedTarget);
+                    AddObligation("Overflow", $"Checked enum cast '{conv.Syntax}' must fit {checkedTarget.Name}",
+                        conv.Syntax.GetLocation(), gamma, ContractExpressionTranslator.FitsIntegralType(_translator.IntTermForIndex(inner), checkedTarget));
+                    return cast;
+                }
                 if (conv.Type is { } target && !SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
                     _types.TryGetNullableInfo(inner.Type, out _, out var srcId, out var srcType) &&
                     _types.TryGetNullableInfo(target, out _, out var dstId, out var dstType))
@@ -1266,8 +1277,8 @@ internal sealed partial class CfgSsaLowerer
 
             case IBinaryOperation bin:
                 if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
-                    (UsesDtoIdentity(bin.LeftOperand.Type) || UsesDtoIdentity(bin.RightOperand.Type)))
-                    throw new ContractLoweringException("Reference identity of class DTOs is not modeled; compare their stored properties instead.");
+                    (ContainsUnmodeledReference(bin.LeftOperand.Type) || ContainsUnmodeledReference(bin.RightOperand.Type)))
+                    throw new ContractLoweringException("Reference identity is not modeled for this type or its stored fields; compare individual properties instead.");
                 if (TryCompareTotalSeconds(bin, gamma, env, emitObligations, inlineDepth) is { } seconds)
                     return seconds;
                 if (bin.IsLifted)
@@ -1286,6 +1297,16 @@ internal sealed partial class CfgSsaLowerer
                 }
                 var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                 var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+                if (bin.OperatorKind == BinaryOperatorKind.Subtract && lhs.Type.TypeKind == TypeKind.Enum &&
+                    SymbolEqualityComparer.Default.Equals(lhs.Type, rhs.Type) && bin.Type is { TypeKind: not TypeKind.Enum } differenceType)
+                {
+                    var exact = $"(- {lhs.Term} {rhs.Term})";
+                    var difference = _translator.ConvertTo(new SmtTypedTerm(exact, lhs.Type), differenceType);
+                    if (bin.IsChecked || _types.UseBitVec)
+                        AddObligation("Overflow", $"Checked enum subtraction '{bin.Syntax}'", bin.Syntax.GetLocation(),
+                            gamma, ContractExpressionTranslator.FitsIntegralType(exact, differenceType));
+                    return difference;
+                }
                 return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
 
             case IIsNullOperation isNull:
@@ -1697,7 +1718,7 @@ internal sealed partial class CfgSsaLowerer
             var containing = prop.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
             if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && prop.Name == "Empty")
             {
-                return new SmtTypedTerm(_types.GetDefaultTerm(prop.Type), prop.Type);
+                return new SmtTypedTerm(_types.GetEmptyCollectionTerm(prop.Type), prop.Type);
             }
             if (containing == "System.String" && prop.Name == "Empty")
             {
@@ -1741,7 +1762,7 @@ internal sealed partial class CfgSsaLowerer
             var containing = field.ContainingType?.OriginalDefinition.ToDisplayString() ?? string.Empty;
             if (containing.StartsWith("System.Collections.Immutable.", StringComparison.Ordinal) && field.Name == "Empty")
             {
-                return new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type);
+                return new SmtTypedTerm(_types.GetEmptyCollectionTerm(field.Type), field.Type);
             }
             if (field.ContainingType?.ToDisplayString() == "System.Guid" && field.Name == "Empty")
             {
@@ -1859,6 +1880,9 @@ internal sealed partial class CfgSsaLowerer
             {
                 var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
                 argMap[arg.Parameter.Name] = _translator.ConvertTo(v, arg.Parameter.Type);
+                if (_closedEnums && objCreate.Constructor is { } ctor &&
+                    VerifiableSymbolHelpers.GetScope(ctor) == VerificationScope.Verifiable)
+                    CheckEnumArgument(argMap[arg.Parameter.Name], ctor, gamma, objCreate.Syntax.GetLocation());
             }
         }
 
@@ -1909,7 +1933,7 @@ internal sealed partial class CfgSsaLowerer
         var t = colExpr.Type!;
         if (_types.TryGetSequenceInfo(t, out var seqSort, out var seqId, out var elemType))
         {
-            var cur = new SmtTypedTerm(_types.GetDefaultTerm(t), t);
+            var cur = new SmtTypedTerm(_types.GetEmptyCollectionTerm(t), t);
             var i = 0;
             foreach (var elemOp in colExpr.Elements)
             {
@@ -1957,12 +1981,12 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
-        if (VerifiableSymbolHelpers.IsLinqProvider(method))
+        if (VerifiableSymbolHelpers.IsLinqQueryOperator(method) || !emitObligations && VerifiableSymbolHelpers.IsLinqProvider(method))
             return LowerImmutableQuery(inv, gamma, env, emitObligations, inlineDepth);
 
         if (RegexModel.IsMatchMethod(method))
         {
-            var (input, regex) = RegexModel.Describe(inv);
+            var (input, regex) = RegexModel.Describe(inv, _compilation);
             var value = LowerExpression(input, gamma, env, emitObligations, inlineDepth);
             if (emitObligations)
                 AddObligation("Precondition", "Regex.IsMatch input must not be null", loc, gamma, $"(not (= {value.Term} str-null))");
@@ -1993,6 +2017,11 @@ internal sealed partial class CfgSsaLowerer
         // Roslyn supplies implicit default arguments as bound operations. Evaluate in
         // C# order, but interpret the resulting values in formal parameter order.
         var argValues = evaluated.OrderBy(a => a.Ordinal).Select(a => a.Value).ToList();
+        if (_closedEnums && VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable)
+        {
+            if (recvTerm is not null) CheckEnumArgument(recvTerm, method, gamma, loc);
+            foreach (var arg in argValues) CheckEnumArgument(arg, method, gamma, loc);
+        }
 
         // 1. Constrained [TypeAlias<T>] / [Refined<T>]: From(value) and IsValid(value)
         if (containing is not null && SmtTypeSystem.TryGetConstrainedUnderlying(containing, out var underlying))
@@ -2150,7 +2179,7 @@ internal sealed partial class CfgSsaLowerer
             "System.Collections.Immutable.ImmutableHashSet" &&
             method.Name == "Create" && argValues.Count == 0)
         {
-            return new SmtTypedTerm(_types.GetDefaultTerm(method.ReturnType), method.ReturnType);
+            return new SmtTypedTerm(_types.GetEmptyCollectionTerm(method.ReturnType), method.ReturnType);
         }
 
         // 7. Math / decimal / string helpers
@@ -2182,8 +2211,8 @@ internal sealed partial class CfgSsaLowerer
         if (method.Name == "Equals" && recvTerm is not null && argValues.Count == 1 &&
             (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
-            if (UsesDtoIdentity(recvTerm.Type) || UsesDtoIdentity(method.ContainingType))
-                throw new ContractLoweringException("Reference identity of class DTOs is not modeled; compare their stored properties instead.");
+            if (ContainsUnmodeledReference(recvTerm.Type) || ContainsUnmodeledReference(method.ContainingType))
+                throw new ContractLoweringException("Reference identity is not modeled for this type or its stored fields; compare individual properties instead.");
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
             return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
@@ -2259,7 +2288,7 @@ internal sealed partial class CfgSsaLowerer
             if (_closedEnums && VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable)
             {
                 foreach (var input in receiver is null ? args : args.Concat(new[] { receiver }))
-                    foreach (var domain in EntryEnumDomains(input))
+                    foreach (var domain in EntryEnumDomains(_types, input))
                         summaryGuard = $"(and {summaryGuard} {domain})";
             }
             calleeEnv.SpecResult = retTerm;
@@ -2308,9 +2337,40 @@ internal sealed partial class CfgSsaLowerer
         method.ContainingType.SpecialType is SpecialType.System_Decimal or SpecialType.System_String ||
         method.IsImplicitlyDeclared && method.ContainingType.IsRecord;
 
-    private static bool UsesDtoIdentity(ITypeSymbol? type) => type is INamedTypeSymbol
-        { TypeKind: TypeKind.Class, IsRecord: false } named &&
-        (named.SpecialType == SpecialType.System_Object || !named.DeclaringSyntaxReferences.IsEmpty);
+    private static bool ContainsUnmodeledReference(ITypeSymbol? type) =>
+        ContainsUnmodeledReference(type, new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+
+    private static bool ContainsUnmodeledReference(ITypeSymbol? type, HashSet<ITypeSymbol> path)
+    {
+        if (type is null || type.SpecialType == SpecialType.System_String || type.TypeKind == TypeKind.Enum)
+            return false;
+        if (type is not INamedTypeSymbol named)
+            return true;
+        // A record's synthesized Equals compares instance fields (including auto-
+        // property backing fields) with EqualityComparer<T>.Default. Wrapping a
+        // DTO in a struct or another record does not make its identity structural.
+        if (!path.Add(named.OriginalDefinition))
+            return true;
+        try
+        {
+            if (named.OriginalDefinition.ToDisplayString() is "System.Collections.Immutable.ImmutableList<T>" or
+                "System.Collections.Immutable.ImmutableArray<T>" or "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>" or
+                "System.Collections.Immutable.ImmutableHashSet<T>" || named.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T)
+                return named.TypeArguments.Any(t => ContainsUnmodeledReference(t, path));
+            if (!named.IsRecord && named.IsReferenceType)
+                return true;
+            if (named.SpecialType != SpecialType.None)
+                return false;
+            if (named.IsTupleType)
+                return named.TupleElements.Any(e => ContainsUnmodeledReference(e.Type, path));
+            return named.BaseType is { IsRecord: true } parent && ContainsUnmodeledReference(parent, path) ||
+                named.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic && ContainsUnmodeledReference(f.Type, path));
+        }
+        finally
+        {
+            path.Remove(named.OriginalDefinition);
+        }
+    }
 
     private bool IsPositionalProjection(IObjectCreationOperation obj)
     {
@@ -2372,11 +2432,22 @@ internal sealed partial class CfgSsaLowerer
     private void AssumeEntryEnumDomains(SmtTypedTerm value, Location loc)
     {
         if (!_closedEnums) return;
-        foreach (var domain in EntryEnumDomains(value))
+        foreach (var domain in EntryEnumDomains(_types, value))
             AddAssertion(domain, "EnumDomain", $"closed enum domain in {value.Type.Name}", loc);
     }
 
-    private IEnumerable<string> EntryEnumDomains(SmtTypedTerm value, HashSet<ITypeSymbol>? ancestors = null)
+    private void CheckEnumArgument(SmtTypedTerm value, IMethodSymbol callee, string gamma, Location loc)
+    {
+        foreach (var domain in EntryEnumDomains(_types, value))
+            AddObligation("Precondition", $"Closed enum input to {callee.ContainingType.Name}.{callee.Name}", loc, gamma, domain);
+    }
+
+    internal static bool HasEnumEntryDomains(IMethodSymbol callee, SmtTypeSystem types) =>
+        (!callee.IsStatic && callee.MethodKind != MethodKind.Constructor &&
+         EntryEnumDomains(types, new SmtTypedTerm("this", callee.ContainingType)).Any()) ||
+        callee.Parameters.Any(p => EntryEnumDomains(types, new SmtTypedTerm(p.Name, p.Type)).Any());
+
+    private static IEnumerable<string> EntryEnumDomains(SmtTypeSystem types, SmtTypedTerm value, HashSet<ITypeSymbol>? ancestors = null)
     {
         if (value.Type.TypeKind == TypeKind.Enum)
         {
@@ -2391,7 +2462,7 @@ internal sealed partial class CfgSsaLowerer
             if (members.Length > 0)
                 yield return members.Length == 1 ? members[0] : $"(or {string.Join(" ", members)})";
         }
-        else if (_types.TryGetComposite(value.Type, out var composite))
+        else if (types.TryGetComposite(value.Type, out var composite))
         {
             ancestors ??= new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
             if (!ancestors.Add(value.Type)) yield break;
@@ -2402,7 +2473,7 @@ internal sealed partial class CfgSsaLowerer
                 // opaque/computed properties. Only assume facts about storage.
                 if (!fields.Any(field => field.Name == f.Name || field.AssociatedSymbol?.Name == f.Name))
                     continue;
-                foreach (var domain in EntryEnumDomains(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), ancestors))
+                foreach (var domain in EntryEnumDomains(types, new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), ancestors))
                     yield return domain;
             }
             ancestors.Remove(value.Type);
