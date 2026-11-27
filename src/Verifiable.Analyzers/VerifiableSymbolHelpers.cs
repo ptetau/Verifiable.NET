@@ -230,6 +230,46 @@ internal static class VerifiableSymbolHelpers
         return false;
     }
 
+    public const string GeneratedRegexAttr = "System.Text.RegularExpressions.GeneratedRegexAttribute";
+
+    public static bool TryGetGeneratedRegexAttribute(ISymbol symbol, out string pattern, out int options)
+    {
+        pattern = string.Empty;
+        options = 0;
+
+        foreach (var attr in symbol.GetAttributes())
+        {
+            if (attr.AttributeClass?.ToDisplayString() == GeneratedRegexAttr &&
+                attr.ConstructorArguments.Length >= 1 &&
+                attr.ConstructorArguments[0].Value is string pat)
+            {
+                pattern = pat;
+                if (attr.ConstructorArguments.Length >= 2 && attr.ConstructorArguments[1].Value is not null)
+                {
+                    options = Convert.ToInt32(attr.ConstructorArguments[1].Value);
+                }
+                return true;
+            }
+        }
+
+        // For partial methods, the attribute may be on the defining or implementing part.
+        if (symbol is IMethodSymbol m)
+        {
+            if (m.PartialDefinitionPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialDefinitionPart, m) &&
+                TryGetGeneratedRegexAttribute(m.PartialDefinitionPart, out pattern, out options))
+            {
+                return true;
+            }
+            if (m.PartialImplementationPart is not null && !SymbolEqualityComparer.Default.Equals(m.PartialImplementationPart, m) &&
+                TryGetGeneratedRegexAttribute(m.PartialImplementationPart, out pattern, out options))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static bool IsTrustedPureMethod(IMethodSymbol method)
     {
         if (HasAttribute(method, PureAxiomAttr))
@@ -240,6 +280,11 @@ internal static class VerifiableSymbolHelpers
         if (HasAttribute(method, UnverifiableAttr))
         {
             return false;
+        }
+
+        if (TryGetGeneratedRegexAttribute(method, out _, out _))
+        {
+            return true;
         }
 
         if (GetScope(method) == VerificationScope.Verifiable)
@@ -263,6 +308,16 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
+        if (StringIntrinsics.IsTrustedStringMethod(method))
+        {
+            return true;
+        }
+
+        if (Smt.CalendarArithmetic.IsTrustedCalendarMethod(method))
+        {
+            return true;
+        }
+
         var ns = containingType.ContainingNamespace?.ToDisplayString() ?? string.Empty;
         var typeFull = containingType.OriginalDefinition.ToDisplayString();
 
@@ -270,8 +325,8 @@ internal static class VerifiableSymbolHelpers
         // trusting whole primitive types would also admit culture-sensitive and mutating APIs.
         if (method.IsStatic && (containingType.SpecialType switch
         {
-            SpecialType.System_String => method.Name is "IsNullOrEmpty" or "IsNullOrWhiteSpace",
-            SpecialType.System_Decimal or SpecialType.System_Int32 or SpecialType.System_Int64 or
+            SpecialType.System_Decimal => method.Name is "Abs" or "Min" or "Max" or "Clamp" or "Sign" or "Round" or "Truncate" or "Floor" or "Ceiling",
+            SpecialType.System_Int32 or SpecialType.System_Int64 or
                 SpecialType.System_UInt32 or SpecialType.System_UInt64 => method.Name is "Abs" or "Min" or "Max" or "Clamp" or "Sign",
             SpecialType.System_Char => method.Name is "IsDigit" or "IsLetter" or "IsWhiteSpace",
             _ => false
@@ -292,6 +347,7 @@ internal static class VerifiableSymbolHelpers
             "System.Enum" or
             "System.ValueTuple" or
             "System.Linq.Enumerable" or
+            "System.Linq.ImmutableArrayExtensions" or
             "System.Collections.Generic.Comparer<T>" or
             "System.Collections.Generic.EqualityComparer<T>" or
             "System.Collections.Generic.KeyValuePair<TKey, TValue>" or

@@ -3,9 +3,10 @@ using System;
 namespace Verifiable.Contracts;
 
 /// <summary>
-/// Marks an assembly, type, or method as a hermetically sealed Verifiable Cage enforced with compile-time errors.
+/// Marks an assembly, type, enum, or method as a hermetically sealed Verifiable Cage enforced with compile-time errors.
+/// When applied to a non-<see cref="FlagsAttribute"/> enum, constrains SMT verification to declared enum members.
 /// </summary>
-[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method | AttributeTargets.Enum)]
 public sealed class VerifiableAttribute : Attribute;
 
 /// <summary>

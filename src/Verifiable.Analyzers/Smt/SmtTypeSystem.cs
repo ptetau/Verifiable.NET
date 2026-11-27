@@ -26,11 +26,12 @@ internal sealed class SmtTypeSystem
     private readonly Dictionary<ITypeSymbol, string> _sortCache = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<string, SmtCompositeInfo> _compositesBySort = new(StringComparer.Ordinal);
     private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol KeyType, ITypeSymbol ValType)> _dictTypes = new(SymbolEqualityComparer.Default);
-    private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol ElemType)> _seqTypes = new(SymbolEqualityComparer.Default);
+    private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol ElemType, bool IsImmutableArray)> _seqTypes = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol ElemType)> _setTypes = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol InnerType)> _optTypes = new(SymbolEqualityComparer.Default);
     private readonly HashSet<ITypeSymbol> _inProgress = new(SymbolEqualityComparer.Default);
     private readonly List<string> _declarations = new();
+    private bool _declaredDateTimeOffset;
     private int _typeCounter;
 
     public SmtTypeSystem(bool useBitVec)
@@ -51,7 +52,7 @@ internal sealed class SmtTypeSystem
         if (type.SpecialType == SpecialType.System_Boolean)
             return Cache(type, "Bool");
 
-        if (type.SpecialType == SpecialType.System_Decimal)
+        if (type.SpecialType is SpecialType.System_Decimal or SpecialType.System_Double or SpecialType.System_Single)
             return Cache(type, "Real");
 
         if (type.SpecialType == SpecialType.System_String)
@@ -71,8 +72,22 @@ internal sealed class SmtTypeSystem
         if (type.TypeKind == TypeKind.Enum)
             return Cache(type, "Int");
 
-        if (type.ToDisplayString() == "System.Guid")
+        var fullDisplay = type.OriginalDefinition.ToDisplayString();
+        if (fullDisplay == "System.Guid")
             return Cache(type, "Int");
+
+        if (fullDisplay is "System.DateOnly" or "System.DateTime" or "System.TimeSpan")
+            return Cache(type, "Int");
+
+        if (fullDisplay == "System.DateTimeOffset")
+        {
+            if (!_declaredDateTimeOffset)
+            {
+                _declaredDateTimeOffset = true;
+                _declarations.Add("(declare-datatype VerDateTimeOffset ((mk-VerDateTimeOffset (dto_utc_ticks Int) (dto_offset_ticks Int))))");
+            }
+            return Cache(type, "VerDateTimeOffset");
+        }
 
         if (type is INamedTypeSymbol nullableNamed &&
             nullableNamed.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T &&
@@ -105,15 +120,26 @@ internal sealed class SmtTypeSystem
                 return mapSort;
             }
 
-            if (orig is "System.Collections.Immutable.ImmutableList<T>" or "System.Collections.Immutable.ImmutableArray<T>")
+            if (orig is "System.Collections.Immutable.ImmutableList<T>"
+                or "System.Collections.Immutable.ImmutableArray<T>"
+                or "System.Collections.Immutable.IImmutableList<T>"
+                or "System.Collections.Generic.IReadOnlyList<T>")
             {
                 var elem = colNamed.TypeArguments[0];
                 var eSort = GetSort(elem);
                 var id = ++_typeCounter;
                 var seqSort = $"Seq_{id}";
+                var isImmArr = orig == "System.Collections.Immutable.ImmutableArray<T>";
                 Cache(type, seqSort);
-                _seqTypes[type] = (seqSort, elem);
-                _declarations.Add($"(declare-datatype {seqSort} ((mk-{seqSort} (seq_elems_{id} (Array Int {eSort})) (seq_count_{id} Int))))");
+                _seqTypes[type] = (seqSort, elem, isImmArr);
+                if (isImmArr)
+                {
+                    _declarations.Add($"(declare-datatype {seqSort} ((mk-{seqSort} (seq_elems_{id} (Array Int {eSort})) (seq_count_{id} Int) (seq_is_default_{id} Bool))))");
+                }
+                else
+                {
+                    _declarations.Add($"(declare-datatype {seqSort} ((mk-{seqSort} (seq_elems_{id} (Array Int {eSort})) (seq_count_{id} Int))))");
+                }
                 return seqSort;
             }
 
@@ -203,7 +229,10 @@ internal sealed class SmtTypeSystem
         return false;
     }
 
-    public bool TryGetSequenceInfo(ITypeSymbol type, out string sortName, out int id, out ITypeSymbol? elemType)
+    public bool TryGetSequenceInfo(ITypeSymbol type, out string sortName, out int id, out ITypeSymbol? elemType) =>
+        TryGetSequenceInfo(type, out sortName, out id, out elemType, out _);
+
+    public bool TryGetSequenceInfo(ITypeSymbol type, out string sortName, out int id, out ITypeSymbol? elemType, out bool isImmutableArray)
     {
         var sort = GetSort(type);
         if (_seqTypes.TryGetValue(type, out var entry))
@@ -211,12 +240,14 @@ internal sealed class SmtTypeSystem
             sortName = entry.SortName;
             id = int.Parse(sortName.Substring("Seq_".Length));
             elemType = entry.ElemType;
+            isImmutableArray = entry.IsImmutableArray;
             return true;
         }
 
         sortName = sort;
         id = 0;
         elemType = null;
+        isImmutableArray = false;
         return false;
     }
 
@@ -254,6 +285,25 @@ internal sealed class SmtTypeSystem
         return false;
     }
 
+    public string GetEmptySequenceTerm(ITypeSymbol type)
+    {
+        if (TryGetSequenceInfo(type, out var seqSort, out _, out var elemType, out var isImmArr))
+        {
+            var eSort = GetSort(elemType!);
+            var defE = GetDefaultTerm(elemType!);
+            return isImmArr
+                ? $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0 false)"
+                : $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0)";
+        }
+
+        return GetDefaultTerm(type);
+    }
+
+    public string BuildSequenceTerm(string seqSort, string elemsArrayTerm, string countTerm, bool isImmutableArray, bool isDefault = false) =>
+        isImmutableArray
+            ? $"(mk-{seqSort} {elemsArrayTerm} {countTerm} {(isDefault ? "true" : "false")})"
+            : $"(mk-{seqSort} {elemsArrayTerm} {countTerm})";
+
     public string GetDefaultTerm(ITypeSymbol type)
     {
         var sort = GetSort(type);
@@ -265,6 +315,7 @@ internal sealed class SmtTypeSystem
             case "(_ BitVec 32)": return "(_ bv0 32)";
             case "(_ BitVec 64)": return "(_ bv0 64)";
             case "VerStr": return "str-null";
+            case "VerDateTimeOffset": return "(mk-VerDateTimeOffset 0 0)";
         }
 
         if (TryGetNullableInfo(type, out _, out var optId, out _))
@@ -280,11 +331,13 @@ internal sealed class SmtTypeSystem
             return $"(mk-{mapSort} ((as const (Array {kSort} {vSort})) {defV}) ((as const (Array {kSort} Bool)) false) 0)";
         }
 
-        if (TryGetSequenceInfo(type, out var seqSort, out _, out var elemType))
+        if (TryGetSequenceInfo(type, out var seqSort, out _, out var elemType, out var isImmArr))
         {
             var eSort = GetSort(elemType!);
             var defE = GetDefaultTerm(elemType!);
-            return $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0)";
+            return isImmArr
+                ? $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0 true)"
+                : $"(mk-{seqSort} ((as const (Array Int {eSort})) {defE}) 0)";
         }
 
         if (TryGetSetInfo(type, out var setSort, out _, out var setElem))
@@ -553,39 +606,50 @@ internal sealed class SmtTypeSystem
             return fields;
         }
 
-        var ctorParamNames = new HashSet<string>(
-            symbol.InstanceConstructors
-                .Where(c => !IsCopyConstructor(symbol, c))
-                .SelectMany(c => c.Parameters)
-                .Select(p => p.Name),
-            StringComparer.OrdinalIgnoreCase);
-
-        var props = symbol.GetMembers()
-            .OfType<IPropertySymbol>()
-            .Where(p => !p.IsStatic &&
-                        !p.IsIndexer &&
-                        p.Name != "EqualityContract" &&
-                        !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.GhostAttr) &&
-                        !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.InvariantAttr))
-            .ToList();
-
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var p in props)
+        var hierarchy = new Stack<INamedTypeSymbol>();
+        for (var cur = symbol;
+             cur is not null && cur.SpecialType != SpecialType.System_Object && cur.SpecialType != SpecialType.System_ValueType;
+             cur = cur.BaseType)
         {
-            if (IsStoredProperty(p, ctorParamNames))
-            {
-                seen.Add(p.Name);
-                fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SanitizeName(p.Name)}"));
-            }
+            hierarchy.Push(cur);
         }
 
-        foreach (var f in symbol.GetMembers().OfType<IFieldSymbol>())
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (hierarchy.Count > 0)
         {
-            if (!f.IsStatic && !f.IsImplicitlyDeclared && f.AssociatedSymbol is null &&
-                !VerifiableSymbolHelpers.HasAttribute(f, VerifiableSymbolHelpers.GhostAttr) &&
-                seen.Add(f.Name))
+            var cur = hierarchy.Pop();
+            var ctorParamNames = new HashSet<string>(
+                cur.InstanceConstructors
+                    .Where(c => !IsCopyConstructor(cur, c))
+                    .SelectMany(c => c.Parameters)
+                    .Select(p => p.Name),
+                StringComparer.OrdinalIgnoreCase);
+
+            var props = cur.GetMembers()
+                .OfType<IPropertySymbol>()
+                .Where(p => !p.IsStatic &&
+                            !p.IsIndexer &&
+                            p.Name != "EqualityContract" &&
+                            !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.GhostAttr) &&
+                            !VerifiableSymbolHelpers.HasAttribute(p, VerifiableSymbolHelpers.InvariantAttr))
+                .ToList();
+
+            foreach (var p in props)
             {
-                fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SanitizeName(f.Name)}"));
+                if (IsStoredProperty(p, ctorParamNames) && seen.Add(p.Name))
+                {
+                    fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SanitizeName(p.Name)}"));
+                }
+            }
+
+            foreach (var f in cur.GetMembers().OfType<IFieldSymbol>())
+            {
+                if (!f.IsStatic && !f.IsImplicitlyDeclared && f.AssociatedSymbol is null &&
+                    !VerifiableSymbolHelpers.HasAttribute(f, VerifiableSymbolHelpers.GhostAttr) &&
+                    seen.Add(f.Name))
+                {
+                    fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SanitizeName(f.Name)}"));
+                }
             }
         }
 
