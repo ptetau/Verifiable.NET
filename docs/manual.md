@@ -225,7 +225,9 @@ public static class Orders
 }
 ```
 
-Mapping uses case-sensitive names and exact scalar types, not declaration order. A missing `Quantity` or a `long` in place of `int` produces a generator error (`VER203`), not a default value or conversion. The verifier uses the generated C# constructor expression itself; the postcondition above illustrates what a caller can prove, not a contract you must provide. Use a hand-written mapper for renames, conversions, or computed values.
+Mapping uses case-sensitive names and exact scalar types, not declaration order. A missing `Quantity` or a `long` in place of `int` produces a generator error (`VER203`), not a default value or conversion. The verifier uses the generated C# constructor expression itself; the postcondition above illustrates what a caller can prove, not a contract you must provide.
+
+Use top-level, non-generic types in the same compilation. The DTO supplies readable instance fields or non-virtual auto-properties. The target must store only its positional members; nullable strings cannot supply non-nullable string members. Use a hand-written mapper for renames, conversions, computed values, or records with custom construction.
 
 A mapper may return `new OrderResponse { Id = dto.Id, Total = dto.Total }` and prove `Spec.Ensures<OrderResponse>(r => r.Id == dto.Id && r.Total == dto.Total)`. These are proofs about the values of stored properties, not reference identity. Init-only auto-property projections can also be expanded in helper contracts. A DTO with mutable setters must be constructed and returned in the same expression: saving it in a local and mutating or aliasing it later is not supported. Use plain source-defined types with scalar auto-properties, not arbitrary constructors, virtual setters, or property initializers with executable behavior.
 

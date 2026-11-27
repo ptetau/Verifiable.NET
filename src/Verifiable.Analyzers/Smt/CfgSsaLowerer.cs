@@ -1285,9 +1285,14 @@ internal sealed partial class CfgSsaLowerer
                     var left = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                     var right = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
                     if (bin.OperatorMethod is { IsImplicitlyDeclared: true } opMethod &&
-                        left.Term == right.Term && _entryParamVars.Values.Any(v => v.Term == left.Term) &&
                         IsReflexiveStoredValue(opMethod.ContainingType))
-                        return new SmtTypedTerm(bin.OperatorKind == BinaryOperatorKind.Equals ? "true" : "false", bin.Type!);
+                    {
+                        if (left.Term == right.Term && _entryParamVars.Values.Any(v => v.Term == left.Term))
+                            return new SmtTypedTerm(bin.OperatorKind == BinaryOperatorKind.Equals ? "true" : "false", bin.Type!);
+                        // Either outcome is possible. Z3 must establish the contract
+                        // regardless (e.g. a guarded equality on an unreachable path).
+                        return BindSsaValue("identity_cmp", new SmtTypedTerm("false", bin.Type!), isFreshFreeSymbol: true);
+                    }
                     throw new ContractLoweringException("Reference identity is not modeled for this type or its stored fields; compare individual properties instead.");
                 }
                 if (TryCompareTotalSeconds(bin, gamma, env, emitObligations, inlineDepth) is { } seconds)
@@ -1303,8 +1308,6 @@ internal sealed partial class CfgSsaLowerer
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalOr)
                 {
                     var lOr = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
-                    if (lOr.Term == "true")
-                        return lOr;
                     var rOr = LowerExpression(bin.RightOperand, CombineAnd(gamma, $"(not {lOr.Term})"), env, emitObligations, inlineDepth);
                     return new SmtTypedTerm($"(or {lOr.Term} {rOr.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 }
@@ -2385,29 +2388,29 @@ internal sealed partial class CfgSsaLowerer
             return named.BaseType is { IsRecord: true } parent && ContainsUnmodeledReference(parent, path) ||
                 named.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic && ContainsUnmodeledReference(f.Type, path));
         }
-
-        private static bool IsIdentityCollection(INamedTypeSymbol type) => type.OriginalDefinition.ToDisplayString() is
-            "System.Collections.Immutable.ImmutableList<T>" or "System.Collections.Immutable.ImmutableArray<T>" or
-            "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>" or "System.Collections.Immutable.ImmutableHashSet<T>";
-
-        private static bool IsReflexiveStoredValue(ITypeSymbol type)
-        {
-            if (type is not INamedTypeSymbol named)
-                return false;
-            if (type.TypeKind == TypeKind.Enum || IsIdentityCollection(named) ||
-                type.SpecialType is SpecialType.System_Boolean or SpecialType.System_String or SpecialType.System_Decimal or
-                    SpecialType.System_Int32 or SpecialType.System_Int64)
-                return true;
-            // A record can supply its own Equals(T), even when operator == is synthesized.
-            return named.IsRecord && named.IsValueType &&
-                named.GetMembers("Equals").OfType<IMethodSymbol>().Any(m => m.IsImplicitlyDeclared && !m.IsStatic &&
-                    m.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, named)) &&
-                named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).All(f => IsReflexiveStoredValue(f.Type));
-        }
         finally
         {
             path.Remove(named.OriginalDefinition);
         }
+    }
+
+    private static bool IsIdentityCollection(INamedTypeSymbol type) => type.OriginalDefinition.ToDisplayString() is
+        "System.Collections.Immutable.ImmutableList<T>" or "System.Collections.Immutable.ImmutableArray<T>" or
+        "System.Collections.Immutable.ImmutableDictionary<TKey, TValue>" or "System.Collections.Immutable.ImmutableHashSet<T>";
+
+    private static bool IsReflexiveStoredValue(ITypeSymbol type)
+    {
+        if (type is not INamedTypeSymbol named)
+            return false;
+        if (type.TypeKind == TypeKind.Enum || IsIdentityCollection(named) ||
+            type.SpecialType is SpecialType.System_Boolean or SpecialType.System_String or SpecialType.System_Decimal or
+                SpecialType.System_Int32 or SpecialType.System_Int64)
+            return true;
+        // A record can supply its own Equals(T), even when operator == is synthesized.
+        return named.IsRecord && named.IsValueType &&
+            named.GetMembers("Equals").OfType<IMethodSymbol>().Any(m => m.IsImplicitlyDeclared && !m.IsStatic &&
+                m.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, named)) &&
+            named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).All(f => IsReflexiveStoredValue(f.Type));
     }
 
     private bool IsPositionalProjection(IObjectCreationOperation obj)

@@ -67,6 +67,30 @@ public class InitializerProjectionTests
                     Spec.Ensures<State>(s => s.Id == d.Id && s.Other == Project(d).Other);
                     return Project(d);
                 }
+
+            }
+            """, failure);
+    }
+
+    [Theory]
+    [InlineData("state", "", null)]
+    [InlineData("new State(ImmutableList<int>.Empty.Add(1))", "", "VER101")]
+    [InlineData("state", "public bool Equals(State other) => false;", "VER101")]
+    public async Task LedgerRejectionRequiresTheForwardedState(string rejected, string equals, string? failure)
+    {
+        await Check($$"""
+            using Verifiable.Contracts;
+            using System.Collections.Immutable;
+            public readonly record struct State(ImmutableList<int> Entries) { {{equals}} }
+            public readonly record struct Transition(State State, bool Success);
+            [Verifiable] public static class Ledger
+            {
+                public static Transition Post(State state, bool accept)
+                {
+                    Spec.Ensures<Transition>(r => r.Success || r.State == state);
+                    if (!accept) return new Transition({{rejected}}, false);
+                    return new Transition(new State(state.Entries.Add(1)), true);
+                }
             }
             """, failure);
     }

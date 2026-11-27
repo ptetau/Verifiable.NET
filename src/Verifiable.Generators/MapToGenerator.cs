@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Verifiable.Generators;
@@ -26,7 +27,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
         var location = attribute.ApplicationSyntaxReference?.GetSyntax(context.CancellationToken).GetLocation() ?? Location.None;
         void Reject(string reason) => context.ReportDiagnostic(Diagnostic.Create(
             GeneratorDescriptors.InvalidMapping, location, ElmGeneratorFormatter.Format(
-                "INVALID DTO MAPPING", location, reason,
+                $"INVALID DTO MAPPING: {reason}", location, $"Cannot generate the requested mapping from '{source}'.",
                 "Why this rule exists: Generated mappings must copy every stored target value without invoking user code.",
                 "Use a source DTO with readable scalar storage matching each positional record parameter by name and type.")));
 
@@ -110,10 +111,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
             {{accessibility}} static class {{className}}
             {
                 [global::Verifiable.Contracts.VerifiableAttribute]
-                public static {{targetType}} {{method}}(this {{sourceType}} source) => Map(source);
-
-                [global::Verifiable.Contracts.VerifiableAttribute]
-                private static {{targetType}} Map({{sourceType}} source) => new {{targetType}}({{string.Join(", ", args)}});
+                public static {{targetType}} {{method}}(this {{sourceType}} source) => new {{targetType}}({{string.Join(", ", args)}});
             }
             """;
         // Hint names must also be distinct under case-insensitive comparison.
@@ -149,10 +147,15 @@ public sealed class MapToGenerator : IIncrementalGenerator
         if (member is not IPropertySymbol { IsVirtual: false, IsOverride: false, IsAbstract: false, IsIndexer: false,
                 RefKind: RefKind.None, GetMethod: { } getter } property || !Accessible(getter))
             return null;
-        return property.DeclaringSyntaxReferences.Any(r => r.GetSyntax() is ParameterSyntax ||
-            r.GetSyntax() is PropertyDeclarationSyntax { ExpressionBody: null, AccessorList: { } list } &&
-            list.Accessors.All(a => a.Body is null && a.ExpressionBody is null) && !getter.IsExtern)
-            ? property.Type : null;
+        // A partial property's definition alone looks like auto-accessors, even when its
+        // implementation has a user-written getter. Do not treat that as a storage read.
+        return !getter.IsExtern && property.DeclaringSyntaxReferences.Any(r => r.GetSyntax() switch
+        {
+            ParameterSyntax => true,
+            PropertyDeclarationSyntax { ExpressionBody: null, AccessorList: { } list } p =>
+                !p.Modifiers.Any(SyntaxKind.PartialKeyword) && list.Accessors.All(a => a.Body is null && a.ExpressionBody is null),
+            _ => false
+        }) ? property.Type : null;
     }
 
     private static bool MayReturnNull(ISymbol member) => member.GetAttributes()
