@@ -40,8 +40,18 @@ internal static class Z3SolverRunner
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> UnixChmodChecked = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Test seam: when set on the current async flow, discovery behaves as if no Z3 is installed.
+    /// </summary>
+    internal static readonly AsyncLocal<bool> SimulateMissingSolver = new();
+
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
     {
+        if (SimulateMissingSolver.Value)
+        {
+            return null;
+        }
+
         var envPath = Environment.GetEnvironmentVariable("VERIFIABLE_Z3_PATH");
         if (!string.IsNullOrWhiteSpace(envPath) && File.Exists(envPath))
         {

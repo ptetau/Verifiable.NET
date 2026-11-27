@@ -30,6 +30,7 @@ public class KernelSelfVerificationTests
     public static TheoryData<string, string, string, string> KernelBugs => new()
     {
         { "ProofKernel.cs", "if (status == SmtStatus.Sat) return ObligationVerdict.Refuted;", "if (status == SmtStatus.Sat) return ObligationVerdict.Proved;", "ProofKernel.Decide" },
+        { "ProofKernel.cs", "if (verdict == ObligationVerdict.SolverMissing) return !allowMissingSolver;", "if (verdict == ObligationVerdict.SolverMissing) return false;", "ProofKernel.BlocksBuild" },
         { "ProofKernel.cs", "return status == SmtStatus.Unsat || status == SmtStatus.Sat;", "return status != SmtStatus.SolverUnavailable;", "ProofKernel.IsCacheable" },
         { "ProofKernel.cs", "if (line == \"unsat\") return SolverLine.Unsat;", "if (line.Contains(\"unsat\")) return SolverLine.Unsat;", "ProofKernel.ClassifyStatusLine" },
         { "ProofKernel.cs", "if (kind != SolverLine.Noise)", "if (kind == SolverLine.Unsat || kind == SolverLine.Sat)", "ProofKernel.ReadCheckSatAnswer" },
