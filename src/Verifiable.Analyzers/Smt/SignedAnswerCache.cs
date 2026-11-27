@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -47,19 +46,50 @@ internal sealed class SignedAnswerCache
 
     /// <summary>
     /// Opens (creating if needed) the cache in <paramref name="directory"/>. Returns <c>null</c> if the folder
-    /// or its key cannot be set up, in which case callers must not use a disk cache at all.
+    /// or its key cannot be set up safely, in which case callers must not use a disk cache at all.
     /// </summary>
+    /// <remarks>
+    /// A folder or key that someone else could have written to is never trusted: an attacker who planted a key
+    /// could sign any answer. A fresh folder is built under a temporary name, locked to the owner, given a new
+    /// key and only then renamed into place. An existing folder is used only if it is a real directory (not a
+    /// link) and, on Unix, neither it nor its key is accessible to group or others. Because the folder is 700
+    /// and we can read it, we are its owner (or root). Anything else is moved aside and replaced once.
+    /// </remarks>
     internal static SignedAnswerCache? Open(string? directory)
     {
         if (string.IsNullOrEmpty(directory)) return null;
 
         try
         {
-            Directory.CreateDirectory(directory);
-            RestrictToOwner(directory!, isDirectory: true);
+            var full = Path.GetFullPath(directory!);
+            var parent = Path.GetDirectoryName(full);
+            if (string.IsNullOrEmpty(parent)) return null;
 
-            var key = LoadOrCreateKey(directory!);
-            return key is null ? null : new SignedAnswerCache(directory!, key);
+            if (!Directory.Exists(parent))
+            {
+                Directory.CreateDirectory(parent);
+                TryRestrictToOwner(parent!, OwnerOnlyDirectory);
+            }
+
+            if (!Directory.Exists(full))
+            {
+                TryCreateFresh(full);
+            }
+
+            var key = TryLoadTrustedKey(full);
+            if (key is null)
+            {
+                // Something we did not create safely is in the way: set it aside and start again, once.
+                if (Directory.Exists(full) || File.Exists(full))
+                {
+                    Directory.Move(full, full + ".untrusted-" + Guid.NewGuid().ToString("N"));
+                }
+
+                TryCreateFresh(full);
+                key = TryLoadTrustedKey(full);
+            }
+
+            return key is null ? null : new SignedAnswerCache(full, key);
         }
         catch
         {
@@ -109,28 +139,47 @@ internal sealed class SignedAnswerCache
     {
         if (!ProofKernel.IsCacheable(result.Status)) return;
 
+        string? temp = null;
         try
         {
             var path = EntryPath(hash);
             if (path is null) return;
 
+            // The query hash fixes the answer, so a valid existing entry never needs rewriting.
+            if (File.Exists(path) && TryLoad(hash, out _)) return;
+
             var body = new List<string>(result.Model.Count + 1) { result.Status.ToString() };
             foreach (var kv in result.Model)
             {
-                body.Add($"{kv.Key}={kv.Value.Replace('\r', ' ').Replace('\n', ' ')}");
+                // Keys are split at the first '='; a key containing one could not round-trip, so skip caching.
+                if (kv.Key.IndexOf('=') >= 0) return;
+                body.Add($"{OneLine(kv.Key)}={OneLine(kv.Value)}");
             }
 
             var lines = new List<string>(body) { MacPrefix + Sign(hash, body.ToArray()) };
 
-            // Write then move, so a reader never sees a half-written entry.
-            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            // Write then rename, so a reader never sees a half-written entry.
+            temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             File.WriteAllLines(temp, lines, Utf8NoBom); // the folder is owner-only, so entries need no chmod of their own
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(temp, path);
+            if (File.Exists(path))
+            {
+                File.Replace(temp, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temp, path);
+            }
         }
         catch
         {
-            // Cache write failures are non-fatal.
+            // Cache write failures are non-fatal; a concurrent writer may simply have won.
+        }
+        finally
+        {
+            if (temp is not null)
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { /* best effort */ }
+            }
         }
     }
 
@@ -154,57 +203,99 @@ internal sealed class SignedAnswerCache
         return Path.Combine(_directory, hash + ".cache");
     }
 
-    private static byte[]? LoadOrCreateKey(string directory)
+    private const int OwnerOnlyDirectory = 448; // 0700
+    private const int OwnerOnlyFile = 384;      // 0600
+    private const int GroupAndOtherBits = 63;   // 0077
+
+    private static readonly Type? UnixFileModeType = typeof(File).Assembly.GetType("System.IO.UnixFileMode");
+    private static readonly System.Reflection.MethodInfo? GetUnixFileModeMethod =
+        UnixFileModeType is null ? null : typeof(File).GetMethod("GetUnixFileMode", new[] { typeof(string) });
+    private static readonly System.Reflection.MethodInfo? SetUnixFileModeMethod =
+        UnixFileModeType is null ? null : typeof(File).GetMethod("SetUnixFileMode", new[] { typeof(string), UnixFileModeType });
+
+    private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
+    /// <summary>Builds a complete, owner-only cache folder under a temporary name and renames it into place.</summary>
+    private static void TryCreateFresh(string full)
     {
-        var keyPath = Path.Combine(directory, KeyFileName);
-        if (!File.Exists(keyPath))
+        var staging = full + ".new-" + Guid.NewGuid().ToString("N");
+        try
         {
-            var fresh = new byte[KeyLength];
+            Directory.CreateDirectory(staging);
+            RestrictToOwner(staging, OwnerOnlyDirectory);
+
+            // Until the chmod above, a permissive umask may have left the folder open. Refuse it if anyone used that window.
+            if (Directory.EnumerateFileSystemEntries(staging).GetEnumerator().MoveNext()) return;
+
+            var key = new byte[KeyLength];
             using (var rng = RandomNumberGenerator.Create())
             {
-                rng.GetBytes(fresh);
+                rng.GetBytes(key);
             }
 
-            var temp = keyPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllBytes(temp, fresh);
-            RestrictToOwner(temp, isDirectory: false);
-            try
+            var keyPath = Path.Combine(staging, KeyFileName);
+            using (var fs = new FileStream(keyPath, FileMode.CreateNew, FileAccess.Write))
             {
-                File.Move(temp, keyPath);
+                fs.Write(key, 0, key.Length);
             }
-            catch (IOException)
-            {
-                // Another process created the key first; use theirs.
-                File.Delete(temp);
-            }
+
+            RestrictToOwner(keyPath, OwnerOnlyFile);
+            Directory.Move(staging, full); // fails if another process got there first; its folder is checked instead
         }
+        catch
+        {
+            // Lost a race or cannot lock the folder down; the caller checks whatever is at `full`.
+        }
+        finally
+        {
+            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>Returns the folder's key only if neither the folder nor the key could have been written by anyone else.</summary>
+    private static byte[]? TryLoadTrustedKey(string full)
+    {
+        if (!Directory.Exists(full) || IsLink(full) || !IsOwnerOnly(full)) return null;
+
+        var keyPath = Path.Combine(full, KeyFileName);
+        if (!File.Exists(keyPath) || IsLink(keyPath) || !IsOwnerOnly(keyPath)) return null;
 
         var key = File.ReadAllBytes(keyPath);
         return key.Length == KeyLength ? key : null;
     }
 
-    private static void RestrictToOwner(string path, bool isDirectory)
+    private static bool IsLink(string path) =>
+        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+
+    private static bool IsOwnerOnly(string path)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        // On Windows, LocalApplicationData is private to the user through its inherited ACL.
+        if (IsWindows) return true;
+
+        // No way to read the mode (runtime older than .NET 7): do not trust the folder.
+        if (GetUnixFileModeMethod is null) return false;
+
+        var mode = Convert.ToInt32(GetUnixFileModeMethod.Invoke(null, new object[] { path }));
+        return (mode & GroupAndOtherBits) == 0;
+    }
+
+    private static void RestrictToOwner(string path, int mode)
+    {
+        if (IsWindows) return;
+        if (SetUnixFileModeMethod is null || UnixFileModeType is null)
         {
-            // LocalApplicationData is already private to the user on Windows.
-            return;
+            throw new IOException("This runtime cannot set Unix file modes.");
         }
 
-        using var chmod = Process.Start(new ProcessStartInfo
-        {
-            FileName = "/bin/chmod",
-            Arguments = $"{(isDirectory ? "700" : "600")} \"{path.Replace("\"", "\\\"")}\"",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        });
-        if (chmod is null || !chmod.WaitForExit(5000) || chmod.ExitCode != 0)
-        {
-            throw new IOException($"Could not restrict permissions on '{path}'.");
-        }
+        SetUnixFileModeMethod.Invoke(null, new object[] { path, Enum.ToObject(UnixFileModeType, mode) });
     }
+
+    private static void TryRestrictToOwner(string path, int mode)
+    {
+        try { RestrictToOwner(path, mode); } catch { /* best effort for the parent folder */ }
+    }
+
+    private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ');
 
     private static bool FixedTimeEquals(string expected, string actual)
     {

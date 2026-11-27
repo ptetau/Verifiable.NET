@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
 using System.IO;
 using System.Runtime.InteropServices;
 using Verifiable.Analyzers.Smt;
@@ -127,18 +128,98 @@ public sealed class SignedAnswerCacheTests : IDisposable
     [Fact]
     public void Folder_IsPrivateToTheUser()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+        if (OperatingSystem.IsWindows()) return;
         OpenCache();
 
-        Assert.Equal("700", Mode(_dir));
-        Assert.Equal("600", Mode(Path.Combine(_dir, "cache.key")));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(_dir));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(_dir, "cache.key")));
     }
 
-    private static string Mode(string path)
+    [Fact]
+    public void PreExistingOpenFolder_WithPlantedKey_IsNotTrusted()
     {
-        using var stat = Process.Start(new ProcessStartInfo("stat", $"-c %a \"{path}\"") { RedirectStandardOutput = true })!;
-        var output = stat.StandardOutput.ReadToEnd().Trim();
-        stat.WaitForExit();
-        return output;
+        if (OperatingSystem.IsWindows()) return;
+
+        // An attacker who could write the folder plants a key they know and an Unsat signed with it.
+        Directory.CreateDirectory(_dir);
+        File.SetUnixFileMode(_dir, (UnixFileMode)0b111_111_111);
+        var plantedKey = Enumerable.Repeat((byte)7, 32).ToArray();
+        File.WriteAllBytes(Path.Combine(_dir, "cache.key"), plantedKey);
+        using (var hmac = new System.Security.Cryptography.HMACSHA256(plantedKey))
+        {
+            var mac = Convert.ToHexString(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(HashA + "\nUnsat"))).ToLowerInvariant();
+            File.WriteAllLines(Path.Combine(_dir, HashA + ".cache"), ["Unsat", "mac=" + mac]);
+        }
+
+        var cache = OpenCache();
+
+        Assert.False(cache.TryLoad(HashA, out _));
+        Assert.NotEqual(plantedKey, File.ReadAllBytes(Path.Combine(_dir, "cache.key")));
+        Assert.Equal((UnixFileMode)0b111_000_000, File.GetUnixFileMode(_dir));
+    }
+
+    [Fact]
+    public void PreExistingKey_ReadableByOthers_IsNotTrusted()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        OpenCache().Save(HashA, Answer(SmtStatus.Unsat));
+        var keyPath = Path.Combine(_dir, "cache.key");
+        var oldKey = File.ReadAllBytes(keyPath);
+        File.SetUnixFileMode(keyPath, (UnixFileMode)0b110_100_100);
+
+        var cache = OpenCache();
+
+        Assert.False(cache.TryLoad(HashA, out _));
+        Assert.NotEqual(oldKey, File.ReadAllBytes(keyPath));
+    }
+
+    [Fact]
+    public void SymlinkedFolder_IsNotTrusted()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var elsewhere = _dir + "-elsewhere";
+        try
+        {
+            OpenCache(elsewhere).Save(HashA, Answer(SmtStatus.Unsat));
+            Directory.CreateSymbolicLink(_dir, elsewhere);
+
+            var cache = OpenCache();
+
+            Assert.False(cache.TryLoad(HashA, out _));
+            Assert.False((File.GetAttributes(_dir) & FileAttributes.ReparsePoint) != 0);
+        }
+        finally
+        {
+            try { Directory.Delete(elsewhere, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void ConcurrentSaves_LeaveNoTemporaryFiles()
+    {
+        var cache = OpenCache();
+        Parallel.For(0, 500, _ => cache.Save(HashA, Answer(SmtStatus.Unsat)));
+
+        Assert.True(cache.TryLoad(HashA, out var loaded));
+        Assert.Equal(SmtStatus.Unsat, loaded!.Status);
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+    }
+
+    [Fact]
+    public void Z3Identity_FollowsSymlinks_AndChangesWhenTheTargetChanges()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        Directory.CreateDirectory(_dir);
+        var target = Path.Combine(_dir, "z3-real");
+        var link = Path.Combine(_dir, "z3");
+        File.WriteAllText(target, "version 1");
+        File.CreateSymbolicLink(link, target);
+
+        var before = Z3SolverRunner.Z3Identity(link);
+        File.WriteAllText(target, "version 2, a longer binary");
+        var after = Z3SolverRunner.Z3Identity(link);
+
+        Assert.Contains(target, before);
+        Assert.NotEqual(before, after);
     }
 }

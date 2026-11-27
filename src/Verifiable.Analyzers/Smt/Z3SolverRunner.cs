@@ -39,7 +39,6 @@ internal static class Z3SolverRunner
     private static readonly ConcurrentDictionary<string, SmtDetailedResult> DetailedMemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> UnixChmodChecked = new(StringComparer.Ordinal);
-    private static readonly ConcurrentDictionary<string, string> Z3Identities = new(StringComparer.Ordinal);
 
     public static string? DiscoverZ3Path(string? msbuildZ3Path = null, string? sourceFilePath = null)
     {
@@ -227,22 +226,31 @@ internal static class Z3SolverRunner
     private static void TrySaveDiskCache(string hash, SmtQueryResult result) =>
         DiskCache.Value?.Save(hash, result);
 
+    private static readonly System.Reflection.MethodInfo? ResolveLinkTargetMethod =
+        typeof(File).GetMethod("ResolveLinkTarget", new[] { typeof(string), typeof(bool) });
+
     /// <summary>
-    /// Identifies the Z3 binary by path, size and timestamp, so replacing Z3 in place invalidates cached answers.
+    /// Identifies the Z3 binary by its resolved path, size and timestamp, so replacing Z3 (directly or behind a
+    /// symlink) invalidates cached answers. Computed on every query: a long-lived compiler server may outlive a Z3 upgrade.
     /// </summary>
-    private static string Z3Identity(string z3Path) =>
-        Z3Identities.GetOrAdd(z3Path, static p =>
+    internal static string Z3Identity(string z3Path)
+    {
+        try
         {
-            try
+            var target = z3Path;
+            if (ResolveLinkTargetMethod?.Invoke(null, new object[] { z3Path, true }) is FileSystemInfo resolved)
             {
-                var info = new FileInfo(p);
-                return $"{p}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+                target = resolved.FullName;
             }
-            catch
-            {
-                return p;
-            }
-        });
+
+            var info = new FileInfo(target);
+            return $"{z3Path}|{target}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        }
+        catch
+        {
+            return z3Path;
+        }
+    }
 
     internal static Dictionary<string, string> ParseModel(string modelOutput)
     {

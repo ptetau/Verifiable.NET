@@ -21,7 +21,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code. Z3 checks it
 | `ProofKernel.ClassifyStatusLine` | Only the exact token `unsat` reads as a proof. An `(error ...)` line is never ignored. |
 | `ProofKernel.ReadCheckSatAnswer` | `unsat` is only reported if Z3 printed exactly `unsat` and nothing before it was another verdict or an error. Empty output is an error. |
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
-| `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if it is signed for that exact query and is a definitive `unsat` or `sat`. |
+| `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | A `[MustConsume]` token that may be live on either path is still flagged after the paths merge. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound, so the `VER007` analysis reaches the same answer in any order and always stops. |
@@ -44,7 +44,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **Roslyn** gives a correct control-flow graph and types.
 - **The C# to SMT translation** (`CfgSsaLowerer` and friends) turns your code and contracts into formulas that mean the same thing. This is the largest trusted part. It is covered by the analyzer test suite, not by proof.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query and returns the output lines it read.
-- **The disk cache** (`SignedAnswerCache`) lives in a per-user, owner-only folder and signs each entry with a per-user key. It is only as safe as your user account: anyone who can already read your home folder can forge entries.
+- **The disk cache** (`SignedAnswerCache`) signs each entry with a per-user key, binding it to its query. The folder is built owner-only before the key is written, and an existing folder or key that group or others could access, or that is a link, is never trusted. On Windows it relies on the default private ACL of `LocalApplicationData`. It is as safe as your user account: code running as you (or as root) can still forge entries.
 
 ## Known gaps found while drawing this line
 
