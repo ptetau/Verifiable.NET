@@ -43,9 +43,18 @@ public sealed class VerifiableNullabilitySuppressor : DiagnosticSuppressor
         if (context.Options.AnalyzerConfigOptionsProvider.GlobalOptions.TryGetValue(
                 "build_property.VerifiableClosedEnums",
                 out var closedEnumsVal) &&
-            string.Equals(closedEnumsVal, "true", System.StringComparison.OrdinalIgnoreCase))
+            (closedEnumsVal == "1" || string.Equals(closedEnumsVal, "true", System.StringComparison.OrdinalIgnoreCase)))
         {
             closedEnums = true;
+        }
+
+        var globalNonDefaultImmArr = false;
+        if (context.Options.AnalyzerConfigOptionsProvider.GlobalOptions.TryGetValue(
+                "build_property.VerifiableNonDefaultImmutableArrays",
+                out var nonDefaultVal) &&
+            (nonDefaultVal == "1" || string.Equals(nonDefaultVal, "true", System.StringComparison.OrdinalIgnoreCase)))
+        {
+            globalNonDefaultImmArr = true;
         }
 
         foreach (var diagnostic in context.ReportedDiagnostics)
@@ -90,7 +99,20 @@ public sealed class VerifiableNullabilitySuppressor : DiagnosticSuppressor
             };
             if (cfg is null || bodyOp is null) continue;
 
-            var lowerer = new CfgSsaLowerer(context.Compilation, method, closedEnums: closedEnums);
+            var nonDefaultImmArr = globalNonDefaultImmArr;
+            if (context.Options.AnalyzerConfigOptionsProvider.GetOptions(loc.SourceTree)
+                    .TryGetValue("verifiable.non_default_immutable_arrays", out var treeNonDefault) &&
+                !string.IsNullOrWhiteSpace(treeNonDefault))
+            {
+                nonDefaultImmArr =
+                    treeNonDefault == "1" || string.Equals(treeNonDefault, "true", System.StringComparison.OrdinalIgnoreCase);
+            }
+
+            var lowerer = new CfgSsaLowerer(
+                context.Compilation,
+                method,
+                closedEnums: closedEnums,
+                nonDefaultImmutableArrays: nonDefaultImmArr);
             var outcome = lowerer.LowerNonNullChecks(cfg, [bodyOp], loc.SourceSpan);
 
             // Fail closed: require at least one lowered check and zero lowering errors.

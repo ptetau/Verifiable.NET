@@ -837,7 +837,7 @@ internal static class QueryEngine
                 ma.Expression is IdentifierNameSyntax { Identifier.ValueText: "Spec" })
             {
                 var name = ma.Name.Identifier.ValueText;
-                if (name == "Requires") req++;
+                if (name is "Requires" or "RequiresWhen") req++;
                 else if (name.StartsWith("Ensures", StringComparison.Ordinal)) ens++;
             }
         }

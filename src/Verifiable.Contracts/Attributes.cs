@@ -131,6 +131,14 @@ public sealed class MapToAttribute : Attribute
 }
 
 /// <summary>
+/// Marks an <c>ImmutableArray&lt;T&gt;</c> parameter, property, field, or return value as guaranteed non-default
+/// (<c>!value.IsDefault</c>). Inside <c>[Verifiable]</c> scopes, Z3 assumes incoming values are initialized
+/// and verifies that call sites, constructors, and returns never supply <c>default(ImmutableArray&lt;T&gt;)</c>.
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Property | AttributeTargets.Field | AttributeTargets.ReturnValue)]
+public sealed class NonDefaultAttribute : Attribute;
+
+/// <summary>
 /// Stores compiler-generated contract metadata for an externally accessible verified member so referencing
 /// compilations can prove helper predicates, preconditions, postconditions, invariants, and type aliases across assembly boundaries.
 /// </summary>

@@ -21,10 +21,11 @@ namespace Verifiable.CodeFixes.Tests;
 public class CodeFixTests
 {
     private static async Task<(string UpdatedCode, ImmutableArray<Diagnostic> RemainingDiagnostics, ImmutableArray<Diagnostic> CompilerDiagnostics)>
-        ApplyCodeFixAsync(string source, string targetDiagnosticId, CodeFixProvider provider, int actionIndex = 0)
+        ApplyCodeFixAsync(string source, string targetDiagnosticId, CodeFixProvider provider, int actionIndex = 0, DiagnosticAnalyzer? analyzer = null)
     {
+        analyzer ??= new VerifiableGatekeeperAnalyzer();
         using var workspace = new AdhocWorkspace();
-        var (doc, actions) = await GetCodeActionsAsync(workspace, source, targetDiagnosticId, provider);
+        var (doc, actions) = await GetCodeActionsAsync(workspace, source, targetDiagnosticId, provider, analyzer: analyzer);
         Assert.NotEmpty(actions);
 
         var ops = await actions[actionIndex].GetOperationsAsync(CancellationToken.None);
@@ -34,14 +35,15 @@ public class CodeFixTests
 
         var comp2 = (await newDoc.Project.GetCompilationAsync())!;
         var compilerDiags = comp2.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToImmutableArray();
-        var analyzerDiags = await comp2.WithAnalyzers([new VerifiableGatekeeperAnalyzer()]).GetAnalyzerDiagnosticsAsync();
+        var analyzerDiags = await comp2.WithAnalyzers([analyzer]).GetAnalyzerDiagnosticsAsync();
 
         return (updatedText, analyzerDiags, compilerDiags);
     }
 
     private static async Task<(Document, List<CodeAction>)> GetCodeActionsAsync(AdhocWorkspace workspace,
-        string source, string targetDiagnosticId, CodeFixProvider provider, string? otherSource = null)
+        string source, string targetDiagnosticId, CodeFixProvider provider, string? otherSource = null, DiagnosticAnalyzer? analyzer = null)
     {
+        analyzer ??= new VerifiableGatekeeperAnalyzer();
         var refs = AppDomain.CurrentDomain.GetAssemblies()
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .Select(a => MetadataReference.CreateFromFile(a.Location))
@@ -63,7 +65,6 @@ public class CodeFixTests
         if (otherSource is not null)
             workspace.AddDocument(proj.Id, "Caller.cs", SourceText.From(otherSource));
         var doc = workspace.AddDocument(proj.Id, "Probe.cs", SourceText.From(source));
-        var analyzer = new VerifiableGatekeeperAnalyzer();
 
         var comp1 = (await doc.Project.GetCompilationAsync())!;
         var withAnalyzers1 = comp1.WithAnalyzers([analyzer]);
@@ -331,4 +332,68 @@ public class CodeFixTests
                 && !rem.Any(d => d.Id == "VER005")
                 && updated.Contains($"Result<int, string>.Fail(\"{safeMsg}\")");
         });
+
+    [Fact]
+    public async Task SplitSpecClause_SplitsDenseRequiresEnsuresAndEnsuresWhenIntoSeparateStatements()
+    {
+        const string requiresSource = """
+            using Verifiable.Contracts;
+
+            namespace SplitDemo;
+
+            [Verifiable]
+            public static class Rules
+            {
+                public static int Sum(int a, int b, int c, int d)
+                {
+                    Spec.Requires(a > 0 && b > 0 && c > 0 && d > 0, "All inputs must be positive.");
+                    return a + b + c + d;
+                }
+            }
+            """;
+
+        var (reqUpdated, reqRem, reqErrs) = await ApplyCodeFixAsync(
+            requiresSource,
+            "VER301",
+            new SplitSpecClauseCodeFixProvider(),
+            analyzer: new SpecQualityAnalyzer());
+
+        Assert.Empty(reqErrs);
+        Assert.DoesNotContain(reqRem, d => d.Id == "VER301");
+        Assert.Contains("Spec.Requires(a > 0, \"All inputs must be positive.\");", reqUpdated);
+        Assert.Contains("Spec.Requires(b > 0, \"All inputs must be positive.\");", reqUpdated);
+        Assert.Contains("Spec.Requires(c > 0, \"All inputs must be positive.\");", reqUpdated);
+        Assert.Contains("Spec.Requires(d > 0, \"All inputs must be positive.\");", reqUpdated);
+
+        const string ensuresWhenSource = """
+            using Verifiable.Contracts;
+
+            namespace SplitDemo;
+
+            public readonly record struct Output(int A, int B, int C, int D);
+
+            [Verifiable]
+            public static class Rules
+            {
+                public static Output Build(bool active, int x)
+                {
+                    Spec.EnsuresWhen<Output>(active, r => r.A > 0 && r.B > 0 && r.C > 0 && r.D > 0, "Active outputs stay positive.");
+                    return active ? new Output(1, 2, 3, 4) : new Output(0, 0, 0, 0);
+                }
+            }
+            """;
+
+        var (ensUpdated, ensRem, ensErrs) = await ApplyCodeFixAsync(
+            ensuresWhenSource,
+            "VER301",
+            new SplitSpecClauseCodeFixProvider(),
+            analyzer: new SpecQualityAnalyzer());
+
+        Assert.Empty(ensErrs);
+        Assert.DoesNotContain(ensRem, d => d.Id == "VER301");
+        Assert.Contains("Spec.EnsuresWhen<Output>(active, r => r.A > 0, \"Active outputs stay positive.\");", ensUpdated);
+        Assert.Contains("Spec.EnsuresWhen<Output>(active, r => r.B > 0, \"Active outputs stay positive.\");", ensUpdated);
+        Assert.Contains("Spec.EnsuresWhen<Output>(active, r => r.C > 0, \"Active outputs stay positive.\");", ensUpdated);
+        Assert.Contains("Spec.EnsuresWhen<Output>(active, r => r.D > 0, \"Active outputs stay positive.\");", ensUpdated);
+    }
 }

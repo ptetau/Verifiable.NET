@@ -3,5 +3,7 @@
     <CompilerVisibleProperty Include="VerifiableZ3Path" />
     <CompilerVisibleProperty Include="VerifiableAgent" />
     <CompilerVisibleProperty Include="VerifiableClosedEnums" />
+    <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
+    <CompilerVisibleProperty Include="VerifiableMaxSpecClauses" />
   </ItemGroup>
 </Project>

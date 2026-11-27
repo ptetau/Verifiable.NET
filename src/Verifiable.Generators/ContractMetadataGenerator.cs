@@ -208,15 +208,18 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                 }
 
                 var args = inv.ArgumentList.Arguments;
-                if (args.Count is < 1 or > 2)
+                var isWhen = target.Name is "RequiresWhen" or "EnsuresWhen";
+                var minArgs = isWhen ? 2 : 1;
+                var maxArgs = isWhen ? 3 : 2;
+                if (args.Count < minArgs || args.Count > maxArgs)
                 {
                     continue;
                 }
 
                 string? because = null;
-                if (args.Count == 2)
+                if (args.Count == maxArgs)
                 {
-                    var constBecause = model.GetConstantValue(args[1].Expression);
+                    var constBecause = model.GetConstantValue(args[maxArgs - 1].Expression);
                     if (constBecause.HasValue && constBecause.Value is string bStr)
                     {
                         because = bStr;
@@ -230,33 +233,62 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                         builder.Add(new ExportedEntry(memberId!, "Requires", canonReq, because, order++));
                     }
                 }
-                else if (target.Name == "Ensures" && !method.ReturnsVoid)
+                else if (target.Name == "RequiresWhen")
                 {
+                    if (ContractExpressionCanonicalizer.TryCanonicalize(model, args[0].Expression, allowInternal, out var canonGuard) &&
+                        ContractExpressionCanonicalizer.TryCanonicalize(model, args[1].Expression, allowInternal, out var canonReq))
+                    {
+                        builder.Add(new ExportedEntry(
+                            memberId!,
+                            "Requires",
+                            $"global::Verifiable.Contracts.Spec.Implies({canonGuard}, {canonReq})",
+                            because,
+                            order++));
+                    }
+                }
+                else if (target.Name is "Ensures" or "EnsuresWhen" && !method.ReturnsVoid)
+                {
+                    var predArg = args[isWhen ? 1 : 0].Expression;
                     ExpressionSyntax? ensExpr = null;
                     IParameterSymbol? lambdaParam = null;
 
-                    if (args[0].Expression is SimpleLambdaExpressionSyntax simpleLambda &&
+                    if (predArg is SimpleLambdaExpressionSyntax simpleLambda &&
                         simpleLambda.ExpressionBody is not null)
                     {
                         ensExpr = simpleLambda.ExpressionBody;
                         lambdaParam = model.GetDeclaredSymbol(simpleLambda.Parameter);
                     }
-                    else if (args[0].Expression is ParenthesizedLambdaExpressionSyntax parenLambda &&
+                    else if (predArg is ParenthesizedLambdaExpressionSyntax parenLambda &&
                              parenLambda.ParameterList.Parameters.Count == 1 &&
                              parenLambda.ExpressionBody is not null)
                     {
                         ensExpr = parenLambda.ExpressionBody;
                         lambdaParam = model.GetDeclaredSymbol(parenLambda.ParameterList.Parameters[0]);
                     }
-                    else if (args[0].Expression is not AnonymousFunctionExpressionSyntax)
+                    else if (predArg is not AnonymousFunctionExpressionSyntax)
                     {
-                        ensExpr = args[0].Expression;
+                        ensExpr = predArg;
                     }
 
                     if (ensExpr is not null &&
                         ContractExpressionCanonicalizer.TryCanonicalize(model, ensExpr, allowInternal, out var canonEns, lambdaParam))
                     {
-                        builder.Add(new ExportedEntry(memberId!, "Ensures", canonEns, because, order++));
+                        if (isWhen)
+                        {
+                            if (ContractExpressionCanonicalizer.TryCanonicalize(model, args[0].Expression, allowInternal, out var canonGuard))
+                            {
+                                builder.Add(new ExportedEntry(
+                                    memberId!,
+                                    "Ensures",
+                                    $"global::Verifiable.Contracts.Spec.Implies({canonGuard}, {canonEns})",
+                                    because,
+                                    order++));
+                            }
+                        }
+                        else
+                        {
+                            builder.Add(new ExportedEntry(memberId!, "Ensures", canonEns, because, order++));
+                        }
                     }
                 }
             }
@@ -373,7 +405,7 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                         exprStmt.Expression is not InvocationExpressionSyntax inv ||
                         model.GetSymbolInfo(inv).Symbol is not IMethodSymbol target ||
                         target.ContainingType?.ToDisplayString() != "Verifiable.Contracts.Spec" ||
-                        target.Name is not ("Requires" or "Ensures"))
+                        target.Name is not ("Requires" or "RequiresWhen" or "Ensures" or "EnsuresWhen"))
                     {
                         expr = null;
                         return false;

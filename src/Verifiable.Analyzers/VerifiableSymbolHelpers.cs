@@ -24,6 +24,7 @@ internal static class VerifiableSymbolHelpers
     public const string GhostAttr = "Verifiable.Contracts.GhostAttribute";
     public const string PureAxiomAttr = "Verifiable.Contracts.PureAxiomAttribute";
     public const string CheckedArithmeticAttr = "Verifiable.Contracts.CheckedArithmeticAttribute";
+    public const string NonDefaultAttr = "Verifiable.Contracts.NonDefaultAttribute";
     public const string SpecTypeName = "Verifiable.Contracts.Spec";
 
     public static bool HasAttribute(ISymbol symbol, string metadataFullName) =>
@@ -31,6 +32,56 @@ internal static class VerifiableSymbolHelpers
 
     public static bool IsSpecCall(IMethodSymbol method, string specMethodName) =>
         method.ContainingType?.ToDisplayString() == SpecTypeName && method.Name == specMethodName;
+
+    public static bool IsImmutableArrayType(ITypeSymbol? type) =>
+        type is INamedTypeSymbol named &&
+        named.IsGenericType &&
+        named.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableArray<T>";
+
+    public static bool IsNonDefaultParameter(IParameterSymbol param, bool globalNonDefault) =>
+        IsImmutableArrayType(param.Type) && (globalNonDefault || HasAttribute(param, NonDefaultAttr));
+
+    public static bool IsNonDefaultReturn(IMethodSymbol method, bool globalNonDefault) =>
+        IsImmutableArrayType(method.ReturnType) &&
+        (globalNonDefault || method.GetReturnTypeAttributes().Any(a => a.AttributeClass?.ToDisplayString() == NonDefaultAttr));
+
+    public static bool IsNonDefaultMember(ISymbol member, INamedTypeSymbol? containingType, bool globalNonDefault)
+    {
+        var type = member switch
+        {
+            IPropertySymbol p => p.Type,
+            IFieldSymbol f => f.Type,
+            _ => null
+        };
+        if (!IsImmutableArrayType(type))
+        {
+            return false;
+        }
+
+        if (globalNonDefault || HasAttribute(member, NonDefaultAttr))
+        {
+            return true;
+        }
+
+        // Positional record parameters place [NonDefault] on the primary constructor parameter
+        // (unless `[property: NonDefault]` was written explicitly).
+        if (containingType is not null)
+        {
+            foreach (var ctor in containingType.InstanceConstructors)
+            {
+                foreach (var p in ctor.Parameters)
+                {
+                    if (string.Equals(p.Name, member.Name, StringComparison.OrdinalIgnoreCase) &&
+                        HasAttribute(p, NonDefaultAttr))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
 
     public static bool IsConstrainedStruct(ITypeSymbol type)
     {
