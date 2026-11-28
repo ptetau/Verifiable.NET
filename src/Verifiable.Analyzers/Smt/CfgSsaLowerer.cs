@@ -1298,7 +1298,24 @@ internal sealed partial class CfgSsaLowerer
         EmitValueInvariantObligations(retTerm, gamma, retLoc);
     }
 
+    private int _typeWalkDepth;
+
     private void EmitValueInvariantObligations(SmtTypedTerm value, string gamma, Location loc)
+    {
+        // Cycle guard: a type reaching itself through its fields is unfolded to a bounded depth only.
+        if (_typeWalkDepth >= MaxAssumptionDepth) return;
+        _typeWalkDepth++;
+        try
+        {
+            EmitValueInvariantObligationsCore(value, gamma, loc);
+        }
+        finally
+        {
+            _typeWalkDepth--;
+        }
+    }
+
+    private void EmitValueInvariantObligationsCore(SmtTypedTerm value, string gamma, Location loc)
     {
         if (TryEmitCompoundValidity(value, gamma, loc)) return;
 
@@ -3335,7 +3352,32 @@ internal sealed partial class CfgSsaLowerer
         (bool)RegexUseCache.GetValue(_compilation, c =>
             c.SyntaxTrees.Any(t => t.GetText().ToString().IndexOf("Regex", StringComparison.Ordinal) >= 0));
 
+    private readonly HashSet<ITypeSymbol> _assumptionsInProgress = new(SymbolEqualityComparer.Default);
+    private int _assumptionDepth;
+    private const int MaxAssumptionDepth = 16;
+
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
+    {
+        // Cycle guard: a type that reaches itself through its fields (a delegate's Target, a recursive record) is
+        // unfolded once per path and to a bounded depth, so the walk always ends.
+        if (_assumptionDepth >= MaxAssumptionDepth || !_assumptionsInProgress.Add(value.Type))
+        {
+            return;
+        }
+
+        _assumptionDepth++;
+        try
+        {
+            EmitTypeAssumptionsCore(value, loc);
+        }
+        finally
+        {
+            _assumptionDepth--;
+            _assumptionsInProgress.Remove(value.Type);
+        }
+    }
+
+    private void EmitTypeAssumptionsCore(SmtTypedTerm value, Location loc)
     {
         if (AssumeIntegralRange(value, loc)) return;
 
@@ -3519,6 +3561,21 @@ internal sealed partial class CfgSsaLowerer
     }
 
     private void EmitOnDemandElementAssumptions(string guardCond, SmtTypedTerm element, Location loc)
+    {
+        // Cycle guard: bounded depth, so a self-referential element type cannot unfold forever.
+        if (_typeWalkDepth >= MaxAssumptionDepth) return;
+        _typeWalkDepth++;
+        try
+        {
+            EmitOnDemandElementAssumptionsCore(guardCond, element, loc);
+        }
+        finally
+        {
+            _typeWalkDepth--;
+        }
+    }
+
+    private void EmitOnDemandElementAssumptionsCore(string guardCond, SmtTypedTerm element, Location loc)
     {
         var key = guardCond + "|" + element.Term;
         if (!_emittedOnDemandKeys.Add(key)) return;

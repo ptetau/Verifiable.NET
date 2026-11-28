@@ -364,6 +364,10 @@ internal static class VerifiableDescriptors
                 "`dynamic` dispatch crosses out of the verified closed world.",
                 "Runtime dynamic binding defers method resolution and type checks until execution, making static proof impossible.",
                 "Use concrete static types or interfaces/records instead of `dynamic`."),
+            "VER006_DelegateType" => (
+                $"A delegate type (`{subject}`) cannot be used as a parameter, field, property, return type or local in a `[Verifiable]` cage.",
+                "A delegate holds code the prover cannot see, so nothing can be proved about what calling it does.",
+                "Pass the data instead, call a concrete `[Verifiable]` method directly, or dispatch over a closed union / enum with `switch`."),
             "VER006_Delegate" => (
                 "Invoking an opaque delegate crosses out of the verified closed world.",
                 "Z3 cannot know what arbitrary side effects or return values an unanalyzed delegate might produce.",

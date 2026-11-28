@@ -99,6 +99,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 $"settable property '{prop.ContainingType?.Name}.{prop.Name}'"));
         }
 
+        if (IsDelegateType(prop.Type))
+        {
+            context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                VerifiableDescriptors.UnverifiedCallOrDynamic,
+                loc,
+                isCandidate,
+                ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_DelegateType"),
+                $"{prop.Type.ToDisplayString()}"));
+        }
+
         if (VerifiableSymbolHelpers.IsMutableCollectionType(prop.Type, out var colDisplay))
         {
             context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -144,6 +154,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 isCandidate,
                 ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER001_MutableField"),
                 $"mutable field '{field.ContainingType?.Name}.{field.Name}'"));
+        }
+
+        if (IsDelegateType(field.Type))
+        {
+            context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                VerifiableDescriptors.UnverifiedCallOrDynamic,
+                loc,
+                isCandidate,
+                ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_DelegateType"),
+                $"{field.Type.ToDisplayString()}"));
         }
 
         if (VerifiableSymbolHelpers.IsMutableCollectionType(field.Type, out var colDisplay))
@@ -193,6 +213,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 retCol));
         }
 
+        if (IsDelegateType(method.ReturnType))
+        {
+            context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                VerifiableDescriptors.UnverifiedCallOrDynamic,
+                loc,
+                isCandidate,
+                ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_DelegateType"),
+                method.ReturnType.ToDisplayString()));
+        }
+
         foreach (var param in method.Parameters)
         {
             var paramLoc = param.Locations.FirstOrDefault() ?? loc;
@@ -206,6 +236,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     $"{param.RefKind.ToString().ToLowerInvariant()} parameter '{param.Name}'"));
             }
 
+        if (IsDelegateType(param.Type))
+            {
+                context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                    VerifiableDescriptors.UnverifiedCallOrDynamic,
+                    paramLoc,
+                    isCandidate,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_DelegateType"),
+                    $"{param.Type.ToDisplayString()}"));
+            }
+    
             if (VerifiableSymbolHelpers.IsMutableCollectionType(param.Type, out var paramCol))
             {
                 context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
@@ -259,6 +299,16 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                         isCandidate,
                         ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER001_RefLocal"),
                         $"ref local '{varDecl.Symbol.Name}'"));
+                }
+
+                if (!op.IsImplicit && IsDelegateType(varDecl.Symbol.Type))
+                {
+                    context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                        VerifiableDescriptors.UnverifiedCallOrDynamic,
+                        op.Syntax.GetLocation(),
+                        isCandidate,
+                        ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_DelegateType"),
+                        varDecl.Symbol.Type.ToDisplayString()));
                 }
 
                 if (!op.IsImplicit && VerifiableSymbolHelpers.IsMutableCollectionType(varDecl.Symbol.Type, out var localCol))
@@ -633,6 +683,18 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
             }
         }
         return false;
+    }
+
+    /// <summary>A delegate type (<c>Func&lt;&gt;</c>, <c>Action&lt;&gt;</c>, ...), possibly nullable: opaque code the prover cannot see into.</summary>
+    private static bool IsDelegateType(ITypeSymbol? type)
+    {
+        if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable &&
+            nullable.TypeArguments.Length == 1)
+        {
+            type = nullable.TypeArguments[0];
+        }
+
+        return type is { TypeKind: TypeKind.Delegate };
     }
 
     private static bool IsTaskLike(ITypeSymbol type)
