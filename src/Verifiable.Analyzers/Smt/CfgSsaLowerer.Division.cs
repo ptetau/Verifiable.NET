@@ -107,6 +107,77 @@ internal sealed partial class CfgSsaLowerer
             bits > 0 && bits < (System.Numerics.BigInteger.One << (int.Parse(match.Groups["w"].Value, System.Globalization.CultureInfo.InvariantCulture) - 1));
     }
 
+    private const string DecimalMaxTerm = "79228162514264337593543950335.0";
+    private const string DecimalMinTerm = "(- 79228162514264337593543950335.0)";
+
+    /// <summary>
+    /// <c>enum + n</c>, <c>enum - n</c> and <c>enum - enum</c>: C# does the arithmetic in the enum's underlying type, so a
+    /// <c>byte</c>-based enum wraps at 255 (or throws in a checked context) exactly like <c>byte</c> would.
+    /// </summary>
+    private bool TryLowerEnumArithmetic(
+        BinaryOperatorKind kind, SmtTypedTerm left, SmtTypedTerm right, ITypeSymbol resultType, string gamma, Location loc,
+        bool emitObligations, bool checkOverflow, out SmtTypedTerm result)
+    {
+        result = default!;
+        var enumType = left.Type.TypeKind == TypeKind.Enum ? left.Type : right.Type.TypeKind == TypeKind.Enum ? right.Type : null;
+        if (enumType is not INamedTypeSymbol { EnumUnderlyingType: { } underlying } ||
+            !TryGetIntegralBounds(underlying, out var min, out var max, out var bits, out _))
+        {
+            return false;
+        }
+
+        var op = kind == BinaryOperatorKind.Add ? "+" : "-";
+        var exact = $"({op} {_translator.IntTermForIndex(left)} {_translator.IntTermForIndex(right)})";
+        var minStr = CalendarArithmetic.FormatBigInt(min);
+        var maxStr = CalendarArithmetic.FormatBigInt(max);
+        if (checkOverflow && emitObligations)
+        {
+            EmitSafetyObligation("Overflow", $"Arithmetic overflow check ({kind}) on enum '{enumType.Name}' (underlying {underlying.Name})", loc, gamma,
+                $"(and (<= {minStr} {exact}) (<= {exact} {maxStr}))");
+        }
+
+        var wrapped = WrapIntegerTerm(exact, min, max, bits);
+        var term = _types.GetSort(resultType) switch
+        {
+            "(_ BitVec 32)" => ToBitVec(wrapped, 32, min, max),
+            "(_ BitVec 64)" => ToBitVec(wrapped, 64, min, max),
+            _ => wrapped
+        };
+        result = new SmtTypedTerm(term, resultType);
+        return true;
+    }
+
+    /// <summary>
+    /// <c>Math.DivRem(a, b)</c> (and the <c>out</c> overload): it throws exactly where <c>/</c> and <c>%</c> do, so it gets the
+    /// same obligations. The tuple overload on <c>int</c>/<c>long</c> is modelled as <c>(a / b, a % b)</c>.
+    /// </summary>
+    private bool TryLowerDivRem(IMethodSymbol method, IReadOnlyList<SmtTypedTerm> args, string gamma, Location loc, bool emitObligations, out SmtTypedTerm result)
+    {
+        result = default!;
+        if (method.Name != "DivRem" || args.Count < 2)
+            return false;
+
+        var a = _translator.UnwrapRefinedIfApplicable(args[0]);
+        var b = _translator.UnwrapRefinedIfApplicable(args[1]);
+        var sort = _types.GetSort(a.Type);
+        if (sort is not ("Int" or "(_ BitVec 32)" or "(_ BitVec 64)") || !SymbolEqualityComparer.Default.Equals(a.Type, b.Type))
+            return false;
+
+        var (lTerm, rTerm, _) = _translator.UnifyNumericPair(a, b);
+        var q = LowerIntegerDivision(BinaryOperatorKind.Divide, lTerm, rTerm, sort, a.Type, gamma, loc, emitObligations);
+        var isWide = a.Type.SpecialType is SpecialType.System_Int32 or SpecialType.System_Int64;
+        if (args.Count != 2 || !isWide || method.ReturnType is not INamedTypeSymbol { IsTupleType: true } tupleType ||
+            !_types.TryGetComposite(tupleType, out var comp) || comp!.Fields.Count != 2)
+        {
+            // The obligations are emitted; the result is an unconstrained value of the right type.
+            return false;
+        }
+
+        var r = LowerIntegerDivision(BinaryOperatorKind.Remainder, lTerm, rTerm, sort, a.Type, gamma, loc, emitObligations);
+        result = BindSsaValue("divrem", new SmtTypedTerm($"({comp.ConstructorName} {q.Term} {r.Term})", tupleType));
+        return true;
+    }
+
     private static string RealRemainder(string lTerm, string rTerm)
     {
         var quotient = $"(/ {lTerm} {rTerm})";

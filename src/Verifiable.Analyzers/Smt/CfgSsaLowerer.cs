@@ -1695,7 +1695,9 @@ internal sealed partial class CfgSsaLowerer
                 var incChecked = MustNotOverflow(inc.Syntax, inc.IsChecked);
                 if (!TryLowerIntegralUpdate(binKind, inc.Target.Type ?? inc.Type!, prev, null, null, incChecked, gamma, inc.Syntax.GetLocation(), emitObligations, out var next))
                 {
-                    var one = new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
+                    var one = inc.Type!.TypeKind == TypeKind.Enum
+                        ? new SmtTypedTerm("1", inc.Type)
+                        : new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
                     next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations,
                         checkOverflow: incChecked);
                 }
@@ -1997,10 +1999,30 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm(kind == BinaryOperatorKind.Equals ? eq : $"(not {eq})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
+        if (kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract &&
+            TryLowerEnumArithmetic(kind, left, right, resultType, gamma, loc, emitObligations, checkOverflow, out var enumArith))
+        {
+            return enumArith;
+        }
+
         var (lTerm, rTerm, unified) = _translator.UnifyNumericPair(left, right);
         var sort = _types.GetSort(unified);
         var isBv = ContractExpressionTranslator.IsBitVecSort(sort);
         var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
+
+        if (sort == "Real" && unified.SpecialType == SpecialType.System_Decimal && emitObligations &&
+            kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply or BinaryOperatorKind.Divide)
+        {
+            // decimal arithmetic throws OverflowException when the result does not fit, in every arithmetic mode
+            // (`unchecked` does not apply to it). The analyzer's decimal is an exact real, and C# rounds an exact result
+            // to 28-29 significant digits, which never moves a value that is within +-MaxValue outside it. So requiring the
+            // exact result to be within +-MaxValue is sound; it may reject a result just past MaxValue that would round back.
+            var dop = kind switch { BinaryOperatorKind.Add => "+", BinaryOperatorKind.Subtract => "-", BinaryOperatorKind.Multiply => "*", _ => "/" };
+            var exactDec = kind == BinaryOperatorKind.Divide ? $"(/ {lTerm} (ite (= {rTerm} 0.0) 1.0 {rTerm}))" : $"({dop} {lTerm} {rTerm})";
+            var inDec = $"(and (<= {DecimalMinTerm} {exactDec}) (<= {exactDec} {DecimalMaxTerm}))";
+            var operandsDec = $"(and (<= {DecimalMinTerm} {lTerm}) (<= {lTerm} {DecimalMaxTerm}) (<= {DecimalMinTerm} {rTerm}) (<= {rTerm} {DecimalMaxTerm}))";
+            EmitSafetyObligation("Overflow", $"decimal {kind} must stay within decimal.MinValue..MaxValue (OverflowException)", loc, gamma, $"(=> {operandsDec} {inDec})");
+        }
 
         if (IsBitwiseOrShift(kind) && TryLowerBitwiseOperator(kind, lTerm, rTerm, sort, IsShift(kind) ? left.Type : unified, resultType, out var bitwise))
         {
@@ -2968,6 +2990,25 @@ internal sealed partial class CfgSsaLowerer
         }
 
         // 8. Math / decimal helpers
+        if (method.IsStatic && method.Name == "DivRem" &&
+            (containing?.ToDisplayString() == "System.Math" || containing?.SpecialType is SpecialType.System_Int32 or SpecialType.System_Int64) &&
+            TryLowerDivRem(method, argValues, gamma, loc, emitObligations, out var divRemResult))
+        {
+            return divRemResult;
+        }
+
+        if (containing?.SpecialType is SpecialType.System_Decimal && method.IsStatic && argValues.Count == 2 &&
+            method.Name is "Add" or "Subtract" or "Multiply" or "Divide" or "Remainder" &&
+            method.Parameters.All(pm => pm.Type.SpecialType == SpecialType.System_Decimal))
+        {
+            var decKind = method.Name switch
+            {
+                "Add" => BinaryOperatorKind.Add, "Subtract" => BinaryOperatorKind.Subtract, "Multiply" => BinaryOperatorKind.Multiply,
+                "Divide" => BinaryOperatorKind.Divide, _ => BinaryOperatorKind.Remainder
+            };
+            return LowerBinaryOperator(decKind, argValues[0], argValues[1], method.ReturnType, gamma, loc, emitObligations);
+        }
+
         if (containing?.SpecialType is SpecialType.System_Decimal || containing?.ToDisplayString() == "System.Math")
         {
             if (TryLowerMathWidthIntrinsic(method, argValues, gamma, loc, emitObligations, out var widthResult))
@@ -3763,6 +3804,9 @@ internal sealed partial class CfgSsaLowerer
 
     private void AssignDeconstruction(IOperation target, SmtTypedTerm rhs, BlockEnv env)
     {
+        // `var (a, b) = ...` wraps the tuple of targets in a declaration expression.
+        while (target is IDeclarationExpressionOperation { Expression: ITupleOperation inner })
+            target = inner;
         if (target is ITupleOperation tupleTarget && _types.TryGetComposite(rhs.Type, out var rhsComp))
         {
             for (var i = 0; i < tupleTarget.Elements.Length && i < rhsComp!.Fields.Count; i++)

@@ -386,7 +386,9 @@ Wrap-around is allowed only when you say so:
 - `[CheckedArithmetic]` (on assembly, type or method) restores the default inside an `[UncheckedArithmetic]` scope, and models integers as bit-vectors, which is the most precise model and the slowest to prove.
 - A `checked(...)` expression or block must never overflow, even inside an `[UncheckedArithmetic]` scope, because there C# throws.
 - The nearest attribute wins: method, then enclosing types, then the assembly.
-- `MinValue / -1`, `MinValue % -1` and `Math.Abs(MinValue)` throw `OverflowException` in every mode, so they are always checked.
+- `MinValue / -1`, `MinValue % -1`, `Math.Abs(MinValue)` and `Math.DivRem(MinValue, -1)` throw `OverflowException` in every mode, so they are always checked. `Math.DivRem(a, b)` also needs `b != 0`, and its tuple result is `(a / b, a % b)`. Only the tuple overload on `int` and `long` is modelled exactly; for other `DivRem` overloads the obligations are checked but the result is unconstrained.
+- `decimal` `+`, `-`, `*` and `/` (and `decimal.Add`, `Subtract`, `Multiply`, `Divide`) throw `OverflowException` when the result is outside `decimal.MinValue..MaxValue`, whatever the arithmetic mode (`unchecked` does not apply to `decimal`). The prover requires the exact result to be within that range, so `d + 1m` needs `d < decimal.MaxValue`, and `d / e` with a tiny `e` is rejected unless bounded. This is slightly stricter than C# right at the edge (a result a hair above `MaxValue` can round back and not throw); it never accepts a run that throws.
+- Enum arithmetic (`e + 1`, `e - 1`, `e++`, `e - e2`) is done in the enum's underlying type: a `byte`-based enum goes from 255 to 0 in an unchecked scope, and in a checked scope or default mode that wrap is an `Overflow` refutation, exactly like `byte` arithmetic. Every enum input is assumed to be within its underlying type's range.
 
 ### Integer widths, casts and bit operations
 

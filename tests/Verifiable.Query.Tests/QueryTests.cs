@@ -171,7 +171,7 @@ public sealed class QueryTests
             {
                 public static SimpleLedger BuggyTransfer(SimpleLedger ledger, decimal amount)
                 {
-                    Spec.Requires(amount > 0m, "Transfer amount must be positive.");
+                    Spec.Requires(amount > 0m && amount <= 1000m, "Transfer amount must be positive and bounded.");
                     // Bug: only debits increase; forgot credits!
                     return ledger with { Debits = ledger.Debits + amount };
                 }
@@ -186,7 +186,7 @@ public sealed class QueryTests
                 "ask",
                 "--stdin",
                 "--target", "BuggyOps.BuggyTransfer",
-                "--assume", "ledger.Debits == ledger.Credits",
+                "--assume", "ledger.Debits == ledger.Credits && ledger.Debits >= 0m && ledger.Debits <= 1000m",
                 "--assert", "result.Debits == result.Credits"
             ], source);
 
@@ -764,7 +764,7 @@ public sealed class QueryTests
             {
                 public static decimal Withdraw(decimal balance, decimal amount)
                 {
-                    Spec.Requires(amount > 0m);
+                    Spec.Requires(amount > 0m && amount <= 1000m && balance >= -1000m && balance <= 1000m);
                     Spec.Ensures<decimal>(r => r >= 0m, "No overdrafts.");
                     return balance - amount;
                 }

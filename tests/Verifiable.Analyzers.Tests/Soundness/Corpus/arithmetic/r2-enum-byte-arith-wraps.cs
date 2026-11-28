@@ -1,6 +1,5 @@
 // Arithmetic on a byte-based enum wraps like byte: (Color)255 + 1 is 0, not 256.
 // @expect: rejected
-// @known-bug: arithmetic on an enum with underlying byte is modelled as unbounded (c + 1 does not wrap at 255), so the false postcondition is proved
 // @witness: Corpus.Arithmetic.R2EnumArith.Run((byte)255)
 using Verifiable.Contracts;
 

@@ -5,6 +5,13 @@ using Verifiable.Contracts;
 
 namespace AccountingApp.Shared;
 
+/// <summary>Capacity limits. decimal arithmetic throws on overflow, so the ledger works within these bounds and rejects what would exceed them.</summary>
+public static class Limits
+{
+    public const decimal Balance = 1000000000000000000m;
+    public const decimal Total = 1000000000000000000000000000m;
+}
+
 [TypeAlias<int>("Every account ID must be at least 1.")]
 public readonly partial record struct AccountId { public static bool IsValid(int value) => value >= 1; }
 
@@ -15,10 +22,10 @@ public readonly partial record struct JournalEntryId { public static bool IsVali
 public readonly partial record struct PositiveAmount { public static bool IsValid(decimal value) => value > 0m && value <= 1000000000m; }
 
 [TypeAlias<decimal>("Running ledger totals cannot go negative.")]
-public readonly partial record struct NonNegativeDecimal { public static bool IsValid(decimal value) => value >= 0m; }
+public readonly partial record struct NonNegativeDecimal { public static bool IsValid(decimal value) => value >= 0m && value <= Limits.Total; }
 
 [TypeAlias<decimal>("Entry totals must be strictly positive so zero-value entries never enter the journal.")]
-public readonly partial record struct PositiveDecimal { public static bool IsValid(decimal value) => value > 0m; }
+public readonly partial record struct PositiveDecimal { public static bool IsValid(decimal value) => value > 0m && value <= Limits.Total; }
 
 [TypeAlias<string>("Currency codes must be 3-letter ISO codes such as USD.")]
 public readonly partial record struct CurrencyCode { public static bool IsValid(string value) => value is { Length: >= 3 and <= 3 }; }
@@ -54,7 +61,11 @@ public readonly record struct Account(
     AccountType Kind,
     CurrencyCode Currency,
     decimal Balance,
-    bool AllowOverdraft);
+    bool AllowOverdraft)
+{
+    [Invariant("An account balance stays within the ledger's capacity.")]
+    public bool BalanceWithinCapacity() => Balance >= -Limits.Balance && Balance <= Limits.Balance;
+}
 
 [Verifiable]
 public readonly record struct JournalLine(

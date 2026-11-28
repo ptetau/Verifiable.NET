@@ -1,6 +1,5 @@
 // Math.DivRem(int.MinValue, -1) throws OverflowException like the / operator.
 // @expect: rejected
-// @known-bug: Math.DivRem(int.MinValue, -1) throws OverflowException but the call is accepted without an overflow obligation (unlike the / operator)
 // @witness: Corpus.Arithmetic.R2DivRem.Run(int.MinValue, -1)
 using System;
 using Verifiable.Contracts;
