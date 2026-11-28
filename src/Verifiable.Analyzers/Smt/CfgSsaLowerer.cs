@@ -45,6 +45,27 @@ internal sealed record NamedPremise(
     int Line,
     string SmtFormula);
 
+/// <summary>
+/// A callee guarantee assumed at a call, kept so the analyzer can check that it can hold there.
+/// </summary>
+/// <param name="Label">The callee and the guarantee as written, e.g. <c>Ax.Weird: Spec.Ensures&lt;int&gt;(r =&gt; r &gt; x)</c>.</param>
+/// <param name="Reason">The guarantee's <c>because</c> text, if any.</param>
+/// <param name="CallLocation">The call that assumes the guarantee.</param>
+/// <param name="GuaranteeLocation">Where the guarantee is declared.</param>
+/// <param name="Context">What is known at the call: the path to it, the guarantee's own guard and the callee's preconditions.</param>
+/// <param name="Guarantee">The guarantee. It is assumed under the path and guard only, not the preconditions.</param>
+/// <param name="AssertionsBefore">How many assertions were made before this one.</param>
+/// <param name="ObligationsBefore">How many goals were emitted before this one; only later goals can rely on it.</param>
+internal sealed record CalleeGuarantee(
+    string Label,
+    string? Reason,
+    Location CallLocation,
+    Location GuaranteeLocation,
+    string Context,
+    string Guarantee,
+    int AssertionsBefore,
+    int ObligationsBefore);
+
 internal sealed record QueryObligation(
     string MethodDisplay,
     string ClaimText,
@@ -82,6 +103,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
     private readonly List<NamedPremise> _premises = new();
+    private readonly List<CalleeGuarantee> _calleeGuarantees = new();
     private readonly List<QueryObligation> _queryObligations = new();
     private readonly List<(string Contract, Location Location, string Error)> _errors = new();
     private readonly List<(string ParamName, string SmtName)> _trackedParams = new();
@@ -228,6 +250,16 @@ internal sealed partial class CfgSsaLowerer
 
     /// <summary>Named premises recorded so far (only when constructed with <c>trackProofPremises: true</c>).</summary>
     internal IReadOnlyList<NamedPremise> Premises => _premises;
+
+    /// <summary>Callee guarantees assumed so far, in the order they were asserted.</summary>
+    internal IReadOnlyList<CalleeGuarantee> CalleeGuarantees => _calleeGuarantees;
+
+    /// <summary>Goals emitted so far.</summary>
+    internal int ObligationCount => _obligations.Count;
+
+    /// <summary>All declarations, then the first <paramref name="assertionCount"/> assertions.</summary>
+    internal string PremisePrefix(int assertionCount) =>
+        string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions.Take(assertionCount)));
 
     /// <summary>Test seam: when set on the current async flow, lowering throws an unexpected exception.</summary>
     internal static readonly System.Threading.AsyncLocal<bool> SimulateInternalFailure = new();
@@ -2746,7 +2778,7 @@ internal sealed partial class CfgSsaLowerer
             }
         }
 
-        CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
+        var calleeRequires = CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
         var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
             !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.GhostAttr);
@@ -2823,6 +2855,15 @@ internal sealed partial class CfgSsaLowerer
                     }
                     var ensTerm = LowerExpression(ens.BodyExpr, effectiveGamma, calleeEnv, emitObligations: false);
                     var ensLoc = ens.Location != Location.None ? ens.Location : loc;
+                    _calleeGuarantees.Add(new CalleeGuarantee(
+                        $"{method.ContainingType?.Name}.{method.Name}: {ens.DisplayText}",
+                        ens.Because,
+                        loc,
+                        ensLoc,
+                        calleeRequires.Aggregate(effectiveGamma, CombineAnd),
+                        ensTerm.Term,
+                        _assertions.Count,
+                        _obligations.Count));
                     AddAssertion(
                         $"(=> {effectiveGamma} {ensTerm.Term})",
                         "CalleeEnsures",
@@ -2911,20 +2952,24 @@ internal sealed partial class CfgSsaLowerer
         CheckMethodRequires(callee, calleeSpecs, calleeEnv, gamma, callLoc);
     }
 
-    private void CheckMethodRequires(IMethodSymbol callee, MethodSpecs calleeSpecs, BlockEnv calleeEnv, string gamma, Location callLoc)
+    /// <summary>Emits a goal for each callee precondition and returns them as formulas, guards included.</summary>
+    private List<string> CheckMethodRequires(IMethodSymbol callee, MethodSpecs calleeSpecs, BlockEnv calleeEnv, string gamma, Location callLoc)
     {
+        var lowered = new List<string>();
         foreach (var req in calleeSpecs.Requires)
         {
             try
             {
                 var effectiveGamma = gamma;
+                string? guard = null;
                 if (req.GuardCondition is not null)
                 {
-                    var guardTerm = LowerExpression(req.GuardCondition, gamma, calleeEnv, emitObligations: false);
-                    effectiveGamma = CombineAnd(gamma, guardTerm.Term);
+                    guard = LowerExpression(req.GuardCondition, gamma, calleeEnv, emitObligations: false).Term;
+                    effectiveGamma = CombineAnd(gamma, guard);
                 }
 
                 var reqTerm = LowerExpression(req.Condition, effectiveGamma, calleeEnv, emitObligations: false);
+                lowered.Add(guard is null ? reqTerm.Term : $"(=> {guard} {reqTerm.Term})");
                 var clauses = ExtractGoalClauses(req.Condition, effectiveGamma, calleeEnv);
                 AddObligation(
                     "Precondition",
@@ -2942,6 +2987,8 @@ internal sealed partial class CfgSsaLowerer
                 _errors.Add((req.DisplayText, callLoc, ex.Message));
             }
         }
+
+        return lowered;
     }
 
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
