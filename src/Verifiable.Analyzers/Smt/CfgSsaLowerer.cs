@@ -345,19 +345,32 @@ internal sealed partial class CfgSsaLowerer
             {
                 if (req.GuardCondition is not null)
                 {
-                    var guardTerm = LowerExpression(req.GuardCondition, "true", entryEnv, emitObligations: false);
-                    var reqTerm = LowerExpression(req.Condition, guardTerm.Term, entryEnv, emitObligations: false);
+                    var guardTerm = LowerSpecGoal(req.GuardCondition, "true", entryEnv);
+                    var reqTerm = LowerSpecGoal(req.Condition, guardTerm.Term, entryEnv);
                     AddAssertion($"(=> {guardTerm.Term} {reqTerm.Term})", "Requires", req.DisplayText, req.Location, req.Because);
                 }
                 else
                 {
-                    var reqTerm = LowerExpression(req.Condition, "true", entryEnv, emitObligations: false);
+                    var reqTerm = LowerSpecGoal(req.Condition, "true", entryEnv);
                     AddAssertion(reqTerm.Term, "Requires", req.DisplayText, req.Location, req.Because);
                 }
             }
             catch (ContractLoweringException ex)
             {
                 _errors.Add((req.DisplayText, req.Location, ex.Message));
+            }
+        }
+
+        // A method's own Spec.Decreases measure is evaluated on entry, after its preconditions.
+        foreach (var dec in _currentSpecs.MethodDecreases)
+        {
+            try
+            {
+                LowerSpecGoal(dec.Measure, "true", entryEnv);
+            }
+            catch (ContractLoweringException ex)
+            {
+                _errors.Add((dec.DisplayText, dec.Location, ex.Message));
             }
         }
 
@@ -794,7 +807,7 @@ internal sealed partial class CfgSsaLowerer
         {
             try
             {
-                var decTerm = LowerExpression(decOp, preGamma, preEnv, emitObligations: false);
+                var decTerm = LowerSpecGoal(decOp, preGamma, preEnv);
                 var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
                 AddObligation("LoopDecreasesEntry", $"{display} >= 0 on entry", loc, preGamma, $"({geOp} {decTerm.Term} {zero})", because);
@@ -996,7 +1009,7 @@ internal sealed partial class CfgSsaLowerer
             {
                 try
                 {
-                    var afterTerm = LowerExpression(decOp, edgeGamma, env, emitObligations: false);
+                    var afterTerm = LowerSpecGoal(decOp, edgeGamma, env);
                     var zero = _translator.FormatIntLiteral(0, _types.GetSort(afterTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                     var isBv = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(afterTerm.Type));
                     var geOp = isBv ? "bvsge" : ">=";
@@ -1227,7 +1240,7 @@ internal sealed partial class CfgSsaLowerer
                 var effectiveGamma = gamma;
                 if (ens.GuardCondition is not null)
                 {
-                    var guardTerm = LowerExpression(ens.GuardCondition, gamma, ensEnv, emitObligations: false);
+                    var guardTerm = LowerSpecGoal(ens.GuardCondition, gamma, ensEnv);
                     effectiveGamma = CombineAnd(gamma, guardTerm.Term);
                 }
 
@@ -1724,7 +1737,7 @@ internal sealed partial class CfgSsaLowerer
                     var sort = _types.GetSort(uOp.Type);
                     if (_types.UseBitVec && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
                     {
-                        if (emitObligations && MustNotOverflow(un.Syntax, un.IsChecked))
+                        if (ChecksThrowingOperations(emitObligations) && MustNotOverflow(un.Syntax, un.IsChecked))
                         {
                             var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
                             EmitSafetyObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
@@ -1736,7 +1749,7 @@ internal sealed partial class CfgSsaLowerer
                         var negated = $"(- {uOp.Term})";
                         if (!MustNotOverflow(un.Syntax, un.IsChecked))
                             return new SmtTypedTerm(WrapIntoRange(negated, negRange), un.Type ?? uOp.Type);
-                        if (emitObligations)
+                        if (ChecksThrowingOperations(emitObligations))
                             EmitIntOverflowObligation("Negate", negated, negRange, gamma, un.Syntax.GetLocation(), uOp.Term);
                     }
                     return new SmtTypedTerm($"(- {uOp.Term})", uOp.Type);
@@ -2007,7 +2020,7 @@ internal sealed partial class CfgSsaLowerer
             return bitwise;
         }
 
-        if (emitObligations && checkOverflow && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
+        if (ChecksThrowingOperations(emitObligations) && checkOverflow && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
         {
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
         }
@@ -2023,7 +2036,7 @@ internal sealed partial class CfgSsaLowerer
                 return new SmtTypedTerm(WrapIntoRange(exact, range), resultType);
             }
 
-            if (emitObligations)
+            if (ChecksThrowingOperations(emitObligations))
             {
                 EmitIntOverflowObligation(kind.ToString(), exact, range, gamma, loc, lTerm, rTerm);
             }
@@ -2090,7 +2103,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var goal = $"(and (bvsge {extResult} {minBv}) (bvsle {extResult} {maxBv}))";
-        AddObligation("Overflow", $"Checked arithmetic overflow check ({kind})", loc, gamma, goal);
+        EmitSafetyObligation("Overflow", $"Checked arithmetic overflow check ({kind})", loc, gamma, goal);
     }
 
     private SmtTypedTerm LowerPatternOp(
@@ -3301,7 +3314,7 @@ internal sealed partial class CfgSsaLowerer
                 string? guard = null;
                 if (req.GuardCondition is not null)
                 {
-                    guard = LowerExpression(req.GuardCondition, gamma, calleeEnv, emitObligations: false).Term;
+                    guard = LowerSpecGoal(req.GuardCondition, gamma, calleeEnv).Term;
                     effectiveGamma = CombineAnd(gamma, guard);
                 }
 
@@ -4609,6 +4622,10 @@ internal sealed partial class CfgSsaLowerer
     /// </summary>
     private void EmitIntOverflowObligation(string what, string exact, IntegralRange range, string gamma, Location loc, params string[] operands)
     {
+        // Terms with a known interval (a string length, a literal, a sum of such) need no solver call.
+        if (TryParseNumeral(range.Min, out var rangeMin) && TryParseNumeral(range.Max, out var rangeMax) && TermFitsRange(exact, rangeMin, rangeMax))
+            return;
+
         var operandsInRange = string.Join(" ", operands.Select(o => InRange(o, range)));
         var premise = operands.Length == 1 ? operandsInRange : $"(and {operandsInRange})";
         EmitSafetyObligation("Overflow", $"Arithmetic overflow check ({what})", loc, gamma, $"(=> {premise} {InRange(exact, range)})");
