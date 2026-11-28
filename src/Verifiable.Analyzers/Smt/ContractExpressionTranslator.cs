@@ -207,6 +207,14 @@ internal sealed class ContractExpressionTranslator
             return new SmtTypedTerm(value.Term, targetType);
         }
 
+        // A string seen through an interface or object (IEquatable<string>, object) is still the same VerStr
+        // value, so keep its type: the null state and the string operations must not be lost.
+        if (value.Type.SpecialType == SpecialType.System_String &&
+            (targetType.TypeKind == TypeKind.Interface || targetType.SpecialType == SpecialType.System_Object))
+        {
+            return value;
+        }
+
         if (_types.TryGetNullableInfo(targetType, out _, out var optId, out var innerType))
         {
             if (value.Term == "str-null" || value.Term.StartsWith("opt-none-", StringComparison.Ordinal))

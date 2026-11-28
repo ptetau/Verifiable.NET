@@ -163,6 +163,14 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
+        if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable &&
+            nullable.TypeArguments.Length == 1 &&
+            IsMustConsumeType(nullable.TypeArguments[0]))
+        {
+            foundType = nullable.TypeArguments[0];
+            return true;
+        }
+
         if (type is INamedTypeSymbol named && named.IsTupleType)
         {
             foreach (var elem in named.TupleElements)
@@ -384,7 +392,14 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
-        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.UserDefinedOperator or MethodKind.Conversion)
+        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.Conversion)
+        {
+            return true;
+        }
+
+        // An operator someone wrote in this compilation runs unproved code unless its type is [Verifiable] (checked above);
+        // framework operators and the ones the compiler synthesizes for records are trusted.
+        if (method.MethodKind == MethodKind.UserDefinedOperator && (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
             return true;
         }

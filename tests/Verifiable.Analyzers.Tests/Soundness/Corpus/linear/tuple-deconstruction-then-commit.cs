@@ -1,6 +1,5 @@
 // Right: the token is deconstructed out of a tuple into `a`, and `a` is committed once.
 // @expect: proved
-// @known-bug: `var (a, b) = (Create(1), 1);` is reported as a dropped `<temporary>`, and `a` is never tracked, so `Commit(a)` reports it as consumed before being initialized
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

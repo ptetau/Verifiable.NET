@@ -163,6 +163,7 @@ public class LinearTransferTests
 
     private const string NeverConsumed = "was never consumed before returning from this method";
     private const string MaybeNotConsumed = "may not be consumed on all execution paths before returning";
+    private const string MaybeConsumedTwice = "may be consumed more than once: it was already consumed on some path that reaches here";
 
     public static TheoryData<string, string[]> Reports => new()
     {
@@ -182,14 +183,16 @@ public class LinearTransferTests
         { "static void P(int id) { var t = Make(id); Sink(t); t = Make(id + 1); Sink(t); }", [] },
         { "static void P(int id) { var t = Make(id); }", [NeverConsumed] },
         { "static void P(Token t) { }", [NeverConsumed] },
-        { "static void P(bool c, int id) { var t = Make(id); while (c) { Sink(t); } }", [MaybeNotConsumed] },
+        { "static void P(bool c, int id) { var t = Make(id); while (c) { Sink(t); } }", [MaybeNotConsumed, MaybeConsumedTwice] },
         { "[ConsumesObligation] static void P(Token t) { }", [] },
-        { "[ConsumesObligation] static void P(Token t) { Sink(t); Sink(t); }", [] },
+        // The analyzer's own "may already be consumed" flag (not part of the kernel state) catches a sink's own parameter passed on twice.
+        { "[ConsumesObligation] static void P(Token t) { Sink(t); Sink(t); }", [MaybeConsumedTwice] },
         { "[ConsumesObligation] static Token P(Token t) { return t; }", [] },
         { "[ConsumesObligation] static void P(Token t) { var u = t; Sink(u); }", [] },
         { "[ConsumesObligation] static void P(Token t, int id) { t = Make(id); }", [NeverConsumed] },
-        // Known gap (see TransferLaws.DoubleConsumeIsOnlySeenOnEveryPath): consumed on one path, then again.
-        { "static void P(bool c, int id) { var t = Make(id); if (c) Sink(t); Sink(t); }", [] },
+        // The kernel state alone only sees a second consumption on every path (TransferLaws.DoubleConsumeIsOnlySeenOnEveryPath);
+        // the analyzer's "may already be consumed" flag reports consumed on one path, then again.
+        { "static void P(bool c, int id) { var t = Make(id); if (c) Sink(t); Sink(t); }", [MaybeConsumedTwice] },
     };
 
     [Theory]

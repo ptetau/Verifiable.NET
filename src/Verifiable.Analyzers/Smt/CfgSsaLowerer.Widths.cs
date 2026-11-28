@@ -64,19 +64,6 @@ internal sealed partial class CfgSsaLowerer
         }
     }
 
-    /// <summary>A .NET string holds at most 0x3FFFFFDF (1,073,741,791) UTF-16 code units, so its <c>Length</c> plus a few still is an <c>int</c>.</summary>
-    private void AssumeStringLengthBound(SmtTypedTerm receiver, string memberName)
-    {
-        // Only the bit-vector mode needs it: there `int2bv` of an unbounded length leaves Z3 undecided. In the Int
-        // mode an extra bound on every length costs the string solver more than it gives.
-        if (!_types.UseBitVec || memberName != "Length" || _inQuantifierDepth > 0 || _types.GetSort(receiver.Type) != "VerStr")
-            return;
-        var receiverTerm = _translator.UnwrapRefinedIfApplicable(receiver).Term;
-        var length = $"(ite (= {receiverTerm} str-null) 0 (str.len (str-text {receiverTerm})))";
-        if (_rangeAssumed.Add(length))
-            AddAssertion($"(<= {length} 1073741791)", "StringAxiom", "string length fits a .NET string", Location.None);
-    }
-
     // ---- a cheap interval for an Int term --------------------------------------------------------------------
 
     /// <summary>The range of terms that are known to hold a value of their C# type (parameters, fields, call results).</summary>

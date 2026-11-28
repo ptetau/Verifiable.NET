@@ -1,6 +1,5 @@
 // .NET rejects an escaped word character: Regex.IsMatch(s, @"\_") throws ArgumentException ("Unrecognized escape sequence").
 // @expect: rejected
-// @known-bug: RegexModel accepts \_ as a literal; .NET throws RegexParseException for an escaped word character
 // @witness: Corpus.Strings.RegexBadEscape.IsUnderscore("_")
 using System.Text.RegularExpressions;
 using Verifiable.Contracts;

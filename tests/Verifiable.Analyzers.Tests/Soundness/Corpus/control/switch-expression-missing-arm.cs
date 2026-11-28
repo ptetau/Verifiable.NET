@@ -1,7 +1,6 @@
 // The switch expression has no arm for 0, so Sign(0) throws SwitchExpressionException instead of returning.
 // @expect: rejected
 // @witness: Corpus.Control.MissingArm.Sign(0)
-// @known-bug: The implicit throw of a non-exhaustive switch expression is a path with no obligation, so the missing arm is never reported.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

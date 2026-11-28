@@ -1,7 +1,6 @@
 // ImmutableArray == compares the underlying array references, so two separately built arrays are never ==.
 // @expect: rejected
 // @witness: Corpus.Types.ArrayEquality.Same(1)
-// @known-bug: ImmutableArray == is lowered as structural sequence equality, but at run time it compares the underlying array references.
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 

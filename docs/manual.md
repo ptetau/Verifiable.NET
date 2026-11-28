@@ -153,6 +153,26 @@ Z3 checks four facts automatically:
 3. `Decreases` starts `>= 0`.
 4. `Decreases` stays `>= 0` and strictly drops on every iteration.
 
+**The rules.**
+- `Spec.LoopInvariant` and `Spec.Decreases` are the first statements of the loop body, before any other statement. They are checked where the loop is entered and at the top of every pass, so one written further down would not mean what it says; it is a `VER101` error.
+- Every `while`, `do` and `for` loop needs a `Spec.Decreases`. Without it nothing shows the loop ends, and a proof about what follows it would hold without ever being used. A `foreach` over a finite collection ends on its own and needs none.
+- Loops can be nested. Each loop has its own invariant and measure; an inner loop runs all its passes on every pass of the outer one.
+- `foreach` over an `ImmutableArray<T>`, `ImmutableList<T>` or `IReadOnlyList<T>` hands out the items of the sequence, so facts about them from `Spec.Requires` (for example `xs.All(...)`) hold for each item. The loop does not know which item it is on.
+
+### Recursion
+
+A method that calls itself, or that is part of a cycle of `[Verifiable]` methods that call each other, needs a termination measure at the top of each of them: `Spec.Decreases(measure, because)`, a non-negative `int` or `long` expression over the parameters. At every recursive call the measure of the callee must be `>= 0` and smaller than the caller's measure on entry. A recursive method without one is a `VER101` error; a measure that does not go down is a `VER102` proof failure. Without this, a method that never returns would prove any postcondition.
+
+```csharp
+public static int Sum(int n)
+{
+    Spec.Requires(n >= 0 && n <= 200, "Small non-negative input.");
+    Spec.Ensures<int>(r => 2 * r == n * (n + 1), "Triangle number.");
+    Spec.Decreases(n, "n goes down by one at each call.");
+    return n == 0 ? 0 : n + Sum(n - 1);
+}
+```
+
 ---
 
 ### Writing contracts with helpers
@@ -183,7 +203,7 @@ Nullable expressions work in both the implementation and the contract. For `deci
 
 ### Supported domain primitives & pure pipelines
 
-- **Strings & Regular Expressions:** `string.IsNullOrEmpty`, `string.IsNullOrWhiteSpace` (Unicode whitespace), `Trim()`, `Contains`, `StartsWith`, `EndsWith` (ordinal comparison; non-ordinal `StringComparison` values are rejected), bounded `string.Join` (up to 32 literal/`params` elements) and `char.ToString()` lower directly to Z3 string theory with path-guarded non-null receiver/argument checks. Static `Regex.IsMatch(input, constPattern[, options])`, `[GeneratedRegex]` factories, and `static readonly Regex` fields with constant patterns translate a decidable subset (anchors `^`/`$`/`\A`/`\Z`/`\z`, character classes, quantifiers, grouping, alternation) to Z3 `str.in_re` and always require non-null input.
+- **Strings & Regular Expressions:** `string.IsNullOrEmpty`, `string.IsNullOrWhiteSpace` (Unicode whitespace), `Trim()`, `Contains`, `StartsWith`, `EndsWith` (ordinal only: `StartsWith(string)` and `EndsWith(string)` without a `StringComparison` are culture-sensitive, so they are rejected with VER101, as are non-ordinal `StringComparison` values; write `StringComparison.Ordinal`; `Contains(string)` and the `char` overloads are ordinal already). Reading `s.Length` or calling a string method needs `s` proved non-null, and `x.Value` or `(int)x` on a nullable needs `x.HasValue`. Pattern kinds that are not modelled, such as list patterns, are rejected with VER101, bounded `string.Join` (up to 32 literal/`params` elements) and `char.ToString()` lower directly to Z3 string theory with path-guarded non-null receiver/argument checks. Static `Regex.IsMatch(input, constPattern[, options])`, `[GeneratedRegex]` factories, and `static readonly Regex` fields with constant patterns translate a decidable subset (anchors `^`/`$`/`\A`/`\Z`/`\z`, character classes, quantifiers, grouping, alternation) to Z3 `str.in_re` and always require non-null input.
 - **Enums & Closed-Domain Verification:** Every `enum` input automatically carries its underlying integral bounds (e.g. `0..255` for `byte`-backed enums), and checked/unchecked casts (including nullable targets and exact enum-to-`decimal` conversions) are modeled accurately. By default enums remain open to match C# runtime casting semantics; opt into closed-domain axioms (constraining non-`[Flags]` enums to declared members so newly added enum values surface missing branches as `VER102`) either project-wide via `<VerifiableClosedEnums>true</VerifiableClosedEnums>` or per enum with `[Verifiable] public enum OrderStatus { ... }`.
 - **Object-Initializer Projections, Write-Once Boundary DTOs & `[MapTo]`:** Pure single-expression helpers expand both positional record constructors (`new State(dto.A, dto.B)`) and object initializers (`new State { A = dto.A, B = dto.B }`). Constructing and immediately initializing an external mutable boundary DTO in a single `new TargetDto { ... }` expression is supported for field-level postconditions, while post-init mutation (`VER001`) and reference-identity `==`/`Equals` on non-record classes (`VER101`) remain rejected. To eliminate 1:1 projection boilerplate, apply `[MapTo(typeof(OrderState))]` (with optional `MethodName = "..."`) on a source DTO type to generate a `[Verifiable]` extension method (`dto.ToOrderState()`), or apply `[MapTo]` on a `static partial` mapper method (`public static partial OrderResponse ToResponse(OrderDto dto);`) when mapping external types. Missing fields or non-implicit type mismatches emit `VER203` (use `[InboundPort]` when validating raw primitives into `[TypeAlias<T>]`).
 - **Conditional Contracts & Index Quantifiers (`Spec.Implies`, `Spec.EnsuresWhen`, `Spec.RequiresWhen`, `Spec.ForAll`, `Spec.Exists`):** Express conditional rules directly without `!cond || ...` boilerplate via `Spec.Implies(antecedent, consequent)`, `Spec.RequiresWhen(cond, req, because)`, and `Spec.EnsuresWhen<T>(cond, r => ..., because)` (or `Spec.EnsuresWhen(cond, post, because)`). State index-relational sequence properties directly with bounded quantifiers `Spec.ForAll(startInclusive, endExclusive, i => ...)` and `Spec.Exists(startInclusive, endExclusive, i => ...)`, including order-preservation proofs across `ImmutableArray<T>` / `ImmutableList<T>` `RemoveAt` and `Insert`.
@@ -244,7 +264,14 @@ public readonly record struct PendingTodoCommit(/* ... */);
 public static TodoCommitReceipt PersistCommit(SqliteConnection conn, PendingTodoCommit commit) { /* ... */ }
 ```
 
-Every path that drops, overwrites, double-consumes, or discards a `[MustConsume]` value triggers `VER007 -- UNCONSUMED OBLIGATION` at compile time.
+Every path that drops, overwrites, double-consumes, or discards a `[MustConsume]` value triggers `VER007 -- UNCONSUMED OBLIGATION` at compile time. The check follows `try`/`catch`/`finally` (a `finally` runs on every way out of the `try`, and a `catch` can start after any call in the `try`), loops, and a second consumption after only some branches consumed the token (`may be consumed more than once`).
+
+To keep every token followable, `VER007` only accepts tokens in local variables and parameters:
+
+- Pass a token only to a `[ConsumesObligation]` method (mark your own helper `[ConsumesObligation]` if it takes the token over). A call to any other method that takes the token by value is rejected.
+- Do not store a token in an array, tuple, `Nullable<T>`, collection, field or property (`VER007 -- UNTRACKED OBLIGATION`). Deconstruct a tuple straight into locals, or return it.
+- An async `[ConsumesObligation]` method must have its `Task` awaited or returned. `_ = CommitAsync(token)` is rejected.
+- A token that a method hands back through an `out` parameter is tracked by the caller; a local function that consumes a captured token consumes it at each call.
 
 ---
 
@@ -325,8 +352,8 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER004` | `AMBIENT AUTHORITY` | Called `DateTime.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, `Environment.*`, or touched mutable static state. Pass values in as parameters. |
 | `VER005` | `DISALLOWED CONTROL FLOW` | Unannotated `while`/`foreach`, `async`/`await`, `throw`, `try/catch`, `lock`, or `goto`. Annotate `while` loops with `Spec.LoopInvariant` + `Spec.Decreases`; use `Result<T, TError>` instead of exceptions. |
 | `VER006` | `UNVERIFIED CALL` | Called an unverified external method, reflection, or `dynamic`. Mark deterministic helpers `[Verifiable]` / `[PureAxiom]`, or move I/O to the outer shell. |
-| `VER007` | `UNCONSUMED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
-| `VER101` | `UNSUPPORTED CONTRACT` / `METHOD NOT CHECKED` | Contract or code could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. In a `[Verifiable]` method with no contracts and no obligation found, it is a warning, so the method does not look proved; mark it `[Unverifiable]` if it needs no proof. A `Spec.Requires` / `Spec.RequiresWhen` that is not in the method's leading contract block (inside a branch, loop, lambda or local function, or after an ordinary statement) is also `VER101`: it is not a precondition, so move it to the top of the method, or use `Spec.RequiresWhen(condition, requirement, because)` or an `if` guard in callers. |
+| `VER007` | `UNCONSUMED OBLIGATION` / `UNTRACKED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token, passed it to a method that is not `[ConsumesObligation]`, or stored it in an array, tuple, `Nullable<T>`, field or collection. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
+| `VER101` | `UNSUPPORTED CONTRACT` / `METHOD NOT CHECKED` | Contract or code could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type, `Spec.LoopInvariant` placed outside a loop or below another loop-body statement, a `while`/`do`/`for` loop with no `Spec.Decreases`, or a recursive method with no `Spec.Decreases`). Rewrite with supported pure expressions. In a `[Verifiable]` method with no contracts and no obligation found, it is a warning, so the method does not look proved; mark it `[Unverifiable]` if it needs no proof. A `Spec.Requires` / `Spec.RequiresWhen` that is not in the method's leading contract block (inside a branch, loop, lambda or local function, or after an ordinary statement) is also `VER101`: it is not a precondition, so move it to the top of the method, or use `Spec.RequiresWhen(condition, requirement, because)` or an `if` guard in callers. |
 | `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
 | `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |
 | `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`), so no proof was checked. Build error by default, because unchecked code must not pass as verified. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` (downgrades it to a warning). |

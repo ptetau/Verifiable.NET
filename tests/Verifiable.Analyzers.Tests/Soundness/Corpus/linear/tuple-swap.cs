@@ -1,6 +1,5 @@
 // Right: swapping two tokens with a tuple assignment keeps both live, and each is then committed once.
 // @expect: proved
-// @known-bug: `(a, b) = (b, a);` is applied element by element against already-updated state: it reports an overwrite of live `a`, a dropped `<temporary>` and a double consume of `a`
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

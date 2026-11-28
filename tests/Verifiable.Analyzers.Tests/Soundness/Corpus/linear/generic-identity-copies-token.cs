@@ -1,7 +1,6 @@
 // Wrong: a generic identity function hands back a copy of the token while the original stays live, so both get committed.
 // @expect: rejected
 // @witness: Corpus.Linear.GenericCopy.Run()
-// @known-bug: passing a token through a generic `T Same<T>(T)` leaves the original live and makes the returned copy a second live token
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

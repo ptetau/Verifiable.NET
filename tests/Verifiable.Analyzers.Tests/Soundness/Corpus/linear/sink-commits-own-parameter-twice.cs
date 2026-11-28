@@ -1,7 +1,6 @@
 // Wrong: a [ConsumesObligation] method passes its own token on to Commit twice.
 // @expect: rejected
 // @witness: Corpus.Linear.SinkTwice.Run()
-// @known-bug: a [ConsumesObligation] method's own parameter stays SinkParameter after a consume, so passing it to two sinks is never a double consume
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

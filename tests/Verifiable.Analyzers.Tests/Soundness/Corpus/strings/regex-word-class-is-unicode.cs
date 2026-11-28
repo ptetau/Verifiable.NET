@@ -1,6 +1,5 @@
 // Without RegexOptions.ECMAScript, \w matches Unicode letters such as "é".
 // @expect: rejected
-// @known-bug: RegexModel models \w as [A-Za-z0-9_] even without ECMAScript, where .NET matches Unicode letters, marks and connectors
 // @witness: Corpus.Strings.RegexWord.IsOneWordChar("é")
 using System.Text.RegularExpressions;
 using Verifiable.Contracts;

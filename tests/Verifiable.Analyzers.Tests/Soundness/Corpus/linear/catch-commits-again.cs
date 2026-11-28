@@ -1,7 +1,6 @@
 // Wrong: the token is committed before the try, and the catch block commits it a second time.
 // @expect: rejected
 // @witness: Corpus.Linear.CatchAgain.Run("not a number")
-// @known-bug: catch regions are never reached by the worklist, so a second commit inside a catch block is not checked
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

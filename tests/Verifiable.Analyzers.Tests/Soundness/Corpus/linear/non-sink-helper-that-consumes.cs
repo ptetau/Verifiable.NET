@@ -1,7 +1,6 @@
 // Wrong: Finish is not a sink but must (and does) commit its parameter, and the caller commits the same token again.
 // @expect: rejected
 // @witness: Corpus.Linear.HelperConsumes.Run()
-// @known-bug: passing a token to a non-sink method is a read, not a move, though the callee is required to consume its parameter, so the caller may consume it again
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

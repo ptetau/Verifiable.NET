@@ -1,7 +1,6 @@
 // Wrong: when `first` is true the token is committed on the branch and then again after the merge.
 // @expect: rejected
 // @witness: Corpus.Linear.PartialThenAgain.Run(true)
-// @known-bug: a consume of a MaybeLive token (consumed on only one incoming path) is not reported as a double consume
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

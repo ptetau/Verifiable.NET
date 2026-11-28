@@ -1,7 +1,6 @@
 // The generated primary constructor does not check IsValid, so new TodoId(0) reaches a callee that assumes it.
 // @expect: rejected
 // @witness: Corpus.Types.CtorArg.Caller(0)
-// @known-bug: Call sites never check a callee parameter's TypeAlias IsValid, so an unchecked new TodoId(0) argument is trusted by the callee (CfgSsaLowerer.cs call-site checks cover only closed enums and [NonDefault]).
 using Verifiable.Contracts;
 
 namespace Corpus.Types;
