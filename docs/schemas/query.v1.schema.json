@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/query.v1.schema.json",
+  "title": "verifiable-query ask / check-invariant result, and usage errors",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "claim",
+    "assume",
+    "because",
+    "target",
+    "error",
+    "results"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier and version, always the first property."
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "Same word for the same exit code on every command."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "0 proved, 1 refuted, 2 undecided, 3 input_error, 4 tool_missing."
+    },
+    "claim": {
+      "type": "string"
+    },
+    "assume": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "because": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "message",
+        "fix"
+      ],
+      "properties": {
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "method",
+          "returnType",
+          "status",
+          "vacuous",
+          "pathsChecked",
+          "file",
+          "line",
+          "smtHash",
+          "reasons",
+          "counterexamples",
+          "error",
+          "fix"
+        ],
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "returnType": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "proved",
+              "refuted",
+              "undecided",
+              "input_error",
+              "tool_missing"
+            ]
+          },
+          "vacuous": {
+            "type": "boolean"
+          },
+          "pathsChecked": {
+            "type": "integer"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "smtHash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "label",
+                "spirit",
+                "file",
+                "line"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "spirit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "line": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "counterexamples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "line",
+                "values"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

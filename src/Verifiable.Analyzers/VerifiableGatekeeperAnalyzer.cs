@@ -236,6 +236,13 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
 
         foreach (var block in context.OperationBlocks)
         {
+            // Attribute arguments are compile-time constants (e.g. `Drops = new[] { "Notes" }`), not runtime state.
+            if (block.Kind == OperationKind.Attribute ||
+                block.Syntax.AncestorsAndSelf().Any(n => n is Microsoft.CodeAnalysis.CSharp.Syntax.AttributeSyntax))
+            {
+                continue;
+            }
+
             foreach (var op in block.DescendantsAndSelf())
             {
                 AnalyzeOperation(context, op, isCandidate);

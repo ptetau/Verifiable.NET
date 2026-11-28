@@ -337,9 +337,10 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 - **Exit codes & machine output:**
   - `0` — Claim proved across all reachable paths (Z3 unsat core lists exact `[Invariant]` / `[TypeAlias<T>]` / `Spec.Requires` rules and spirit strings; flags vacuous proofs if premises are unreachable).
   - `1` — Refuted (concrete counterexample + `file:line`).
-  - `2` — Inconclusive (solver timeout/unknown).
+  - `2` — Undecided (solver timeout/unknown, nothing refuted).
   - `3` — Input/compilation error or unbound query expression (lists variables and properties in scope).
   - `4` — Z3 binary not found (`VERIFIABLE_Z3_PATH` / `scripts/install-z3.*`).
+  The same codes apply to `check` and `build` (CS errors are `3`, a missing Z3 is `4`). JSON `status` uses the words `proved`, `refuted`, `undecided`, `input_error`, `tool_missing`; see `docs/agents.md` and `docs/schemas`.
   Pass `--format json` for pure JSON, or set `VERIFIABLE_AGENT=1` with default `--format elm` to append `<verifiable-query-result>{...}</verifiable-query-result>`.
 
 ---

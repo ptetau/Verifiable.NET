@@ -32,6 +32,11 @@ public sealed class InvariantAttribute(string? description = null) : Attribute
     /// Gets an optional human-readable explanation of the spirit of this invariant.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>
@@ -99,6 +104,11 @@ public sealed class TypeAliasAttribute<TUnderlying>(string? description = null) 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>
@@ -112,6 +122,11 @@ public sealed class RefinedAttribute<TUnderlying>(string? description = null) : 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>
@@ -188,3 +203,73 @@ public sealed class VerifiableContractMetadataAttribute(
     /// </summary>
     public string? Description { get; } = description;
 }
+
+/// <summary>
+/// Records that a method's contract deliberately allows more than one result (requirement R5), so the
+/// one-answer check does not report it as open. Say why: <c>[AnyValidResult("Any free slot will do.")]</c>.
+/// </summary>
+/// <param name="reason">Why more than one answer is acceptable.</param>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class AnyValidResultAttribute(string reason) : Attribute
+{
+    /// <summary>
+    /// Gets why more than one answer is acceptable.
+    /// </summary>
+    public string Reason { get; } = reason;
+}
+
+/// <summary>
+/// Declares the date a version of a rule takes effect (requirement R6). Methods in one static partial
+/// class that share <see cref="Rule"/> are versions of the same rule: each is an ordinary method, proved
+/// on its own, and a generated dispatcher <c>Rule(DateOnly asOf, ...)</c> calls the version in force on
+/// <c>asOf</c>. The build fails if two versions share a date or their signatures differ.
+/// </summary>
+/// <param name="date">The first day the version applies, as <c>yyyy-MM-dd</c>.</param>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class EffectiveFromAttribute(string date) : Attribute
+{
+    /// <summary>
+    /// Gets the first day the version applies, as <c>yyyy-MM-dd</c>.
+    /// </summary>
+    public string Date { get; } = date;
+
+    /// <summary>
+    /// Gets or sets the name of the rule this method is a version of, and of the generated dispatcher.
+    /// </summary>
+    public string Rule { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this version comes from.
+    /// </summary>
+    public string? Clause { get; set; }
+}
+
+/// <summary>
+/// Marks a mapping from old types to a new one (requirement R8), such as splitting a type or merging two.
+/// The method must be static, verified, and return a value for every input (no nullable or <c>Result</c>
+/// return), so the prover shows that every valid old value maps to a value that keeps every new invariant.
+/// A field of an old type that the mapping does not read must be named in <see cref="Drops"/>.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class MigrationAttribute : Attribute
+{
+    /// <summary>
+    /// Gets or sets the old fields the mapping deliberately drops, as <c>"Field"</c> or <c>"parameter.Field"</c>.
+    /// </summary>
+    public string[] Drops { get; set; } = [];
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this migration comes from.
+    /// </summary>
+    public string? Clause { get; set; }
+}
+
+/// <summary>
+/// Declares the effects a domain can ask the outer shell to perform (requirement R10), as the methods of
+/// a partial interface: <c>[Effects] public partial interface IBookingEffects { void SendConfirmation(string email); }</c>.
+/// A generator turns it into a closed union of effect values (<c>BookingEffect.SendConfirmation</c>) that
+/// pure code returns, and a <c>Handle</c> dispatcher. The shell implements the interface, so an unhandled
+/// effect is a compile error.
+/// </summary>
+[AttributeUsage(AttributeTargets.Interface, AllowMultiple = false, Inherited = false)]
+public sealed class EffectsAttribute : Attribute;

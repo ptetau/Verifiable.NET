@@ -17,14 +17,22 @@ internal sealed record PresentedDiagnostic(
     int Line,
     int Column,
     string Summary,
-    string ElmBlock);
+    string ElmBlock,
+    DiagnosticFacts? Facts = null);
 
 internal sealed record CheckReport(
     string Mode,
     int ErrorCount,
     int WarningCount,
     int SuppressedWarningCount,
-    IReadOnlyList<PresentedDiagnostic> Diagnostics);
+    IReadOnlyList<PresentedDiagnostic> Diagnostics,
+    CheckStats? Stats = null);
+
+/// <summary>
+/// Opt-in (<c>--stats</c>) timing and proof-cache counts for a check. They differ from run to run, so they are
+/// left out of the default output, which must be byte-identical for the same input.
+/// </summary>
+internal sealed record CheckStats(long ElapsedMs, long Queries, long MemoryCacheHits, long DiskCacheHits, long SolverRuns);
 
 /// <summary>
 /// Parses SARIF 2.1 logs produced by <c>dotnet build -p:ErrorLog=build.sarif,version=2.1</c>
@@ -92,7 +100,9 @@ internal static class ElmSarifPresenter
                     var bannerIdx = normalized.IndexOf("\n-- ", StringComparison.Ordinal);
                     var summary = normalized.Substring(0, bannerIdx).Trim();
                     var elmBody = normalized.Substring(bannerIdx + 1);
-                    presented.Add(new PresentedDiagnostic(ruleId, severity, filePath, startLine, startCol, summary, elmBody));
+                    var symbol = DiagnosticFacts.EnclosingSymbol(compilation, filePath, startLine, startCol);
+                    presented.Add(new PresentedDiagnostic(ruleId, severity, filePath, startLine, startCol, summary, elmBody,
+                        DiagnosticFacts.From(ReadCustomProperties(r), elmBody, symbol)));
                     continue;
                 }
 
@@ -174,6 +184,23 @@ internal static class ElmSarifPresenter
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>Reads the diagnostic properties Roslyn writes to SARIF as <c>properties.customProperties</c>.</summary>
+    private static IReadOnlyDictionary<string, string?>? ReadCustomProperties(JsonElement result)
+    {
+        if (!result.TryGetProperty("properties", out var props) || props.ValueKind != JsonValueKind.Object ||
+            !props.TryGetProperty("customProperties", out var custom) || custom.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var dict = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var p in custom.EnumerateObject())
+        {
+            dict[p.Name] = p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText();
+        }
+        return dict;
     }
 
     private static string FormatFromDiskSnippet(

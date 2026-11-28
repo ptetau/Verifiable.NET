@@ -159,7 +159,7 @@ dotnet run --project src/Verifiable.Query -c Release -- ask `
 
 - **If it holds:** Z3 returns the minimal proof core (`-- QUERY HOLDS`), listing the exact `[Invariant]`, `[TypeAlias<T>]`, and `Spec.*` rules responsible—along with their `file:line` and plain-English spirit strings.
 - **If it fails:** Z3 returns `-- QUERY REFUTED` with a concrete counterexample (`from = ...`, `amount = ...`, `result = ...`) and the exact `return` line where it happens.
-- **Agent-friendly:** Add `--format json` or set `VERIFIABLE_AGENT=1` for single-line `<verifiable-query-result>{...}</verifiable-query-result>` output and deterministic exit codes (`0` holds, `1` refuted, `2` inconclusive, `3` expression/load error, `4` Z3 missing).
+- **Agent-friendly:** Add `--format json` or set `VERIFIABLE_AGENT=1` for single-line `<verifiable-query-result>{...}</verifiable-query-result>` output and exit codes that mean the same on every command (`0` proved, `1` refuted, `2` undecided, `3` input error, `4` tool missing). JSON follows the published schemas in `docs/schemas`.
 
 ---
 

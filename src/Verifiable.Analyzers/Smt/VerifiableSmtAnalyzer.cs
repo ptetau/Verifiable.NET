@@ -46,6 +46,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var msbuildClosedEnums);
             globalOptions.TryGetValue("build_property.VerifiableNonDefaultImmutableArrays", out var msbuildNonDefaultImmArr);
             globalOptions.TryGetValue("build_property.VerifiableAllowMissingZ3", out var msbuildAllowMissingZ3);
+            globalOptions.TryGetValue("build_property.VerifiableScope", out var msbuildScope);
+            globalOptions.TryGetValue("build_property.VerifiableZ3TimeoutMs", out var msbuildTimeout);
+            var scope = ParseScope(msbuildScope);
+            var obligationTimeoutMs = int.TryParse(msbuildTimeout, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedTimeout) &&
+                                      parsedTimeout >= 1 && parsedTimeout <= 600_000
+                ? parsedTimeout
+                : (int?)null;
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
@@ -75,6 +82,18 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 if (VerifiableSymbolHelpers.GetScope(method) != VerificationScope.Verifiable)
+                {
+                    return;
+                }
+
+                if (scope is not null && !InScope(method, scope))
+                {
+                    return;
+                }
+
+                // R4: a body with a hole is unwritten. It is reported as VER108 and never proved, so no
+                // proof failure (or, worse, a proof) is reported for the placeholder value.
+                if (opCtx.OperationBlocks.Any(b => Holes.ContainsHole(b.Syntax)))
                 {
                     return;
                 }
@@ -155,7 +174,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 {
                     var script = BuildQueryScript(ob);
                     var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtTerm, ob.GoalClauses);
-                    var result = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
+                    var result = obligationTimeoutMs is int customTimeout
+                        ? Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, timeoutMs: customTimeout, satEvalExprs: satEvals)
+                        : Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
                     var verdict = ProofKernel.Decide(result.Status);
 
                     if (verdict == ObligationVerdict.Proved)
@@ -177,10 +198,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                                     : "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped (`VerifiableAllowMissingZ3` is set).",
                                 explanation: "Checked `VERIFIABLE_Z3_PATH`, `.tools/z3`, `~/.verifiable/z3`, and `PATH`.",
                                 fixHint: blocks
-                                    ? "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`."
-                                    : "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.",
+                                    ? "Run `verifiable-query tools install z3`, install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`."
+                                    : "Run `verifiable-query tools install z3`, install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.",
                                 summary: blocks
-                                    ? "Z3 not found, so proofs were not checked. Install Z3 (Verifiable.Z3 package, scripts/install-z3, VERIFIABLE_Z3_PATH or PATH), or set <VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3> to build without proofs."
+                                    ? "Z3 not found, so proofs were not checked. Install Z3 (`verifiable-query tools install z3`, Verifiable.Z3 package, scripts/install-z3, VERIFIABLE_Z3_PATH or PATH), or set <VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3> to build without proofs."
                                     : "Z3 not found; proof checks skipped because VerifiableAllowMissingZ3 is set.");
                             // Reported once per compilation and without a source location, so a `#pragma` or per-file
                             // setting in whichever file happened to reach Z3 first cannot switch off the whole check.
@@ -238,6 +259,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
                             additionalLocations: additionalLocs,
+                            properties: BuildAgentProperties(method, ob, combinedFixHint, BuildCounterexampleJson(ob, result)),
                             elmFail));
                     }
                     else
@@ -259,6 +281,12 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.SmtSolverUnknown,
                             ob.Location,
+                            additionalLocations: null,
+                            properties: BuildAgentProperties(
+                                method,
+                                ob,
+                                "Fix: Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.",
+                                counterexampleJson: null),
                             elmUnknown));
                     }
                 }
@@ -860,6 +888,78 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         _ => "Fix: Strengthen preconditions or fix the implementation so the contract holds on all paths."
     };
 
+    /// <summary>
+    /// Reads <c>VerifiableScope</c>: a <c>;</c>- or <c>,</c>-separated list of <c>Type</c> or <c>Type.Method</c>
+    /// names (simple or namespace-qualified). Null means every method is checked.
+    /// </summary>
+    internal static IReadOnlyList<string>? ParseScope(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var parts = raw!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToList();
+        return parts.Count == 0 ? null : parts;
+    }
+
+    /// <summary>True when <paramref name="method"/> or its containing type is named in <paramref name="scope"/>.</summary>
+    internal static bool InScope(IMethodSymbol method, IReadOnlyList<string> scope)
+    {
+        var type = method.ContainingType;
+        if (type is null) return false;
+        var simpleType = type.Name;
+        var fullType = type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var memberName = method.MethodKind == MethodKind.PropertyGet || method.MethodKind == MethodKind.PropertySet
+            ? (method.AssociatedSymbol?.Name ?? method.Name)
+            : method.MethodKind == MethodKind.Constructor ? simpleType : method.Name;
+        foreach (var s in scope)
+        {
+            if (s == simpleType || s == fullType ||
+                s == simpleType + "." + memberName || s == fullType + "." + memberName)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Structured facts about a proof obligation, attached to its diagnostic so tools (such as
+    /// <c>verifiable-query check --format json</c>) can report it without parsing the Elm text.
+    /// Keys: <c>Symbol</c>, <c>ObligationKind</c>, <c>Contract</c>, <c>Reason</c>, <c>Counterexample</c>
+    /// (a JSON object of parameter to value), <c>Fix</c>.
+    /// </summary>
+    internal static ImmutableDictionary<string, string?> BuildAgentProperties(
+        IMethodSymbol method,
+        ProofObligation ob,
+        string fixHint,
+        string? counterexampleJson)
+    {
+        var props = ImmutableDictionary.CreateBuilder<string, string?>(StringComparer.Ordinal);
+        props["Symbol"] = $"{method.ContainingType?.Name}.{method.Name}";
+        props["ObligationKind"] = ob.Kind;
+        var clause = ClauseIds.ForLocation(ob.ContractLocation) ?? ClauseIds.ForLocation(ob.Location);
+        if (clause is not null) props["Clause"] = clause;
+        props["Contract"] = ob.ContractText;
+        if (!string.IsNullOrWhiteSpace(ob.Reason)) props["Reason"] = ob.Reason!.Trim();
+        if (counterexampleJson is not null) props["Counterexample"] = counterexampleJson;
+        props["Fix"] = fixHint;
+        return props.ToImmutable();
+    }
+
+    private static string BuildCounterexampleJson(ProofObligation ob, SmtQueryResult result)
+    {
+        var cePairs = new List<string>();
+        foreach (var (paramName, smtName) in ob.TrackedParameters)
+        {
+            if (result.Model.TryGetValue(smtName, out var val))
+            {
+                cePairs.Add($"{JsonString(paramName)}:{JsonString(val)}");
+            }
+        }
+        return "{" + string.Join(",", cePairs) + "}";
+    }
+
     private static string BuildAgentJsonBlock(
         IMethodSymbol method,
         ProofObligation ob,
@@ -898,7 +998,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 case '\r': sb.Append("\\r"); break;
                 case '\n': sb.Append("\\n"); break;
                 case '\t': sb.Append("\\t"); break;
-                default: sb.Append(ch); break;
+                default:
+                    if (ch < 32) sb.Append("\\u").Append(((int)ch).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+                    else sb.Append(ch);
+                    break;
             }
         }
         sb.Append('"');

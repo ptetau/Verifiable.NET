@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/tools.v1.schema.json",
+  "title": "verifiable-query tools status / install result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "platform",
+    "alreadyInstalled",
+    "error",
+    "tools"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ]
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "platform": {
+      "type": "string",
+      "description": "Runtime identifier, e.g. linux-x64."
+    },
+    "alreadyInstalled": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "install only: true when nothing had to be downloaded."
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "message",
+        "fix"
+      ],
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "purpose",
+          "pinnedVersion",
+          "sha256",
+          "installed",
+          "installedVersion",
+          "versionMatches",
+          "location",
+          "installCommand"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "pinnedVersion": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pinned SHA-256 of this platform's archive; null if the platform has no pinned build."
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "installedVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "versionMatches": {
+            "type": "boolean"
+          },
+          "location": {
+            "enum": [
+              "not_found",
+              "VERIFIABLE_Z3_PATH",
+              "managed",
+              "repository",
+              "PATH",
+              "--z3"
+            ],
+            "description": "Where the tool was found, without machine paths."
+          },
+          "installCommand": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

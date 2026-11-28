@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/fix.v1.schema.json",
+  "title": "verifiable-query fix result: code fixes as text edits",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "applied",
+    "fixes",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ]
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "applied": {
+      "type": "boolean",
+      "description": "True when --apply wrote the edits to disk."
+    },
+    "fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "symbol",
+          "file",
+          "line",
+          "title",
+          "provider",
+          "edits"
+        ],
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "edits": {
+            "type": "array",
+            "description": "Positions are 1-based, in the text before this fix; end is exclusive.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "start",
+                "end",
+                "newText"
+              ],
+              "properties": {
+                "file": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "line",
+                    "column"
+                  ],
+                  "properties": {
+                    "line": {
+                      "type": "integer"
+                    },
+                    "column": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "end": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "line",
+                    "column"
+                  ],
+                  "properties": {
+                    "line": {
+                      "type": "integer"
+                    },
+                    "column": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "newText": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    }
+  }
+}

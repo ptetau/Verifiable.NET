@@ -100,11 +100,11 @@ internal static class QueryFormatter
         return sb.ToString();
     }
 
-    public static string FormatInventory(SymbolInventory inv, string format, bool agentMode)
+    public static string FormatInventory(SymbolInventory inv, string format, bool agentMode, int limit = AgentOutput.DefaultLimit, int offset = 0)
     {
         if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
         {
-            return BuildInventoryJson(inv, indented: true);
+            return BuildInventoryJson(inv, indented: true, limit, offset);
         }
 
         var sb = new StringBuilder();
@@ -146,7 +146,7 @@ internal static class QueryFormatter
         {
             sb.AppendLine();
             sb.Append("<verifiable-symbols>")
-                .Append(BuildInventoryJson(inv, indented: false))
+                .Append(BuildInventoryJson(inv, indented: false, limit, offset))
                 .Append("</verifiable-symbols>");
         }
 
@@ -319,196 +319,163 @@ internal static class QueryFormatter
 
     private static string BuildJsonPayload(QueryReport report, bool indented)
     {
-        var statusStr = report.Status switch
+        var outcome = AgentOutput.FromQueryStatus(report.Status);
+        return AgentOutput.Write(indented, w =>
         {
-            QueryOutcomeStatus.Proved => "proved",
-            QueryOutcomeStatus.Refuted => "refuted",
-            QueryOutcomeStatus.Inconclusive => "inconclusive",
-            QueryOutcomeStatus.Z3NotFound => "z3_not_found",
-            _ => "error"
-        };
-
-        var sep = indented ? "\n" : string.Empty;
-        var i1 = indented ? "  " : string.Empty;
-        var i2 = indented ? "    " : string.Empty;
-        var i3 = indented ? "      " : string.Empty;
-
-        var sb = new StringBuilder();
-        sb.Append('{').Append(sep);
-        sb.Append(i1).Append("\"command\":").Append(JsonString(report.Command)).Append(',').Append(sep);
-        sb.Append(i1).Append("\"status\":").Append(JsonString(statusStr)).Append(',').Append(sep);
-        sb.Append(i1).Append("\"exitCode\":").Append((int)report.Status).Append(',').Append(sep);
-        sb.Append(i1).Append("\"claim\":").Append(JsonString(report.Claim)).Append(',').Append(sep);
-        if (!string.IsNullOrWhiteSpace(report.Assume))
-        {
-            sb.Append(i1).Append("\"assume\":").Append(JsonString(report.Assume!)).Append(',').Append(sep);
-        }
-        if (!string.IsNullOrWhiteSpace(report.Because))
-        {
-            sb.Append(i1).Append("\"because\":").Append(JsonString(report.Because!)).Append(',').Append(sep);
-        }
-        if (!string.IsNullOrWhiteSpace(report.TargetType))
-        {
-            sb.Append(i1).Append("\"targetType\":").Append(JsonString(report.TargetType!)).Append(',').Append(sep);
-        }
-        if (!string.IsNullOrWhiteSpace(report.ErrorMessage))
-        {
-            sb.Append(i1).Append("\"error\":").Append(JsonString(report.ErrorMessage!)).Append(',').Append(sep);
-        }
-        if (!string.IsNullOrWhiteSpace(report.FixHint))
-        {
-            sb.Append(i1).Append("\"fix\":").Append(JsonString(report.FixHint!)).Append(',').Append(sep);
-        }
-
-        sb.Append(i1).Append("\"results\":[").Append(sep);
-        for (var rIdx = 0; rIdx < report.Results.Count; rIdx++)
-        {
-            var r = report.Results[rIdx];
-            var rStatus = r.Status switch
+            w.WriteStartObject();
+            w.WriteString("schema", AgentOutput.SchemaId("query"));
+            w.WriteString("command", report.Command);
+            w.WriteString("status", AgentOutput.StatusWord(outcome));
+            w.WriteNumber("exitCode", (int)outcome);
+            w.WriteString("claim", report.Claim);
+            AgentOutput.StringOrNull(w, "assume", NullIfBlank(report.Assume));
+            AgentOutput.StringOrNull(w, "because", NullIfBlank(report.Because));
+            AgentOutput.StringOrNull(w, "target", NullIfBlank(report.TargetType));
+            if (report.ErrorTitle is not null || !string.IsNullOrWhiteSpace(report.ErrorMessage))
             {
-                QueryOutcomeStatus.Proved => "proved",
-                QueryOutcomeStatus.Refuted => "refuted",
-                QueryOutcomeStatus.Inconclusive => "inconclusive",
-                QueryOutcomeStatus.Z3NotFound => "z3_not_found",
-                _ => "error"
-            };
-            sb.Append(i2).Append('{').Append(sep);
-            sb.Append(i3).Append("\"method\":").Append(JsonString(r.Method)).Append(',').Append(sep);
-            sb.Append(i3).Append("\"returnType\":").Append(JsonString(r.ReturnType)).Append(',').Append(sep);
-            sb.Append(i3).Append("\"status\":").Append(JsonString(rStatus)).Append(',').Append(sep);
-            sb.Append(i3).Append("\"vacuous\":").Append(r.Vacuous ? "true" : "false").Append(',').Append(sep);
-            sb.Append(i3).Append("\"pathsChecked\":").Append(r.PathsChecked).Append(',').Append(sep);
-            if (!string.IsNullOrEmpty(r.SmtHash))
+                w.WriteStartObject("error");
+                AgentOutput.StringOrNull(w, "title", report.ErrorTitle);
+                AgentOutput.StringOrNull(w, "message", NullIfBlank(report.ErrorMessage));
+                AgentOutput.StringOrNull(w, "fix", NullIfBlank(report.FixHint));
+                w.WriteEndObject();
+            }
+            else
             {
-                var shortHash = r.SmtHash!.Length >= 12 ? r.SmtHash.Substring(0, 12) : r.SmtHash;
-                sb.Append(i3).Append("\"smtHash\":").Append(JsonString(shortHash)).Append(',').Append(sep);
+                w.WriteNull("error");
             }
 
-            sb.Append(i3).Append("\"reasons\":[");
-            for (var j = 0; j < r.Reasons.Count; j++)
+            w.WriteStartArray("results");
+            foreach (var r in report.Results)
             {
-                var pr = r.Reasons[j];
-                if (j > 0) sb.Append(',');
-                sb.Append("{\"kind\":").Append(JsonString(pr.Kind))
-                    .Append(",\"label\":").Append(JsonString(pr.Label));
-                if (!string.IsNullOrWhiteSpace(pr.Spirit))
-                    sb.Append(",\"spirit\":").Append(JsonString(pr.Spirit!));
-                if (!string.IsNullOrWhiteSpace(pr.FilePath))
-                    sb.Append(",\"file\":").Append(JsonString(pr.FilePath!)).Append(",\"line\":").Append(pr.Line);
-                sb.Append('}');
-            }
-            sb.Append("],").Append(sep);
+                var rOutcome = AgentOutput.FromQueryStatus(r.Status);
+                var (file, line) = Coords(r.MethodLocation);
+                w.WriteStartObject();
+                w.WriteString("method", r.Method);
+                w.WriteString("returnType", r.ReturnType);
+                w.WriteString("status", AgentOutput.StatusWord(rOutcome));
+                w.WriteBoolean("vacuous", r.Vacuous);
+                w.WriteNumber("pathsChecked", r.PathsChecked);
+                w.WriteString("file", file);
+                w.WriteNumber("line", line);
+                AgentOutput.StringOrNull(w, "smtHash",
+                    string.IsNullOrEmpty(r.SmtHash) ? null : r.SmtHash!.Length >= 12 ? r.SmtHash.Substring(0, 12) : r.SmtHash);
 
-            sb.Append(i3).Append("\"counterexamples\":[");
-            for (var c = 0; c < r.Counterexamples.Count; c++)
-            {
-                var ce = r.Counterexamples[c];
-                if (c > 0) sb.Append(',');
-                sb.Append("{\"file\":").Append(JsonString(ce.ReturnFile))
-                    .Append(",\"line\":").Append(ce.ReturnLine)
-                    .Append(",\"values\":{");
-                var k = 0;
-                foreach (var kv in ce.Values)
+                w.WriteStartArray("reasons");
+                foreach (var pr in r.Reasons)
                 {
-                    if (k++ > 0) sb.Append(',');
-                    sb.Append(JsonString(kv.Key)).Append(':').Append(JsonString(kv.Value));
+                    w.WriteStartObject();
+                    w.WriteString("kind", pr.Kind);
+                    w.WriteString("label", pr.Label);
+                    AgentOutput.StringOrNull(w, "spirit", NullIfBlank(pr.Spirit));
+                    AgentOutput.StringOrNull(w, "file", string.IsNullOrWhiteSpace(pr.FilePath) ? null : AgentOutput.NormalizePath(pr.FilePath));
+                    w.WriteNumber("line", pr.Line);
+                    w.WriteEndObject();
                 }
-                sb.Append("}}");
-            }
-            sb.Append(']');
+                w.WriteEndArray();
 
-            if (!string.IsNullOrWhiteSpace(r.ErrorMessage))
-            {
-                sb.Append(',').Append(sep).Append(i3).Append("\"error\":").Append(JsonString(r.ErrorMessage!));
-            }
-            if (!string.IsNullOrWhiteSpace(r.Hint))
-            {
-                sb.Append(',').Append(sep).Append(i3).Append("\"hint\":").Append(JsonString(r.Hint!));
-            }
+                w.WriteStartArray("counterexamples");
+                foreach (var ce in r.Counterexamples)
+                {
+                    w.WriteStartObject();
+                    w.WriteString("file", AgentOutput.NormalizePath(ce.ReturnFile));
+                    w.WriteNumber("line", ce.ReturnLine);
+                    w.WriteStartObject("values");
+                    foreach (var kv in ce.Values.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                    {
+                        w.WriteString(kv.Key, kv.Value);
+                    }
+                    w.WriteEndObject();
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
 
-            sb.Append(sep).Append(i2).Append('}');
-            if (rIdx + 1 < report.Results.Count) sb.Append(',');
-            sb.Append(sep);
-        }
-
-        sb.Append(i1).Append(']').Append(sep);
-        sb.Append('}');
-        return sb.ToString();
+                AgentOutput.StringOrNull(w, "error", NullIfBlank(r.ErrorMessage));
+                AgentOutput.StringOrNull(w, "fix", NullIfBlank(r.Hint));
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteEndObject();
+        });
     }
 
-    private static string BuildInventoryJson(SymbolInventory inv, bool indented)
+    private static string? NullIfBlank(string? text) => string.IsNullOrWhiteSpace(text) ? null : text;
+
+    private static (string File, int Line) Coords(Location loc)
     {
-        var sep = indented ? "\n" : string.Empty;
-        var i1 = indented ? "  " : string.Empty;
-        var sb = new StringBuilder();
-        sb.Append('{').Append(sep);
-
-        sb.Append(i1).Append("\"constrainedTypes\":[");
-        for (var i = 0; i < inv.ConstrainedTypes.Count; i++)
-        {
-            var c = inv.ConstrainedTypes[i];
-            if (i > 0) sb.Append(',');
-            sb.Append("{\"name\":").Append(JsonString(c.Name))
-                .Append(",\"underlyingType\":").Append(JsonString(c.UnderlyingType))
-                .Append(",\"predicate\":").Append(JsonString(c.Predicate));
-            if (!string.IsNullOrWhiteSpace(c.Description))
-                sb.Append(",\"description\":").Append(JsonString(c.Description!));
-            sb.Append(",\"file\":").Append(JsonString(c.FilePath)).Append(",\"line\":").Append(c.Line).Append('}');
-        }
-        sb.Append("],").Append(sep);
-
-        sb.Append(i1).Append("\"invariants\":[");
-        for (var i = 0; i < inv.Invariants.Count; i++)
-        {
-            var x = inv.Invariants[i];
-            if (i > 0) sb.Append(',');
-            sb.Append("{\"type\":").Append(JsonString(x.ContainingType))
-                .Append(",\"member\":").Append(JsonString(x.MemberName));
-            if (!string.IsNullOrWhiteSpace(x.Description))
-                sb.Append(",\"description\":").Append(JsonString(x.Description!));
-            sb.Append(",\"file\":").Append(JsonString(x.FilePath)).Append(",\"line\":").Append(x.Line).Append('}');
-        }
-        sb.Append("],").Append(sep);
-
-        sb.Append(i1).Append("\"methods\":[");
-        for (var i = 0; i < inv.Methods.Count; i++)
-        {
-            var m = inv.Methods[i];
-            if (i > 0) sb.Append(',');
-            sb.Append("{\"name\":").Append(JsonString(m.DisplayName))
-                .Append(",\"signature\":").Append(JsonString(m.Signature))
-                .Append(",\"returnType\":").Append(JsonString(m.ReturnType))
-                .Append(",\"isInboundPort\":").Append(m.IsInboundPort ? "true" : "false")
-                .Append(",\"requiresCount\":").Append(m.RequiresCount)
-                .Append(",\"ensuresCount\":").Append(m.EnsuresCount)
-                .Append(",\"file\":").Append(JsonString(m.FilePath))
-                .Append(",\"line\":").Append(m.Line).Append('}');
-        }
-        sb.Append(']').Append(sep);
-        sb.Append('}');
-        return sb.ToString();
+        if (loc == Location.None || !loc.IsInSource) return (string.Empty, 0);
+        var span = loc.GetMappedLineSpan();
+        return (AgentOutput.NormalizePath(span.Path), span.StartLinePosition.Line + 1);
     }
 
-    private static string JsonString(string text)
+    private static string BuildInventoryJson(SymbolInventory inv, bool indented, int limit, int offset)
     {
-        var sb = new StringBuilder(text.Length + 4);
-        sb.Append('"');
-        foreach (var ch in text)
+        // One page spans the three lists in order: constrained types, then invariants, then methods.
+        var total = inv.ConstrainedTypes.Count + inv.Invariants.Count + inv.Methods.Count;
+        var page = AgentOutput.Slice(total, offset, limit);
+        bool InPage(int globalIndex) => globalIndex >= page.Offset && globalIndex < page.Offset + page.Count;
+
+        return AgentOutput.Write(indented, w =>
         {
-            switch (ch)
+            w.WriteStartObject();
+            w.WriteString("schema", AgentOutput.SchemaId("list"));
+            w.WriteString("command", "list");
+            w.WriteString("status", AgentOutput.StatusWord(AgentOutcome.Proved));
+            w.WriteNumber("exitCode", 0);
+
+            var g = 0;
+            w.WriteStartArray("constrainedTypes");
+            foreach (var c in inv.ConstrainedTypes)
             {
-                case '\\': sb.Append("\\\\"); break;
-                case '"': sb.Append("\\\""); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\t': sb.Append("\\t"); break;
-                default:
-                    if (ch < 32) sb.Append($"\\u{(int)ch:x4}");
-                    else sb.Append(ch);
-                    break;
+                if (InPage(g++))
+                {
+                    w.WriteStartObject();
+                    w.WriteString("name", c.Name);
+                    w.WriteString("underlyingType", c.UnderlyingType);
+                    w.WriteString("predicate", c.Predicate);
+                    AgentOutput.StringOrNull(w, "description", NullIfBlank(c.Description));
+                    w.WriteString("file", AgentOutput.NormalizePath(c.FilePath));
+                    w.WriteNumber("line", c.Line);
+                    w.WriteEndObject();
+                }
             }
-        }
-        sb.Append('"');
-        return sb.ToString();
+            w.WriteEndArray();
+
+            w.WriteStartArray("invariants");
+            foreach (var x in inv.Invariants)
+            {
+                if (InPage(g++))
+                {
+                    w.WriteStartObject();
+                    w.WriteString("type", x.ContainingType);
+                    w.WriteString("member", x.MemberName);
+                    AgentOutput.StringOrNull(w, "description", NullIfBlank(x.Description));
+                    w.WriteString("file", AgentOutput.NormalizePath(x.FilePath));
+                    w.WriteNumber("line", x.Line);
+                    w.WriteEndObject();
+                }
+            }
+            w.WriteEndArray();
+
+            w.WriteStartArray("methods");
+            foreach (var m in inv.Methods)
+            {
+                if (InPage(g++))
+                {
+                    w.WriteStartObject();
+                    w.WriteString("name", m.DisplayName);
+                    w.WriteString("signature", m.Signature);
+                    w.WriteString("returnType", m.ReturnType);
+                    w.WriteBoolean("isInboundPort", m.IsInboundPort);
+                    w.WriteNumber("requiresCount", m.RequiresCount);
+                    w.WriteNumber("ensuresCount", m.EnsuresCount);
+                    w.WriteString("file", AgentOutput.NormalizePath(m.FilePath));
+                    w.WriteNumber("line", m.Line);
+                    w.WriteEndObject();
+                }
+            }
+            w.WriteEndArray();
+            AgentOutput.WritePage(w, page, limit);
+            w.WriteEndObject();
+        });
     }
 }

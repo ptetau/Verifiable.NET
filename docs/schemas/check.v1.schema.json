@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/check.v1.schema.json",
+  "title": "verifiable-query check / build result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "errors",
+    "warnings",
+    "suppressedNullableWarnings",
+    "diagnostics",
+    "page",
+    "stats"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier and version, always the first property."
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "Same word for the same exit code on every command."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "0 proved, 1 refuted, 2 undecided, 3 input_error, 4 tool_missing."
+    },
+    "errors": {
+      "type": "integer"
+    },
+    "warnings": {
+      "type": "integer"
+    },
+    "suppressedNullableWarnings": {
+      "type": "integer"
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "severity",
+          "clause",
+          "symbol",
+          "file",
+          "line",
+          "column",
+          "obligation",
+          "contract",
+          "reason",
+          "counterexample",
+          "fix",
+          "summary"
+        ],
+        "properties": {
+          "rule": {
+            "type": "string",
+            "description": "Stable rule ID, e.g. VER102 or CS0029."
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ]
+          },
+          "clause": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Spec clause ID the failing construct carries (R1), or null."
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Type.Member the diagnostic is about."
+          },
+          "file": {
+            "type": "string",
+            "description": "Relative to the current directory, forward slashes."
+          },
+          "line": {
+            "type": "integer"
+          },
+          "column": {
+            "type": "integer"
+          },
+          "obligation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proof step this is about (Postcondition, Overflow, LoopInvariantStep, ...), so a timeout names exactly what to split."
+          },
+          "contract": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "counterexample": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "fix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    },
+    "stats": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "elapsedMs",
+        "queries",
+        "memoryCacheHits",
+        "diskCacheHits",
+        "solverRuns"
+      ],
+      "description": "Only with --stats; null otherwise. Differs between runs, so it is excluded from byte-identical output.",
+      "properties": {
+        "elapsedMs": {
+          "type": "integer"
+        },
+        "queries": {
+          "type": "integer"
+        },
+        "memoryCacheHits": {
+          "type": "integer"
+        },
+        "diskCacheHits": {
+          "type": "integer"
+        },
+        "solverRuns": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

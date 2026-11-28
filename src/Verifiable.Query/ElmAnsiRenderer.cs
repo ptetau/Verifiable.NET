@@ -37,7 +37,8 @@ internal static class ElmAnsiRenderer
 
     public static bool ShouldUseColor(ElmColorMode mode, string format, bool agentMode, bool isRedirected)
     {
-        if (format.Equals("json", StringComparison.OrdinalIgnoreCase))
+        // Agents never get ANSI escapes, whatever --color says: they waste context and break parsers.
+        if (format.Equals("json", StringComparison.OrdinalIgnoreCase) || agentMode)
         {
             return false;
         }

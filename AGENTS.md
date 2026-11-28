@@ -33,6 +33,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install-z3.ps1
 bash scripts/install-z3.sh
 ```
 
+Or, with only the .NET SDK, use the one front door: `verifiable-query tools install` (pinned Z3, SHA-256 checked; `verifiable-query tools status` shows what is installed).
+
 ## 3. Reading Machine-Readable Failure Blocks
 
 ### Z3 SMT Proof Failure (`VER102`)
@@ -51,7 +53,7 @@ Run pure .NET Core formal queries without modifying source files (`verifiable-qu
 - `check-invariant --project <p> --type <TypeName> --expr <lambda> [--assume <expr>]`
 - `list --project <p>` (or `--file` / `--stdin`)
 
-Exit codes are deterministic (`0`=proved, `1`=refuted, `2`=inconclusive, `3`=load/bind error, `4`=Z3 missing). With `--format json`, pure JSON is emitted; with `--format elm` + `VERIFIABLE_AGENT=1`, Elm output includes a single-line `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` for `list`).
+Exit codes are the same on every command (`0`=proved, `1`=refuted, `2`=undecided, `3`=input error, `4`=tool missing), and JSON `status` gives the same word. JSON follows the versioned schemas in `docs/schemas`, pages with `--limit`/`--cursor`, and is byte-identical for the same input (see `docs/agents.md` §4). With `--format json`, pure JSON is emitted; with `--format elm` + `VERIFIABLE_AGENT=1`, Elm output includes a single-line `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` for `list`).
 
 ## 4. Incremental Migration Workflow (`[VerifiableCandidate]`)
 

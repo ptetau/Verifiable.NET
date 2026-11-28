@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/holes.v1.schema.json",
+  "title": "verifiable-query holes result: the work list of unwritten bodies",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "holes",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "refuted while any hole remains."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "holes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "symbol",
+          "clause",
+          "clauseText",
+          "signature",
+          "contracts",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "rule": {
+            "const": "VER108",
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "clause": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clauseText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "From the clause manifest, when one is given."
+          },
+          "signature": {
+            "type": "string"
+          },
+          "contracts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    }
+  }
+}

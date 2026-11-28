@@ -9,8 +9,21 @@ using Xunit;
 
 namespace Verifiable.Query.Tests;
 
+[Collection("CurrentDirectory")]
 public sealed class QueryTests
 {
+    /// <summary>
+    /// Runs <paramref name="body"/> with <c>VERIFIABLE_AGENT</c> unset, for tests that check human (coloured) output
+    /// even when the whole suite runs in agent mode.
+    /// </summary>
+    private static void WithoutAgentMode(Action body)
+    {
+        var old = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
+        Environment.SetEnvironmentVariable("VERIFIABLE_AGENT", null);
+        try { body(); }
+        finally { Environment.SetEnvironmentVariable("VERIFIABLE_AGENT", old); }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -645,7 +658,7 @@ public sealed class QueryTests
             }
             """;
         var impStaticRes = RunCli(["check", "--stdin", "--color", "never"], missingGenericStaticImport);
-        Assert.Equal(1, impStaticRes.ExitCode);
+        Assert.Equal(3, impStaticRes.ExitCode);
         Assert.Contains("-- MISSING IMPORT", impStaticRes.Stderr);
         Assert.Contains("ImmutableList<int>", impStaticRes.Stderr);
         Assert.Contains("using System.Collections.Immutable;", impStaticRes.Stderr);
@@ -728,7 +741,7 @@ public sealed class QueryTests
     }
 
     [Fact]
-    public void CheckCommand_RunsAnalyzersSuppressorAndAnsiColorOutput()
+    public void CheckCommand_RunsAnalyzersSuppressorAndAnsiColorOutput() => WithoutAgentMode(() =>
     {
         // Clean code whose CS8602 is proved safe and suppressed by Z3
         const string cleanWithNullProof = """
@@ -783,11 +796,11 @@ public sealed class QueryTests
         Assert.DoesNotContain("\x1b[", failJson.Stdout, StringComparison.Ordinal);
         using var doc = JsonDocument.Parse(failJson.Stdout);
         Assert.Equal(1, doc.RootElement.GetProperty("errors").GetInt32());
-        Assert.Equal("VER102", doc.RootElement.GetProperty("diagnostics")[0].GetProperty("id").GetString());
-    }
+        Assert.Equal("VER102", doc.RootElement.GetProperty("diagnostics")[0].GetProperty("rule").GetString());
+    });
 
     [Fact]
-    public void CheckSarif_PresentsMultiLineVerAndEnrichedCsDiagnosticsWithColor()
+    public void CheckSarif_PresentsMultiLineVerAndEnrichedCsDiagnosticsWithColor() => WithoutAgentMode(() =>
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"verifiable-sarif-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
@@ -848,7 +861,7 @@ public sealed class QueryTests
             File.WriteAllText(sarifPath, sarifJson);
 
             var res = RunCli(["check", "--sarif", sarifPath, "--file", csPath, "--color", "always"]);
-            Assert.Equal(1, res.ExitCode);
+            Assert.Equal(3, res.ExitCode); // the log holds a CS compile error: an input error (R12)
             Assert.Contains("-- PROOF FAILED", res.Stderr);
             Assert.Contains("-- TYPE MISMATCH", res.Stderr);
             Assert.Contains("0.15m", res.Stderr);
@@ -859,5 +872,5 @@ public sealed class QueryTests
         {
             Directory.Delete(tempDir, recursive: true);
         }
-    }
+    });
 }

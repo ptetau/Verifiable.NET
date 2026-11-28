@@ -242,6 +242,8 @@ internal static class VerifiableSymbolHelpers
                 if (path.EndsWith(".Refined.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".TypeAlias.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".Gate.g.cs", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".Dated.g.cs", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".Effects.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".InboundPort.g.cs", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".ContractMetadata.g.cs", StringComparison.OrdinalIgnoreCase))
                 {

@@ -10,6 +10,7 @@ internal static class VerifiableDescriptors
     private const string LinearCategory = "Verifiable.LinearTypes";
     private const string SmtCategory = "Verifiable.SMT";
     private const string SpecQualityCategory = "Verifiable.SpecQuality";
+    private const string ClauseCategory = "Verifiable.Clauses";
 
     public static readonly DiagnosticDescriptor HeapAliasingOrMutableState = new(
         id: "VER001",
@@ -130,6 +131,92 @@ internal static class VerifiableDescriptors
         category: SpecQualityCategory,
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor UnwrittenBody = new(
+        id: "VER108",
+        title: "Method body has not been written yet (Spec.Hole)",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor LockedContractChanged = new(
+        id: "VER109",
+        title: "Generated contract was changed",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor InvalidContractLock = new(
+        id: "VER110",
+        title: "Contract lock file cannot be read",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor InvalidMigration = new(
+        id: "VER112",
+        title: "Migration cannot be proved total",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor MigrationDropsUnnamedField = new(
+        id: "VER113",
+        title: "Migration drops a field without naming it",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor MigrationDropsListIsWrong = new(
+        id: "VER114",
+        title: "Migration Drops list names a field that is read or does not exist",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ClauseNotImplemented = new(
+        id: "VER401",
+        title: "Spec clause has no code",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor ConstructWithoutClause = new(
+        id: "VER402",
+        title: "Contract or rule names no spec clause",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor UnknownClause = new(
+        id: "VER403",
+        title: "Contract or rule names a clause the spec does not have",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor InvalidClauseManifest = new(
+        id: "VER404",
+        title: "Clause manifest cannot be read",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     public static Diagnostic CreateScoped(
         DiagnosticDescriptor descriptor,

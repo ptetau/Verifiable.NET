@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/export.v1.schema.json",
+  "title": "verifiable-query export: every contract, type rule and invariant as expression trees",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "file",
+    "contracts",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ]
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "file": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Where --out wrote the full export, or null."
+    },
+    "contracts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "kind",
+          "clause",
+          "reason",
+          "text",
+          "result",
+          "guard",
+          "expr",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Type.Member(param types) for method contracts; Type for type rules; Type.Member for invariants."
+          },
+          "kind": {
+            "enum": [
+              "requires",
+              "ensures",
+              "loopInvariant",
+              "decreases",
+              "typeAlias",
+              "refined",
+              "invariant"
+            ]
+          },
+          "clause": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "description": "The contract as written, on one line."
+          },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ensures only: the name the predicate gives the return value."
+          },
+          "guard": {
+            "$id": "#expr",
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "op",
+              "type"
+            ],
+            "description": "RequiresWhen / EnsuresWhen: the condition under which the contract applies; else null.",
+            "properties": {
+              "op": {
+                "enum": [
+                  "and",
+                  "or",
+                  "not",
+                  "neg",
+                  "eq",
+                  "ne",
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge",
+                  "add",
+                  "sub",
+                  "mul",
+                  "div",
+                  "mod",
+                  "bitAnd",
+                  "bitOr",
+                  "xor",
+                  "coalesce",
+                  "cond",
+                  "implies",
+                  "forall",
+                  "exists",
+                  "const",
+                  "param",
+                  "local",
+                  "member",
+                  "static",
+                  "name",
+                  "result",
+                  "call",
+                  "index",
+                  "cast",
+                  "isNull",
+                  "notNull",
+                  "csharp"
+                ]
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "expr": {
+            "$id": "#expr",
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "op",
+              "type"
+            ],
+            "description": "An expression tree node. Children: left/right (binary, implies), operand (not, neg, cast, isNull, notNull), test/then/else (cond), target/name (member), target/method/args (call), target/index (index), variable/from/to/body (forall, exists); leaves: const (value), param/local/result/name (name), static (name), csharp (text: a form with no node yet).",
+            "properties": {
+              "op": {
+                "enum": [
+                  "and",
+                  "or",
+                  "not",
+                  "neg",
+                  "eq",
+                  "ne",
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge",
+                  "add",
+                  "sub",
+                  "mul",
+                  "div",
+                  "mod",
+                  "bitAnd",
+                  "bitOr",
+                  "xor",
+                  "coalesce",
+                  "cond",
+                  "implies",
+                  "forall",
+                  "exists",
+                  "const",
+                  "param",
+                  "local",
+                  "member",
+                  "static",
+                  "name",
+                  "result",
+                  "call",
+                  "index",
+                  "cast",
+                  "isNull",
+                  "notNull",
+                  "csharp"
+                ]
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    }
+  }
+}
