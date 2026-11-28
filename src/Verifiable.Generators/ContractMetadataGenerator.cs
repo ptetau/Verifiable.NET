@@ -6,6 +6,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Verifiable.Shared;
 
 namespace Verifiable.Generators;
 
@@ -194,9 +195,14 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
             return ImmutableArray<ExportedEntry>.Empty;
         }
 
-        // 3. Spec.Requires / Spec.Ensures contracts
+        // 3. Spec.Requires / Spec.Ensures contracts. Only a Requires in the leading contract block is a
+        // precondition (the analyzer reports any other as VER101), so only those are exported.
         if (md.Body is { } body)
         {
+            var leading = new HashSet<InvocationExpressionSyntax>(LeadingContractBlock.GetLeadingSpecCalls(
+                md,
+                c => model.GetSymbolInfo(c).Symbol is IMethodSymbol m &&
+                     m.ContainingType?.ToDisplayString() == "Verifiable.Contracts.Spec"));
             foreach (var stmt in body.Statements)
             {
                 if (stmt is not ExpressionStatementSyntax exprStmt ||
@@ -224,6 +230,11 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                     {
                         because = bStr;
                     }
+                }
+
+                if (target.Name is "Requires" or "RequiresWhen" && !leading.Contains(inv))
+                {
+                    continue;
                 }
 
                 if (target.Name == "Requires")

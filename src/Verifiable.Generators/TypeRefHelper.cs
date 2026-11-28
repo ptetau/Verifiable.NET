@@ -5,6 +5,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Verifiable.Shared;
 
 namespace Verifiable.Generators;
 
@@ -189,16 +190,11 @@ internal static class TypeRefHelper
         var result = new List<(ExpressionSyntax Condition, string? Because)>();
         foreach (var synRef in method.DeclaringSyntaxReferences)
         {
-            if (synRef.GetSyntax() is MethodDeclarationSyntax md && md.Body is { } body)
+            if (synRef.GetSyntax() is MethodDeclarationSyntax md)
             {
-                foreach (var stmt in body.Statements)
+                foreach (var inv in LeadingContractBlock.GetLeadingSpecCalls(md, c => TryMatchSpecMethodName(c.Expression, out _)))
                 {
-                    if (stmt is not ExpressionStatementSyntax exprStmt ||
-                        exprStmt.Expression is not InvocationExpressionSyntax inv ||
-                        !TryMatchSpecMethodName(inv.Expression, out var specMethodName))
-                    {
-                        break;
-                    }
+                    TryMatchSpecMethodName(inv.Expression, out var specMethodName);
 
                     if (specMethodName == "Requires" && inv.ArgumentList.Arguments.Count is 1 or 2)
                     {

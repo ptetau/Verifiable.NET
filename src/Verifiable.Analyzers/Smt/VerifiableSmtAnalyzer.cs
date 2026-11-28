@@ -79,6 +79,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
+                MisplacedPreconditions.Report(opCtx, method);
+
                 var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
                 var nonDefaultImmArr = globalNonDefaultImmArr;
                 if (sourceTree is not null &&
@@ -391,7 +393,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 loc,
                 $"No input satisfies the assumptions of `{Display}`, so Z3 would \"prove\" any contract here, true or false. Its proofs have been rejected.",
                 explanation: conflict,
-                fixHint: "Fix: Correct the conflicting rules (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, or a callee's `Spec.Ensures` / `[PureAxiom]`) so that at least one input satisfies them all. Note that a `Spec.Requires` anywhere in a method counts as an entry precondition.",
+                fixHint: "Fix: Correct the conflicting rules (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, or a callee's `Spec.Ensures` / `[PureAxiom]`) so that at least one input satisfies them all. Only the `Spec.Requires` calls at the top of a method count as entry preconditions.",
                 summary: $"Premises of {Display} contradict each other, so its proofs are vacuous" +
                          (lines.Count > 0 ? ": " + OneLine(string.Join("; ", lines)) : "."));
             opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, loc, elm));

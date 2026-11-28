@@ -10,6 +10,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FlowAnalysis;
 using Microsoft.CodeAnalysis.Operations;
+using Verifiable.Shared;
 
 namespace Verifiable.Analyzers.Smt;
 
@@ -433,14 +434,13 @@ internal sealed partial class CfgSsaLowerer
     {
         foreach (var synRef in method.DeclaringSyntaxReferences)
         {
-            if (synRef.GetSyntax() is MethodDeclarationSyntax md)
+            if (synRef.GetSyntax() is MethodDeclarationSyntax md &&
+                compilation.ContainsSyntaxTree(md.SyntaxTree))
             {
-                foreach (var inv in md.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                var model = compilation.GetSemanticModel(md.SyntaxTree);
+                foreach (var inv in LeadingContractBlock.GetLeadingSpecCalls(md, c => VerifiableSymbolHelpers.BindsToSpec(model, c)))
                 {
-                    var name = inv.Expression is MemberAccessExpressionSyntax access ? access.Name : inv.Expression;
-                    if (name is IdentifierNameSyntax { Identifier.ValueText: "Requires" or "RequiresWhen" } &&
-                        compilation.ContainsSyntaxTree(inv.SyntaxTree) &&
-                        compilation.GetSemanticModel(inv.SyntaxTree).GetSymbolInfo(inv).Symbol is IMethodSymbol target &&
+                    if (model.GetSymbolInfo(inv).Symbol is IMethodSymbol target &&
                         (VerifiableSymbolHelpers.IsSpecCall(target, "Requires") ||
                          VerifiableSymbolHelpers.IsSpecCall(target, "RequiresWhen")))
                     {
@@ -450,6 +450,21 @@ internal sealed partial class CfgSsaLowerer
             }
         }
         return CrossAssemblyContractCache.HasRequires(compilation, method);
+    }
+
+    /// <summary>True if this <c>Spec.Requires</c> / <c>Spec.RequiresWhen</c> is in its member's leading contract block.</summary>
+    private static bool IsPreconditionCall(Compilation compilation, IInvocationOperation inv)
+    {
+        var model = inv.SemanticModel;
+        if (model is null || model.SyntaxTree != inv.Syntax.SyntaxTree)
+        {
+            if (!compilation.ContainsSyntaxTree(inv.Syntax.SyntaxTree))
+            {
+                return false;
+            }
+            model = compilation.GetSemanticModel(inv.Syntax.SyntaxTree);
+        }
+        return VerifiableSymbolHelpers.IsPrecondition(model, inv.Syntax);
     }
 
     private static MethodSpecs ExtractMethodSpecs(
@@ -549,6 +564,14 @@ internal sealed partial class CfgSsaLowerer
                 var because = inv.Arguments.Length > becauseIdx
                     ? ExtractConstantStringArg(GetOrderedArgOp(inv, becauseIdx))
                     : null;
+
+                // A Requires outside the leading contract block is not a precondition. VerifiableSmtAnalyzer reports it
+                // as VER101; here it is dropped, so it is neither assumed at entry nor required of callers.
+                if (inv.TargetMethod.Name is "Requires" or "RequiresWhen" &&
+                    !IsPreconditionCall(compilation, inv))
+                {
+                    return;
+                }
 
                 switch (inv.TargetMethod.Name)
                 {
