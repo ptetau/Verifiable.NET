@@ -1,6 +1,5 @@
 // In the contract r + 1 is mathematical, but at run time r + 1 wraps for r == int.MaxValue so r + 1 > r fails.
 // @expect: rejected
-// @known-bug: contract arithmetic r + 1 > r is mathematical, so it is proved although r + 1 wraps at run time for int.MaxValue
 // @witness: Corpus.Arithmetic.R2PostWraps.Run(int.MaxValue)
 using Verifiable.Contracts;
 

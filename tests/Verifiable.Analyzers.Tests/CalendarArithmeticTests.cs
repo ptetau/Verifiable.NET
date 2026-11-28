@@ -73,7 +73,7 @@ public class CalendarArithmeticTests
             {
                 public static bool IsPastDue(DateOnly dueDate, DateOnly asOf, int graceDays)
                 {
-                    Spec.Requires(graceDays >= 0 && dueDate.DayNumber + graceDays <= DateOnly.MaxValue.DayNumber);
+                    Spec.Requires(graceDays >= 0 && graceDays <= DateOnly.MaxValue.DayNumber && dueDate.DayNumber + graceDays <= DateOnly.MaxValue.DayNumber);
                     Spec.Ensures<bool>(r => r == (asOf > dueDate.AddDays(graceDays)));
                     return asOf > dueDate.AddDays(graceDays);
                 }

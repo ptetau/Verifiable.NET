@@ -101,7 +101,7 @@ public class IntegerWidthTests
     public async Task BitwiseNot_IsMinusOneMinusX_NotTheIdentity(string mode)
     {
         await AssertProvedAsync(Wrap(mode, """
-            public static int Flip(int x) { Spec.Ensures<int>(r => r == -x - 1 || x == int.MinValue, "~x"); return ~x; }
+            public static int Flip(int x) { Spec.Ensures<int>(r => x == int.MinValue || r == -x - 1, "~x"); return ~x; }
             public static int FlipPinned(int x) { Spec.Requires(x == 0, "pin"); Spec.Ensures<int>(r => r == -1, "~0"); return ~x; }
             public static long FlipLong(long x) { Spec.Requires(x == 5L, "pin"); Spec.Ensures<long>(r => r == -6L, "~5"); return ~x; }
             """));

@@ -136,7 +136,7 @@ public class LoopSoundnessTests
                 var last = 0;
                 for (var i = 0; i < 2; i++)
                 {
-                    Spec.LoopInvariant(last >= 0 && last <= 10, "In range.");
+                    Spec.LoopInvariant(i >= 0 && i <= 2 && last >= 0 && last <= 10, "In range.");
                     Spec.Decreases(2 - i, "i moves toward two.");
                     foreach (var v in xs)
                     {
@@ -258,7 +258,7 @@ public class LoopSoundnessTests
                 var b = 0;
                 for (var i = 0; i < n; i++)
                 {
-                    Spec.LoopInvariant(a == i && i <= n, "a counts the passes.");
+                    Spec.LoopInvariant(a == i && i >= 0 && i <= n, "a counts the passes.");
                     Spec.Decreases(n - i, "i moves toward n.");
                     (a, b) = (a + 1, b);
                 }
@@ -337,7 +337,7 @@ public class LoopSoundnessTests
                 var k = 0;
                 for (var i = 0; i < n; i++)
                 {
-                    Spec.LoopInvariant(k == i && i <= n, "k counts the passes.");
+                    Spec.LoopInvariant(k == i && i >= 0 && i <= n, "k counts the passes.");
                     Spec.Decreases(n - i, "i moves toward n.");
                     if ((k = k + 1) > 100)
                     {
@@ -384,7 +384,7 @@ public class LoopSoundnessTests
                 do
                 {
                     Spec.Decreases(n - i, "i moves toward n.");
-                    Spec.LoopInvariant(i < n, "i stays below n.");
+                    Spec.LoopInvariant(i >= 0 && i < n, "i stays below n.");
                     i = i + 1;
                 }
                 while (i < n);
@@ -515,7 +515,7 @@ public class LoopSoundnessTests
                 var c = 0;
                 for (var i = 0; i < n; i++)
                 {
-                    Spec.LoopInvariant(c == i && i <= n, "c counts the passes.");
+                    Spec.LoopInvariant(c == i && i >= 0 && i <= n, "c counts the passes.");
                     c = c + 1;
                 }
                 return c;
@@ -530,7 +530,7 @@ public class LoopSoundnessTests
                 var c = 0;
                 for (var i = 0; i < n; i++)
                 {
-                    Spec.LoopInvariant(c == i && i <= n, "c counts the passes.");
+                    Spec.LoopInvariant(c == i && i >= 0 && i <= n, "c counts the passes.");
                     Spec.Decreases(n - i, "i moves toward n.");
                     c = c + 1;
                 }
