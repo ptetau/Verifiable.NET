@@ -201,7 +201,7 @@ public class LinearTransferTests
         Assert.DoesNotContain(diags, d => d.Id == "AD0001");
         var reported = diags
             .Where(d => d.Id == "VER007")
-            .Select(d => d.GetMessage().Split('\n')[0])
+            .Select(d => d.GetMessage().Split('\n')[0].TrimEnd('\r'))
             .Where(line => line.StartsWith("Linear obligation token `t` (`Token`) ", StringComparison.Ordinal))
             .Select(line => line["Linear obligation token `t` (`Token`) ".Length..].TrimEnd('.'))
             .OrderBy(x => x, StringComparer.Ordinal)
