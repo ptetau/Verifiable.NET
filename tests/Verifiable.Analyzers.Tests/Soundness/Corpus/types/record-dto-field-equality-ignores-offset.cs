@@ -1,7 +1,6 @@
 // Record equality compares DateTimeOffset fields by instant, so two stamps with different offsets can be ==.
 // @expect: rejected
 // @witness: Corpus.Types.StampEquality.Same(new System.DateTimeOffset(2020, 1, 1, 0, 0, 0, System.TimeSpan.Zero), new System.DateTimeOffset(2020, 1, 1, 1, 0, 0, System.TimeSpan.FromHours(1)))
-// @known-bug: Record == compares a DateTimeOffset field as the (utc, offset) datatype, but DateTimeOffset equality ignores the offset.
 using System;
 using Verifiable.Contracts;
 
