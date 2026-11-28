@@ -133,7 +133,7 @@ internal static class VerifiableDescriptors
         isEnabledByDefault: true);
 
     public static readonly DiagnosticDescriptor UnknownClause = new(
-        id: "VER201",
+        id: "VER401",
         title: "Contract or type names a clause that is not in the clause manifest",
         messageFormat: "{0}",
         category: TraceabilityCategory,
@@ -142,7 +142,7 @@ internal static class VerifiableDescriptors
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor UncoveredClause = new(
-        id: "VER202",
+        id: "VER402",
         title: "Clause in the manifest has no contract or type in this project",
         messageFormat: "{0}",
         category: TraceabilityCategory,
@@ -151,7 +151,7 @@ internal static class VerifiableDescriptors
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor MissingClause = new(
-        id: "VER203",
+        id: "VER403",
         title: "Contract or constrained type has no clause ID",
         messageFormat: "{0}",
         category: TraceabilityCategory,
@@ -160,7 +160,7 @@ internal static class VerifiableDescriptors
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor InvalidClause = new(
-        id: "VER204",
+        id: "VER404",
         title: "Clause ID is not a usable constant string, or the clause manifest is malformed",
         messageFormat: "{0}",
         category: TraceabilityCategory,

@@ -50,7 +50,7 @@ public sealed class ClauseCoverageTests
             ? new List<(string, string)>()
             : new List<(string, string)> { ("/proj/Verifiable.Clauses.JSON", manifest) };
         var diags = await AnalyzerTestHarness.AnalyzeWithAdditionalFilesAsync(source, files, analyzers);
-        return diags.Where(d => d.Id.StartsWith("VER2") || d.Id.StartsWith("CS") && d.Severity == DiagnosticSeverity.Error).ToList();
+        return diags.Where(d => d.Id.StartsWith("VER4") || d.Id.StartsWith("CS") && d.Severity == DiagnosticSeverity.Error).ToList();
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public sealed class ClauseCoverageTests
     public async Task Ver201_UnknownClause_Error()
     {
         var diags = await Run(Covered.Replace("clause: \"C2\"", "clause: \"C9\""));
-        var d = Assert.Single(diags, x => x.Id == "VER201");
+        var d = Assert.Single(diags, x => x.Id == "VER401");
         Assert.Equal(DiagnosticSeverity.Error, d.Severity);
         Assert.Contains("C9", d.GetMessage());
     }
@@ -130,7 +130,7 @@ public sealed class ClauseCoverageTests
     {
         var manifest = Manifest.Replace("] }", ", { \"id\": \"C3\" } ] }");
         var diags = await Run(Covered, manifest);
-        var d = Assert.Single(diags, x => x.Id == "VER202");
+        var d = Assert.Single(diags, x => x.Id == "VER402");
         Assert.Equal(DiagnosticSeverity.Error, d.Severity);
         Assert.Contains("C3", d.GetMessage());
         Assert.Equal("/proj/Verifiable.Clauses.JSON", d.Location.GetLineSpan().Path);
@@ -145,10 +145,10 @@ public sealed class ClauseCoverageTests
             .Replace(", \"C2\"", "")
             .Replace(", Clause = \"C1\"", "");
         var diags = await Run(source);
-        var ver203 = diags.Where(d => d.Id == "VER203").ToList();
+        var ver203 = diags.Where(d => d.Id == "VER403").ToList();
         Assert.Equal(3, ver203.Count);
         Assert.All(ver203, d => Assert.Equal(DiagnosticSeverity.Warning, d.Severity));
-        Assert.Equal(2, diags.Count(d => d.Id == "VER202"));
+        Assert.Equal(2, diags.Count(d => d.Id == "VER402"));
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public sealed class ClauseCoverageTests
             }
             """;
         var diags = await Run(source, manifest: null);
-        var d = Assert.Single(diags, x => x.Id == "VER204");
+        var d = Assert.Single(diags, x => x.Id == "VER404");
         Assert.Equal(DiagnosticSeverity.Error, d.Severity);
     }
 
@@ -218,7 +218,7 @@ public sealed class ClauseCoverageTests
             }
             """;
         var diags = await Run(source, manifest: null);
-        Assert.Single(diags, x => x.Id == "VER204");
+        Assert.Single(diags, x => x.Id == "VER404");
     }
 
     [Fact]
@@ -253,7 +253,7 @@ public sealed class ClauseCoverageTests
     public async Task MalformedManifest_Ver204AtFile_AndNothingElse(string manifest, string expected)
     {
         var diags = await Run(Covered, manifest);
-        Assert.All(diags, d => Assert.Equal("VER204", d.Id));
+        Assert.All(diags, d => Assert.Equal("VER404", d.Id));
         var d = Assert.Single(diags);
         Assert.Contains(expected, d.GetMessage());
         Assert.Equal("/proj/Verifiable.Clauses.JSON", d.Location.GetLineSpan().Path);
@@ -285,8 +285,8 @@ public sealed class ClauseCoverageTests
         Assert.Empty(await Run(source));
 
         var diags = await Run(source.Replace(", Clause = \"C2\"", ""));
-        Assert.Single(diags, x => x.Id == "VER203");
-        Assert.Single(diags, x => x.Id == "VER202");
+        Assert.Single(diags, x => x.Id == "VER403");
+        Assert.Single(diags, x => x.Id == "VER402");
     }
 
     [Fact]

@@ -40,7 +40,7 @@ internal sealed class ClauseConstruct
     /// <summary>The clause ID, or <see langword="null"/> when none was given or it is unusable (see <see cref="Problem"/>).</summary>
     public string? Clause { get; }
 
-    /// <summary>Why the clause given is not usable (VER204), or <see langword="null"/>.</summary>
+    /// <summary>Why the clause given is not usable (VER404), or <see langword="null"/>.</summary>
     public string? Problem { get; }
 
     /// <summary>The <c>because</c> text or description, when it is a constant.</summary>
@@ -49,7 +49,7 @@ internal sealed class ClauseConstruct
     /// <summary>Where the construct is written.</summary>
     public Location Location { get; }
 
-    /// <summary>True if, with a manifest present, a missing clause is worth a warning (VER203).</summary>
+    /// <summary>True if, with a manifest present, a missing clause is worth a warning (VER403).</summary>
     public bool NeedsClause { get; }
 
     /// <summary>Symbol display such as <c>Bookings.Schedule.Book(Schedule, Booking)</c>.</summary>
@@ -69,19 +69,19 @@ internal sealed class ClauseCoverage
         WithoutClause = withoutClause;
     }
 
-    /// <summary>Constructs naming a clause that is not in the manifest (VER201).</summary>
+    /// <summary>Constructs naming a clause that is not in the manifest (VER401).</summary>
     public IReadOnlyList<ClauseConstruct> Unknown { get; }
 
-    /// <summary>Manifest clauses no construct names (VER202).</summary>
+    /// <summary>Manifest clauses no construct names (VER402).</summary>
     public IReadOnlyList<ManifestClause> Uncovered { get; }
 
-    /// <summary>Constructs that should carry a clause and do not (VER203).</summary>
+    /// <summary>Constructs that should carry a clause and do not (VER403).</summary>
     public IReadOnlyList<ClauseConstruct> WithoutClause { get; }
 }
 
 /// <summary>
 /// Finds the clause-carrying constructs of a compilation and compares them with the manifest. The clause
-/// coverage analyzer (VER201-VER204) and <c>verifiable-query clauses</c> both use it, so they cannot disagree.
+/// coverage analyzer (VER401-VER404) and <c>verifiable-query clauses</c> both use it, so they cannot disagree.
 /// </summary>
 internal static class ClauseCatalog
 {

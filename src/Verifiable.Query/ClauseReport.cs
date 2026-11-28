@@ -11,7 +11,7 @@ namespace Verifiable.Query;
 
 /// <summary>
 /// Builds the <c>verifiable-query clauses</c> JSON report: which constructs carry which spec clause. It uses the
-/// same <c>ClauseCatalog</c> as the VER201-VER204 analyzer, so the report and the build cannot disagree.
+/// same <c>ClauseCatalog</c> as the VER401-VER404 analyzer, so the report and the build cannot disagree.
 /// </summary>
 internal static class ClauseReport
 {

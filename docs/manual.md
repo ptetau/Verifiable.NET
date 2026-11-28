@@ -342,7 +342,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 
 ---
 
-## 10. Diagnostic Reference (`VER001`–`VER202`)
+## 10. Diagnostic Reference (`VER001`–`VER404`)
 
 | Code | Banner Title | What Happened & Typical Fix |
 | --- | --- | --- |
@@ -365,6 +365,10 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER203` | `INVALID MAPTO PROJECTION` | `[MapTo]` declaration is malformed, missing a matching source member for a target field/parameter, or requires narrowing/validation (use `[InboundPort]` for `[TypeAlias<T>]` targets). |
 | `VER301` | `COMPLEX CONTRACT` | `Spec.Requires` / `Spec.Ensures` packs more than 3 top-level `&&` clauses (configurable via `verifiable.max_spec_clauses` / `VerifiableMaxSpecClauses`, with an automatic split CodeFix) or uses nested ternaries. Default severity: `Info` (configurable via `.editorconfig`). |
 | `VER302` | `MISSING CONTRACT EXPLANATION` | A `[Verifiable]` `Spec.Requires` / `Spec.Ensures` call omits or leaves blank its plain-English `because` string. Default severity: `Info` (configurable via `.editorconfig`). |
+| `VER401` | `UNKNOWN CLAUSE` | A contract or constrained type names a clause ID that is not in `verifiable.clauses.json`. Only checked when the project has a manifest. Default severity: `Error`. |
+| `VER402` | `UNCOVERED CLAUSE` | A clause in the manifest has no contract, type alias, refinement or invariant in this project that names it. Reported at the clause's entry in the manifest. Default severity: `Error`. |
+| `VER403` | `MISSING CLAUSE ID` | With a manifest present, a contract or constrained type in `[Verifiable]` scope has no clause ID. One warning per construct. |
+| `VER404` | `INVALID CLAUSE` | A `clause` is not a constant string, or is empty or contains whitespace; or the manifest itself is malformed (bad JSON, empty, whitespace or duplicate ID). Reported even without a manifest. Default severity: `Error`. |
 
 ### Integer overflow
 
@@ -407,3 +411,43 @@ See [**`samples/README.md`**](../samples/README.md) for full walkthroughs, Galax
 - [**TodoApp**](../samples/TodoApp/README.md) — workflow state machine, `[MustConsume]` UI/API/SQLite protocol, and `CountItemsByStatus` loop proof.
 - [**AccountingApp**](../samples/AccountingApp/README.md) — double-entry ledger, 3-leg fee splits, `ComputeTrialBalance`, and entry reversals.
 - [**InventoryPricing**](../samples/InventoryPricing/README.md) — overflow/underflow proofs (the default; `[CheckedArithmetic]` for BitVec), `BasisPoints` share bounds, and `WarehouseBin.ReadUnchecked`.
+
+## 12. Clause IDs and coverage (`clause:`, `verifiable.clauses.json`)
+
+If a person signs off spec sentences ("clauses") and code is generated or written from them, the build can check that nothing was dropped and nothing was invented. Give each sentence an ID (`C1`, `C2`, ...) and tag the code that came from it.
+
+**Tag a contract** with the optional last argument `clause` (a constant string; named or positional):
+
+```csharp
+Spec.Ensures<bool>(r => r, "A booking ends after it starts", clause: "C2");
+```
+
+All of `Requires`, `RequiresWhen`, `Ensures`, `EnsuresWhen`, `LoopInvariant` and `Decreases` take it. **Tag a type or invariant** with the `Clause` property:
+
+```csharp
+[TypeAlias<decimal>("Prices are never negative", Clause = "C1")]
+```
+
+`[Refined<T>]` and `[Invariant]` take `Clause` too. A clause ID never changes a proof; it is only read by the traceability checks below.
+
+**The manifest** is an `AdditionalFiles` item named `verifiable.clauses.json` (any folder; the name is matched ignoring case):
+
+```xml
+<ItemGroup><AdditionalFiles Include="verifiable.clauses.json" /></ItemGroup>
+```
+```json
+{ "clauses": [ { "id": "C1", "text": "Prices are never negative." } ] }
+```
+
+IDs must not be empty, must not contain whitespace, and must be unique; they are compared exactly (case-sensitive). `text` is optional. With a manifest the build reports `VER401` (unknown clause), `VER402` (clause with no construct) and `VER403` (construct in `[Verifiable]` scope with no clause). Without a manifest only `VER404` (an unusable ID) can appear, so existing projects see no change. A malformed manifest is a `VER404` error at the file.
+
+**Limits.** `VER402` counts constructs in the current project only. A clause covered in another project must be listed only in that project's manifest. Generated code is not checked.
+
+**The JSON report.** Analyzers cannot write files, so the report comes from the query tool:
+
+```
+verifiable-query clauses <project-or-dir> [--manifest verifiable.clauses.json] [--out clauses.json]
+```
+
+It prints `{ "clauses": [ { "id", "text", "constructs": [ { "kind", "symbol", "because", "file", "line" } ] } ], "unknownClauses", "uncoveredClauses", "constructsWithoutClause", "invalidClauses" }`, sorted by ID, then symbol, then line. Without `--manifest` it uses `verifiable.clauses.json` in the project folder if there is one. Exit code `0` when every clause is covered and none is unknown or invalid, `1` otherwise, `3` for a load error or malformed manifest.
+

@@ -10,9 +10,9 @@ using Microsoft.CodeAnalysis.Text;
 namespace Verifiable.Analyzers;
 
 /// <summary>
-/// Spec traceability: reports <c>VER201</c>-<c>VER204</c> for the <c>clause</c> IDs on contracts and constrained types
+/// Spec traceability: reports <c>VER401</c>-<c>VER404</c> for the <c>clause</c> IDs on contracts and constrained types
 /// against the <c>verifiable.clauses.json</c> manifest (an <c>AdditionalFiles</c> item). It never changes a proof.
-/// Without a manifest only <c>VER204</c> (an unusable clause ID) can fire.
+/// Without a manifest only <c>VER404</c> (an unusable clause ID) can fire.
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class ClauseCoverageAnalyzer : DiagnosticAnalyzer
