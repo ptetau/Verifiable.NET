@@ -1,7 +1,6 @@
 // Wrong: when `pickFirst` is true, `a` is committed by the first call and again by the second.
 // @expect: rejected
 // @witness: Corpus.Linear.ConditionalArg.Run(true)
-// @known-bug: `Commit(pickFirst ? a : b)` consumes a flow-capture temporary, not `a` or `b`, so both stay live and can be committed again
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

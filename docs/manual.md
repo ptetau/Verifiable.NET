@@ -236,7 +236,14 @@ public readonly record struct PendingTodoCommit(/* ... */);
 public static TodoCommitReceipt PersistCommit(SqliteConnection conn, PendingTodoCommit commit) { /* ... */ }
 ```
 
-Every path that drops, overwrites, double-consumes, or discards a `[MustConsume]` value triggers `VER007 -- UNCONSUMED OBLIGATION` at compile time.
+Every path that drops, overwrites, double-consumes, or discards a `[MustConsume]` value triggers `VER007 -- UNCONSUMED OBLIGATION` at compile time. The check follows `try`/`catch`/`finally` (a `finally` runs on every way out of the `try`, and a `catch` can start after any call in the `try`), loops, and a second consumption after only some branches consumed the token (`may be consumed more than once`).
+
+To keep every token followable, `VER007` only accepts tokens in local variables and parameters:
+
+- Pass a token only to a `[ConsumesObligation]` method (mark your own helper `[ConsumesObligation]` if it takes the token over). A call to any other method that takes the token by value is rejected.
+- Do not store a token in an array, tuple, `Nullable<T>`, collection, field or property (`VER007 -- UNTRACKED OBLIGATION`). Deconstruct a tuple straight into locals, or return it.
+- An async `[ConsumesObligation]` method must have its `Task` awaited or returned. `_ = CommitAsync(token)` is rejected.
+- A token that a method hands back through an `out` parameter is tracked by the caller; a local function that consumes a captured token consumes it at each call.
 
 ---
 
@@ -317,7 +324,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER004` | `AMBIENT AUTHORITY` | Called `DateTime.Now`/`UtcNow`, `Guid.NewGuid()`, `Random`, `Stopwatch`, `Environment.*`, or touched mutable static state. Pass values in as parameters. |
 | `VER005` | `DISALLOWED CONTROL FLOW` | Unannotated `while`/`foreach`, `async`/`await`, `throw`, `try/catch`, `lock`, or `goto`. Annotate `while` loops with `Spec.LoopInvariant` + `Spec.Decreases`; use `Result<T, TError>` instead of exceptions. |
 | `VER006` | `UNVERIFIED CALL` | Called an unverified external method, reflection, or `dynamic`. Mark deterministic helpers `[Verifiable]` / `[PureAxiom]`, or move I/O to the outer shell. |
-| `VER007` | `UNCONSUMED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
+| `VER007` | `UNCONSUMED OBLIGATION` / `UNTRACKED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token, passed it to a method that is not `[ConsumesObligation]`, or stored it in an array, tuple, `Nullable<T>`, field or collection. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
 | `VER101` | `UNSUPPORTED CONTRACT` / `METHOD NOT CHECKED` | Contract or code could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. In a `[Verifiable]` method with no contracts and no obligation found, it is a warning, so the method does not look proved; mark it `[Unverifiable]` if it needs no proof. A `Spec.Requires` / `Spec.RequiresWhen` that is not in the method's leading contract block (inside a branch, loop, lambda or local function, or after an ordinary statement) is also `VER101`: it is not a precondition, so move it to the top of the method, or use `Spec.RequiresWhen(condition, requirement, because)` or an `if` guard in callers. |
 | `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
 | `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |

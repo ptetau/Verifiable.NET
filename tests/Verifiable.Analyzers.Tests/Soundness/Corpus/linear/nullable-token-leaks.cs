@@ -1,7 +1,6 @@
 // Wrong: the token is stored in a `PendingCommit?` local and never consumed.
 // @expect: rejected
 // @no-witness: a leaked token has no runtime effect
-// @known-bug: `PendingCommit?` is not a [MustConsume] type to IsMustConsumeType (Nullable<T> has no attribute), so a token stored in it is never tracked
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

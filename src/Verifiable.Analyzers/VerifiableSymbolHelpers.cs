@@ -162,6 +162,14 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
+        if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable &&
+            nullable.TypeArguments.Length == 1 &&
+            IsMustConsumeType(nullable.TypeArguments[0]))
+        {
+            foundType = nullable.TypeArguments[0];
+            return true;
+        }
+
         if (type is INamedTypeSymbol named && named.IsTupleType)
         {
             foreach (var elem in named.TupleElements)

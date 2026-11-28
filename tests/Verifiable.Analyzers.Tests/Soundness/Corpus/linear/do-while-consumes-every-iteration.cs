@@ -1,7 +1,6 @@
 // Wrong: one token is committed on every pass of the loop, so twice when the loop runs twice.
 // @expect: rejected
 // @witness: Corpus.Linear.DoWhileCommit.Run(2)
-// @known-bug: a consume in a loop body sees the token as MaybeLive on the second pass, and consuming a MaybeLive token is not reported (same root as the partial-branch bug)
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

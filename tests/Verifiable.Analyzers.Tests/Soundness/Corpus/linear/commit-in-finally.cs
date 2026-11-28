@@ -1,6 +1,5 @@
 // Right: the token is committed exactly once, in the finally block, whether or not the work throws.
 // @expect: proved
-// @known-bug: the commit in the finally block is never analyzed (finally regions get no in-state), so the token is reported as never consumed
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;
