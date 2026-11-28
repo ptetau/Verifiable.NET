@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System;
 using System.Linq;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace Verifiable.Analyzers.Tests.Soundness;
@@ -348,4 +351,80 @@ public class SoundnessHarnessTests
             _ = CorpusProgram.Load(path);
         }
     }
+
+    // ---- Crash isolation (analysis runs on a big-stack thread with a timeout) ----
+
+    private static readonly CorpusProgram Tiny = CorpusProgram.Load("calls/r2-suppress-blanket-pragma.cs");
+
+    [Fact]
+    public async Task Analysis_SurvivesRecursionThatNeedsALargeStack()
+    {
+        // 150,000 frames of about 1 KB: roughly 150 MB, far beyond the default 8 MB. Only Unix workers get a larger stack.
+        if (OperatingSystem.IsWindows()) return;
+        var report = await CorpusRunner.RunAsync(Tiny, "recurse:150000", TimeSpan.FromSeconds(60), long.MaxValue);
+
+        Assert.True(report.Fatal.Count == 0, string.Join("\n", report.Fatal));
+        Assert.Contains(report.Diagnostics, d => d.Id == "TST001" && d.Message.Contains("150000"));
+    }
+
+    [Fact]
+    public async Task Analysis_ThatOverflowsTheStack_IsReportedAsFatalForThatProgramOnly()
+    {
+        var report = await CorpusRunner.RunAsync(Tiny, "recurse:forever", TimeSpan.FromSeconds(120), long.MaxValue);
+
+        var message = Assert.Single(report.Fatal);
+        Assert.Contains("r2-suppress-blanket-pragma.cs", message);
+        Assert.Contains("process died", message);
+
+        // The test host is still alive and the next program gets a fresh worker.
+        var next = await CorpusRunner.RunAsync(Tiny, "recurse:10", TimeSpan.FromSeconds(60), long.MaxValue);
+        Assert.Empty(next.Fatal);
+        Assert.Contains(next.Diagnostics, d => d.Id == "TST001");
+    }
+
+    [Fact]
+    public async Task Analysis_ThatHangs_IsReportedAsFatalAfterTheTimeout()
+    {
+        var report = await CorpusRunner.RunAsync(Tiny, "hang", TimeSpan.FromSeconds(5), long.MaxValue);
+
+        var message = Assert.Single(report.Fatal);
+        Assert.Contains("r2-suppress-blanket-pragma.cs", message);
+        Assert.Contains("did not finish", message);
+
+        var next = await CorpusRunner.RunAsync(Tiny, "recurse:10", TimeSpan.FromSeconds(60), long.MaxValue);
+        Assert.Empty(next.Fatal);
+    }
+
+    [Fact]
+    public async Task Analysis_ThatUsesTooMuchMemory_IsReportedAsFatal()
+    {
+        var report = await CorpusRunner.RunAsync(Tiny, "alloc", TimeSpan.FromSeconds(120), memoryLimit: 1024L * 1024 * 1024);
+
+        Assert.Contains("memory", Assert.Single(report.Fatal));
+    }
+
+    // ---- Suppressed rejections ----
+
+    [Fact]
+    public async Task SuppressedRejection_MakesTheMethodRejected_SoTheCrossCheckSetsItAside()
+    {
+        var report = await CorpusRunner.RunAsync(CorpusProgram.Load("calls/r2-suppress-blanket-pragma.cs"));
+
+        Assert.Empty(report.Fatal);
+        Assert.Contains(report.Diagnostics, d => d.Id == "VER102" && d.IsSuppressed);
+        Assert.True(report.Rejected, "VER107 must still reject the program.");
+        Assert.Empty(report.CrossCheckFailures);
+    }
+
+    // ---- Witness shape ----
+
+    [Theory]
+    [InlineData("H.P.Flip(); H.P.Is(\"a\")", true)]
+    [InlineData("H.P.Flip();", true)]
+    [InlineData("H.P.Is(\"a;b\")", false)]
+    [InlineData("H.P.Is(';')", false)]
+    [InlineData("H.P.Is(\"say \\\"x;\\\"\")", false)]
+    [InlineData("H.P.Next(3)", false)]
+    public void Witness_WithMoreThanOneStatement_IsDetected(string witness, bool multi) =>
+        Assert.Equal(multi, CorpusProgram.HasStatementSeparator(witness));
 }

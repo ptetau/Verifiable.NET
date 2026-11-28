@@ -110,6 +110,43 @@ internal static class AnalyzerTestHarness
     }
 
     /// <summary>
+    /// Like <see cref="AnalyzeAsync"/> (generators run), but suppressed diagnostics are reported too (check
+    /// <see cref="Diagnostic.IsSuppressed"/>), with an optional fixed list of reference assemblies.
+    /// </summary>
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeReportingSuppressedAsync(
+        string source,
+        DiagnosticAnalyzer[] analyzers,
+        System.Threading.CancellationToken cancellationToken,
+        IEnumerable<string>? referencePaths = null)
+    {
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
+        var compilation = CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            [syntaxTree],
+            referencePaths is null
+                ? CollectDefaultReferences(null)
+                : referencePaths.Select(p => (MetadataReference)MetadataReference.CreateFromFile(p)).ToList(),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            generators: CreateDefaultGenerators(null),
+            parseOptions: parseOptions);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out var genDiagnostics);
+
+        var options = new CompilationWithAnalyzersOptions(
+            options: new AnalyzerOptions(ImmutableArray<AdditionalText>.Empty),
+            onAnalyzerException: null,
+            concurrentAnalysis: false,
+            logAnalyzerExecutionTime: false,
+            reportSuppressedDiagnostics: true);
+
+        var withAnalyzers = updatedCompilation.WithAnalyzers(ImmutableArray.Create(analyzers), options);
+        var analyzerDiagnostics = await withAnalyzers.GetAllDiagnosticsAsync(cancellationToken);
+        return genDiagnostics.IsDefaultOrEmpty ? analyzerDiagnostics : analyzerDiagnostics.AddRange(genDiagnostics);
+    }
+
+    /// <summary>
     /// Compiles several source files into one assembly and returns compiler and analyzer diagnostics,
     /// with suppressions (such as the Z3 nullability suppressor) applied.
     /// </summary>

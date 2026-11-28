@@ -96,6 +96,15 @@ public sealed record CorpusProgram(
             runtimeSkip = runtime.Substring(5).Trim();
         }
 
+        foreach (var w in witnesses)
+        {
+            if (HasStatementSeparator(w))
+            {
+                throw new FormatException($"{relativePath}: @witness `{w}` has more than one statement. A witness is one call; " +
+                    "write one @witness line per call, or put the sequence in a static method of the program and call that.");
+            }
+        }
+
         if (expect == Expectation.Rejected && witnesses.Count == 0 && noWitness is null)
         {
             throw new FormatException($"{relativePath}: a rejected program needs an @witness call that shows it is wrong, or @no-witness with the reason.");
@@ -107,6 +116,28 @@ public sealed record CorpusProgram(
         }
 
         return new CorpusProgram(relativePath, source, expect, witnesses, noWitness, Single("known-bug"), runtimeSkip);
+    }
+
+    /// <summary>True if the witness has a <c>;</c> outside string and char literals, so it would be more than one statement.</summary>
+    internal static bool HasStatementSeparator(string witness)
+    {
+        for (var i = 0; i < witness.Length; i++)
+        {
+            var c = witness[i];
+            if (c is '"' or '\'')
+            {
+                for (i++; i < witness.Length && witness[i] != c; i++)
+                {
+                    if (witness[i] == '\\') i++;
+                }
+            }
+            else if (c == ';')
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public override string ToString() => RelativePath;

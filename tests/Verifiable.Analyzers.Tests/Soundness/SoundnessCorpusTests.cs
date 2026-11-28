@@ -22,7 +22,7 @@ public class SoundnessCorpusTests(ITestOutputHelper output)
 
         foreach (var d in report.Diagnostics.Where(d => d.Id.StartsWith("VER")))
         {
-            output.WriteLine($"diagnostic: {d.Id} {d.Severity} at {d.Location.GetLineSpan().StartLinePosition}: {FirstLine(d.GetMessage())}");
+            output.WriteLine($"diagnostic: {d.Id} {d.Level}{(d.IsSuppressed ? " (suppressed)" : "")} at {d.Line + 1}:{d.Column + 1}: {FirstLine(d.Message)}");
         }
 
         foreach (var (witness, outcome) in report.Witnesses) output.WriteLine($"witness {witness}: {outcome}");

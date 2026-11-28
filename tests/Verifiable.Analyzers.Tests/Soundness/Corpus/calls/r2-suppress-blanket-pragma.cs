@@ -1,6 +1,5 @@
 // A blanket `#pragma warning disable` (no id) hides the VER102 of a false postcondition; VER107 must still flag it.
 // @expect: rejected
-// @runtime: skip VER107 rejects the program but the suppressed VER102 leaves Next accepted at method level, so the cross-check would report a false proof
 // @witness: Corpus.Calls.R2PragmaAll.Next(3)
 using Verifiable.Contracts;
 

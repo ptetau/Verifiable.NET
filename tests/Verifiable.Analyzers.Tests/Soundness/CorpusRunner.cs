@@ -33,7 +33,7 @@ public abstract record RunOutcome
 
 /// <summary>The result of checking a corpus program.</summary>
 public sealed record CorpusReport(
-    ImmutableArray<Diagnostic> Diagnostics,
+    IReadOnlyList<DiagInfo> Diagnostics,
     IReadOnlyList<string> Fatal,
     bool Rejected,
     IReadOnlyList<(string Witness, RunOutcome Outcome)> Witnesses,
@@ -63,24 +63,37 @@ internal static class CorpusRunner
     ];
 
     /// <summary>Diagnostics that count as the analyzer refusing a program: any VER error, or VER106 (proof may be vacuous).</summary>
-    public static bool IsRejection(Diagnostic d) =>
+    public static bool IsRejection(DiagInfo d) =>
         d.Id.StartsWith("VER", StringComparison.Ordinal) && d.Id != "VER104" &&
-        (d.Severity == DiagnosticSeverity.Error || d.Id == "VER106");
+        (d.Level == DiagnosticSeverity.Error || d.Id == "VER106");
 
-    public static async Task<CorpusReport> RunAsync(CorpusProgram program)
+    /// <summary>Longest one program may spend in the analyzers before it is reported as <c>Fatal</c>.</summary>
+    internal static readonly TimeSpan AnalysisTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>Working-set size of the analysis process above which it is killed and the program reported as <c>Fatal</c>.</summary>
+    internal const long AnalysisMemoryLimit = 6L * 1024 * 1024 * 1024;
+
+    public static Task<CorpusReport> RunAsync(CorpusProgram program) =>
+        RunAsync(program, "default", AnalysisTimeout, AnalysisMemoryLimit);
+
+    internal static async Task<CorpusReport> RunAsync(CorpusProgram program, string analyzers, TimeSpan timeout, long memoryLimit)
     {
-        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(program.Source, Analyzers());
-
         var fatal = new List<string>();
+        var diagnostics = await Task.Run(() => AnalysisWorkerClient.Analyze(program.Source, analyzers, timeout, memoryLimit, fatal));
+        if (fatal.Count > 0)
+        {
+            return new CorpusReport(diagnostics, fatal.Select(f => $"{program.RelativePath}: {f}").ToList(), false, [], [], []);
+        }
+
         foreach (var d in diagnostics)
         {
-            if (d.Severity == DiagnosticSeverity.Error && d.Id.StartsWith("CS", StringComparison.Ordinal))
+            if (d.Level == DiagnosticSeverity.Error && d.Id.StartsWith("CS", StringComparison.Ordinal))
             {
-                fatal.Add($"The program does not compile: {d}");
+                fatal.Add($"The program does not compile: {d.Id} {d.Message}");
             }
             else if (d.Id == "AD0001")
             {
-                fatal.Add($"An analyzer crashed: {d}");
+                fatal.Add($"An analyzer crashed: {d.Message}");
             }
             else if (d.Id == "VER104")
             {
@@ -88,7 +101,9 @@ internal static class CorpusRunner
             }
         }
 
-        var rejections = diagnostics.Where(IsRejection).ToList();
+        var rejections = diagnostics.Where(d => !d.IsSuppressed && IsRejection(d)).ToList();
+        // A method whose rejection was suppressed (pragma, [SuppressMessage]) is still unproved: the cross-check sets its runs aside.
+        var suppressed = diagnostics.Where(d => d.IsSuppressed && IsRejection(d)).ToList();
         if (fatal.Count > 0)
         {
             return new CorpusReport(diagnostics, fatal, rejections.Count > 0, [], [], []);
@@ -113,7 +128,7 @@ internal static class CorpusRunner
             var notes = new List<string>();
             if (program.RuntimeSkipReason is null && program.KnownBug is null)
             {
-                var flagged = FlaggedMethods(program.Source, rejections);
+                var flagged = FlaggedMethods(program.Source, rejections.Concat(suppressed));
                 runtime.CrossCheck(flagged, failures, notes);
             }
 
@@ -153,14 +168,14 @@ internal static class CorpusRunner
     }
 
     /// <summary>The keys of the methods that contain a rejecting diagnostic.</summary>
-    private static HashSet<string> FlaggedMethods(string source, IEnumerable<Diagnostic> rejections)
+    private static HashSet<string> FlaggedMethods(string source, IEnumerable<DiagInfo> rejections)
     {
         var root = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview)).GetRoot();
         var keys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var d in rejections)
         {
-            if (!d.Location.IsInSource || d.Location.SourceTree?.FilePath != "TestInput.cs") continue;
-            var node = root.FindNode(d.Location.SourceSpan, getInnermostNodeForTie: true);
+            if (d.FilePath != "TestInput.cs") continue;
+            var node = root.FindNode(new Microsoft.CodeAnalysis.Text.TextSpan(d.Start, d.Length), getInnermostNodeForTie: true);
             var method = node.AncestorsAndSelf().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault();
             if (method is not null) keys.Add(MethodKey(method));
         }

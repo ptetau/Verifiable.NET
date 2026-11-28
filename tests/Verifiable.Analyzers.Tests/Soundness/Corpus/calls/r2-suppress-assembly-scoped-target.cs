@@ -1,6 +1,5 @@
 // An assembly-level [SuppressMessage] with Scope = "member" and a Target hides VER102 for one method.
 // @expect: rejected
-// @runtime: skip VER107 rejects the program but the suppressed VER102 leaves Next accepted at method level, so the cross-check would report a false proof
 // @witness: Corpus.Calls.R2SupAsm.Next(3)
 using System.Diagnostics.CodeAnalysis;
 using Verifiable.Contracts;

@@ -1,6 +1,5 @@
 // A module-level [SuppressMessage] (no scope) hides VER102 for the whole module.
 // @expect: rejected
-// @runtime: skip VER107 rejects the program but the suppressed VER102 leaves Next accepted at method level, so the cross-check would report a false proof
 // @witness: Corpus.Calls.R2SupMod.Next(3)
 using System.Diagnostics.CodeAnalysis;
 using Verifiable.Contracts;

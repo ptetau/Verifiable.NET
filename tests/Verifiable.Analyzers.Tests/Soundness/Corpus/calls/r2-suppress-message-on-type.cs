@@ -1,6 +1,5 @@
 // [SuppressMessage] on the class hides VER102 for every method in it.
 // @expect: rejected
-// @runtime: skip VER107 rejects the program but the suppressed VER102 leaves Next accepted at method level, so the cross-check would report a false proof
 // @witness: Corpus.Calls.R2SupType.Next(3)
 using System.Diagnostics.CodeAnalysis;
 using Verifiable.Contracts;
