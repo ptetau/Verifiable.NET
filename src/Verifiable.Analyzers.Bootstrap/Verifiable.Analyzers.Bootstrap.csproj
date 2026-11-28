@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The stage-0 prover for the trusted kernel.
+
+    This is the analyzer from src/Verifiable.Analyzers compiled with a frozen, earlier copy of the
+    kernel (Kernel/) instead of the live one in src/Verifiable.Core. Verifiable.Core is proved by this
+    analyzer, so a change to the live kernel is checked by the previous kernel, not by itself. A bug that
+    blinds the live kernel's prover therefore cannot approve itself.
+
+    The frozen copy changes only through scripts/promote-bootstrap-kernel.sh (or .ps1). This project is
+    never packed or shipped: the analyzer that ships is src/Verifiable.Analyzers, which holds the live kernel.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Verifiable.Analyzers.Bootstrap</AssemblyName>
+    <RootNamespace>Verifiable.Analyzers</RootNamespace>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    The analyzer sources are linked from src/Verifiable.Analyzers, without its link to the live kernel.
+    The frozen kernel in Kernel/ is picked up by the default Compile glob. As in Verifiable.Analyzers, the
+    kernel's Spec.* calls bind to KernelShim and are stripped from IL.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Verifiable.Analyzers\**\*.cs"
+             Exclude="..\Verifiable.Analyzers\obj\**;..\Verifiable.Analyzers\bin\**"
+             Link="Analyzer\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Using Include="Verifiable.Analyzers.KernelShim.Spec" Alias="Spec" />
+    <Using Include="Verifiable.Analyzers.KernelShim.VerifiableAttribute" Alias="VerifiableAttribute" />
+  </ItemGroup>
+
+</Project>
