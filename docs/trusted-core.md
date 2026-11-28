@@ -24,6 +24,9 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.IsCacheable` | Only definitive answers (`unsat`, `sat`) are cached. Timeouts and errors are always retried. |
 | `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
 | `ProofKernel.PremisesContradict` | Premises are called contradictory only when Z3 answers `unsat` to them alone; an undecided check is not evidence either way. When they contradict, the analyzer rejects the method's proofs with `VER105`. |
+| `VacuityKernel.GuaranteeQuery`, `ReachabilityQuery` | The two checks of a callee guarantee are **exactly** the assumptions made before the call, then the call's context (path, guard, callee preconditions), then (first check only) the guarantee. |
+| `VacuityKernel.NeedsReachabilityCheck`, `ClassifyGuarantee` | A callee guarantee is impossible at a call (`VER105`) only when Z3 answers `unsat` with the guarantee and `sat` without it. `unsat` both times is dead code, not a contradiction. An undecided check never counts as either. |
+| `VacuityKernel.CheckUndecided` | Any premise-check answer other than `sat` or `unsat` leaves vacuity open and is reported (`VER106`), never treated as fine. |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | When two paths merge, a `[MustConsume]` token that may be live on either path is still flagged, unless one side is a sink-method parameter (which may hold the token). A token counts as consumed only if it was consumed on both paths. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. Together with the per-block transfer rules (which are not proved), this is what lets the `VER007` analysis give the same answer in any visiting order. |
@@ -47,7 +50,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **Z3** gives correct `sat`/`unsat` answers.
 - **Roslyn** gives a correct control-flow graph and types.
 - **The C# to SMT translation** (`CfgSsaLowerer` and friends) turns your code and contracts into formulas that mean the same thing. This is the largest trusted part. It is covered by the analyzer test suite, not by proof.
-- **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved.
+- **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved. The vacuity checks also skip some cases: a callee guarantee is not checked on its own when no goal follows it, or when it is assumed with no path condition, guard or callee precondition (it is then part of the whole premise set, which was checked).
 - **The query CLI script.** `QueryEngine.BuildNamedQueryScript` assembles the premises, path conditions and `--assume` for `verifiable-query`. Only its final, negated-goal line comes from the core.
 - **The `VER007` transfer rules.** How each statement changes a token's state, and the check at method exit, live in `LinearObligationAnalyzer`. Only the merge rule is in the core.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query, returns the output lines it read, and computes the cache key (`BuildHashInput`).
@@ -57,7 +60,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 
 These are open, and are listed so they are not forgotten:
 
-- **Vacuous proofs on one path.** `VER105` catches premises that contradict for the whole method. It does not catch a contradiction that only appears on one branch, for example a callee guarantee or `[PureAxiom]` that is impossible but only used inside an `if`: goals on that branch are still "proved". It also stays silent when Z3 cannot decide whether the premises can hold. `verifiable-query` reports per-path vacuity through its unsat core.
+- **Vacuous proofs on one path.** `VER105` checks the whole premise set, and each callee guarantee at the call that assumes it. Two cases are still open. The translation's internal axioms (decimal rounding, strings, collections, calendars) are only checked as part of the whole premise set: each guarantee is checked against the assumptions made before it, so a guarantee that clashes only with a later axiom on its path is missed. And when the whole-method check is undecided, the per-call checks are skipped (`VER106` is reported instead). The undecided result depends on a 1 s timeout, so on a slow or busy machine `VER106` can appear where a faster one decides. `verifiable-query` reports per-path vacuity through its unsat core.
 
 ## Rules for contributors
 
