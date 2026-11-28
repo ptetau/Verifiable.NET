@@ -118,6 +118,22 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Dated rules and value tables (`*.values.csv`, `[EffectiveFrom]`)
+
+Prices, limits and plan tiers change over time (requirement R6). Keeping them in tables keyed by a "from" date turns most changes into table edits (this implements the CSV option of open question 5).
+
+```text
+# NightlyRate.values.csv, next to the project
+# type: decimal
+from,to,value
+2026-01-01,2026-06-30,100
+2026-07-01,,120
+```
+
+- Each `Name.values.csv` becomes `[Verifiable] static partial class Name` with `For(DateOnly date)`, `FirstDayNumber` (and `LastDayNumber` if the last row has a `to`). `from` and `to` are inclusive `yyyy-MM-dd` dates; an empty `to` runs until the next row starts. The lookup's contracts say the value for each range (one `Spec.EnsuresWhen` per row), so callers prove against the table. Types: `int`, `long`, `decimal`, `bool`, `string`.
+- A gap is `VER204`, an overlap or repeated start date `VER205`, both naming the dates; an unreadable table is `VER206`.
+- Versions of a rule: mark methods in a static partial class `[EffectiveFrom("2026-07-01", Rule = "Cleaning", Clause = "C5")]`. Each version is an ordinary method, proved on its own; a generated `Cleaning(DateOnly asOf, ...)` calls the one in force. Repeated dates, differing signatures or a non-partial class are `VER207`.
+
 ### Check data against current rules (`data`)
 
 Before a narrowing change ships, find out how many records fail and which rule they fail (requirement R9).

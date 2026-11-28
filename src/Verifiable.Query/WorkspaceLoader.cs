@@ -15,10 +15,40 @@ internal sealed record WorkspaceLoadResult(
     CSharpCompilation? Compilation,
     IReadOnlyList<Diagnostic> CompilationErrors,
     IReadOnlyList<string> SourceFiles,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    IReadOnlyList<Diagnostic>? GeneratorDiagnostics = null);
 
 internal static class WorkspaceLoader
 {
+    /// <summary>Dated value tables (<c>*.values.csv</c>) beside the project or the files (requirement R6).</summary>
+    private static ImmutableArray<AdditionalText> ValueTables(string? projectOrDirPath, IReadOnlyList<string> explicitFiles)
+    {
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(projectOrDirPath))
+        {
+            var full = Path.GetFullPath(projectOrDirPath!);
+            dirs.Add(Directory.Exists(full) ? full : Path.GetDirectoryName(full)!);
+        }
+        foreach (var f in explicitFiles) dirs.Add(Path.GetDirectoryName(Path.GetFullPath(f))!);
+
+        var sep = Path.DirectorySeparatorChar;
+        return dirs.Where(Directory.Exists)
+            .SelectMany(d => Directory.EnumerateFiles(d, "*.values.csv", SearchOption.AllDirectories))
+            .Where(f => !f.Contains($"{sep}bin{sep}") && !f.Contains($"{sep}obj{sep}"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => (AdditionalText)new DiskText(f))
+            .ToImmutableArray();
+    }
+
+    private sealed class DiskText(string path) : AdditionalText
+    {
+        public override string Path { get; } = path;
+
+        public override Microsoft.CodeAnalysis.Text.SourceText? GetText(System.Threading.CancellationToken cancellationToken = default) =>
+            Microsoft.CodeAnalysis.Text.SourceText.From(File.ReadAllText(Path));
+    }
+
     private static readonly CSharpParseOptions DefaultParseOptions = new(LanguageVersion.Preview);
 
     public static WorkspaceLoadResult Load(
@@ -130,17 +160,20 @@ internal static class WorkspaceLoader
                 new TypeAliasGenerator().AsSourceGenerator(),
                 new InboundPortGenerator().AsSourceGenerator(),
                 new MapToGenerator().AsSourceGenerator(),
-                new ContractMetadataGenerator().AsSourceGenerator()
+                new ContractMetadataGenerator().AsSourceGenerator(),
+                new DatedRulesGenerator().AsSourceGenerator()
             ],
+            additionalTexts: ValueTables(projectOrDirPath, explicitFiles),
             parseOptions: DefaultParseOptions);
-        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out var generatorDiagnostics);
 
         var updatedCSharp = (CSharpCompilation)updated;
         var errors = updatedCSharp.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
 
-        return new WorkspaceLoadResult(updatedCSharp, errors, fileList, null);
+        return new WorkspaceLoadResult(updatedCSharp, errors, fileList, null,
+            generatorDiagnostics.Where(d => d.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning).ToList());
     }
 
     private static string? ResolveProjectOrDirectory(string inputPath, out string? error)

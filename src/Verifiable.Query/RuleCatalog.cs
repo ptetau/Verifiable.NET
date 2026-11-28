@@ -113,6 +113,36 @@ internal static class RuleCatalog
             "Strengthen the postcondition until it fixes one result, send the gap back to Resolve, or mark the method [AnyValidResult(\"why\")].",
             "public static int Fee(int nights)\n{\n    Spec.Ensures<int>(r => r >= nights * 90 && r <= nights * 100, \"Within the band.\");\n    return nights * 100;\n}",
             "public static int Fee(int nights)\n{\n    Spec.Ensures<int>(r => r == nights * 100, \"A night costs 100.\");\n    return nights * 100;\n}"),
+        ["VER201"] = new(
+            "The generator can only make a safe constrained type from a readonly partial record struct.",
+            "Declare it as `public readonly partial record struct Name { public static bool IsValid(T value) => ...; }`.",
+            null, null),
+        ["VER202"] = new(
+            "A constrained type is defined by its IsValid method; without a valid one there is no rule to check.",
+            "Add `public static bool IsValid(T value)` returning the rule as a pure expression.",
+            null, null),
+        ["VER203"] = new(
+            "A [MapTo] projection must map every target member from a source member, or values would be lost silently.",
+            "Fix the projection so each target member has a matching source member.",
+            null, null),
+        ["VER204"] = new(
+            "A date with no value in a dated table would leave the rule undefined on that day.",
+            "Make each row's `to` the day before the next row's `from`, or leave `to` empty so a row runs until the next one starts.",
+            "# type: decimal\nfrom,to,value\n2026-01-01,2026-06-30,100\n2026-07-05,,120",
+            "# type: decimal\nfrom,to,value\n2026-01-01,2026-06-30,100\n2026-07-01,,120"),
+        ["VER205"] = new(
+            "Two values for one date make the rule ambiguous.",
+            "Shorten one range so no two rows cover the same day.",
+            "# type: decimal\nfrom,to,value\n2026-01-01,2026-07-03,100\n2026-07-01,,120",
+            "# type: decimal\nfrom,to,value\n2026-01-01,2026-06-30,100\n2026-07-01,,120"),
+        ["VER206"] = new(
+            "A table that cannot be read generates no lookup.",
+            "Start with `# type: decimal` (int, long, decimal, bool or string), then a `from,to,value` header and yyyy-MM-dd dates.",
+            null, null),
+        ["VER207"] = new(
+            "Versions of a dated rule must be interchangeable, and only one may start on a given day.",
+            "Give each version a distinct date and the same signature, set `Rule = \"Name\"`, and put them in a static partial class.",
+            null, null),
         ["VER301"] = new(
             "One long contract is hard to read and gives one vague failure. Separate clauses fail separately and say which part broke.",
             "Split the conjunction into several Spec calls (the code fix does this).",
@@ -154,6 +184,10 @@ internal static class RuleCatalog
             .Where(f => f.FieldType == typeof(DiagnosticDescriptor))
             .Select(f => (DiagnosticDescriptor)f.GetValue(null)!)
             .Concat(new Verifiable.Analyzers.ProofSuppressionAuditor().SupportedDiagnostics)
+            .Concat(typeof(Verifiable.Generators.DatedRulesGenerator).Assembly.GetType("Verifiable.Generators.GeneratorDescriptors")!
+                .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                .Where(f => f.FieldType == typeof(DiagnosticDescriptor))
+                .Select(f => (DiagnosticDescriptor)f.GetValue(null)!))
             .GroupBy(d => d.Id)
             .Select(g => g.First())
             .ToDictionary(d => d.Id, StringComparer.Ordinal);

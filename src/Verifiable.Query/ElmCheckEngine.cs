@@ -28,7 +28,43 @@ internal static class ElmCheckEngine
         IReadOnlyList<string>? scope = null,
         int? timeoutMs = null,
         string? clauseManifestPath = null,
-        string? contractLockPath = null)
+        string? contractLockPath = null,
+        IReadOnlyList<Diagnostic>? generatorDiagnostics = null)
+    {
+        var fromGenerators = (generatorDiagnostics ?? Array.Empty<Diagnostic>())
+            .Where(d => includeWarnings || d.Severity == DiagnosticSeverity.Error)
+            .Select(d =>
+            {
+                var span = d.Location.GetLineSpan();
+                var severity = d.Severity == DiagnosticSeverity.Error ? "error" : "warning";
+                var message = d.GetMessage();
+                var block = ElmDiagnosticFormatter.Format($"{severity.ToUpperInvariant()} {d.Id}", d.Location, message);
+                var normalized = block.Replace("\r\n", "\n");
+                var bannerIdx = normalized.IndexOf("\n-- ", StringComparison.Ordinal);
+                return new PresentedDiagnostic(d.Id, severity, span.Path ?? string.Empty, span.StartLinePosition.Line + 1, span.StartLinePosition.Character + 1,
+                    FirstLine(message), bannerIdx >= 0 ? normalized.Substring(bannerIdx + 1) : normalized,
+                    DiagnosticFacts.From(d.Properties, normalized, null));
+            })
+            .ToList();
+        var report = CheckCompilationCore(compilation, compilationErrors, z3Path, includeWarnings, scope, timeoutMs, clauseManifestPath, contractLockPath);
+        if (fromGenerators.Count == 0) return report;
+        return report with
+        {
+            ErrorCount = report.ErrorCount + fromGenerators.Count(d => d.Severity == "error"),
+            WarningCount = report.WarningCount + fromGenerators.Count(d => d.Severity == "warning"),
+            Diagnostics = fromGenerators.Concat(report.Diagnostics).ToList(),
+        };
+    }
+
+    private static CheckReport CheckCompilationCore(
+        CSharpCompilation compilation,
+        IReadOnlyList<Diagnostic> compilationErrors,
+        string? z3Path,
+        bool includeWarnings,
+        IReadOnlyList<string>? scope,
+        int? timeoutMs,
+        string? clauseManifestPath,
+        string? contractLockPath)
     {
         if (compilationErrors.Count > 0)
         {

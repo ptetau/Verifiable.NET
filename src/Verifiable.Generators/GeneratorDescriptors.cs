@@ -29,4 +29,36 @@ internal static class GeneratorDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ValueTableGap = new(
+        id: "VER204",
+        title: "Dated value table leaves a gap between date ranges",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ValueTableOverlap = new(
+        id: "VER205",
+        title: "Dated value table has overlapping date ranges",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidValueTable = new(
+        id: "VER206",
+        title: "Dated value table cannot be read",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidDatedRule = new(
+        id: "VER207",
+        title: "Invalid dated rule versions",
+        messageFormat: "{0}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

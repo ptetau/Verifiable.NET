@@ -27,6 +27,12 @@
     <AdditionalFiles Include="$(MSBuildProjectDirectory)/*.contracts.lock.json" />
   </ItemGroup>
 
+  <!-- R6: dated value tables (Name.values.csv) become Name.For(DateOnly) lookups; gaps and overlaps are
+       build errors (VER204, VER205). -->
+  <ItemGroup>
+    <AdditionalFiles Include="$(MSBuildProjectDirectory)/**/*.values.csv" Exclude="$(MSBuildProjectDirectory)/bin/**;$(MSBuildProjectDirectory)/obj/**" />
+  </ItemGroup>
+
   <!-- With VerifiableAllowMissingZ3, VER104 is a warning; keep it one under TreatWarningsAsErrors / -warnaserror. -->
   <Target Name="_VerifiableAllowMissingZ3" BeforeTargets="CoreCompile"
           Condition="'$(VerifiableAllowMissingZ3)' == 'true' or '$(VerifiableAllowMissingZ3)' == '1'">

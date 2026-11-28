@@ -841,7 +841,7 @@ public static class Program
             var before = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();
             var checkReport = ElmCheckEngine.CheckCompilation(
                 loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings,
-                scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest, lockPath);
+                scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest, lockPath, loadResult.GeneratorDiagnostics);
             if (oneAnswerCheck && checkReport.Diagnostics.All(d => !d.RuleId.StartsWith("CS", StringComparison.Ordinal)))
             {
                 var oaCandidates = OneAnswer.Candidates(loadResult.Compilation);

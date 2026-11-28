@@ -217,3 +217,29 @@ public sealed class AnyValidResultAttribute(string reason) : Attribute
     /// </summary>
     public string Reason { get; } = reason;
 }
+
+/// <summary>
+/// Declares the date a version of a rule takes effect (requirement R6). Methods in one static partial
+/// class that share <see cref="Rule"/> are versions of the same rule: each is an ordinary method, proved
+/// on its own, and a generated dispatcher <c>Rule(DateOnly asOf, ...)</c> calls the version in force on
+/// <c>asOf</c>. The build fails if two versions share a date or their signatures differ.
+/// </summary>
+/// <param name="date">The first day the version applies, as <c>yyyy-MM-dd</c>.</param>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class EffectiveFromAttribute(string date) : Attribute
+{
+    /// <summary>
+    /// Gets the first day the version applies, as <c>yyyy-MM-dd</c>.
+    /// </summary>
+    public string Date { get; } = date;
+
+    /// <summary>
+    /// Gets or sets the name of the rule this method is a version of, and of the generated dispatcher.
+    /// </summary>
+    public string Rule { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this version comes from.
+    /// </summary>
+    public string? Clause { get; set; }
+}
