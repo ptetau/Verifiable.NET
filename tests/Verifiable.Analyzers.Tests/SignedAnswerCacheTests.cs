@@ -206,6 +206,23 @@ public sealed class SignedAnswerCacheTests : IDisposable
     }
 
     [Fact]
+    public void Open_SweepsStaleTemporaryFiles_ButKeepsFreshOnes()
+    {
+        OpenCache().Save(HashA, Answer(SmtStatus.Unsat));
+        var stale = Path.Combine(_dir, HashB + ".cache.0123456789abcdef.tmp");
+        var fresh = Path.Combine(_dir, HashB + ".cache.fedcba9876543210.tmp");
+        File.WriteAllText(stale, "left by a crash");
+        File.WriteAllText(fresh, "another writer, still working");
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow - SignedAnswerCache.StaleTempAge - TimeSpan.FromMinutes(5));
+
+        var cache = OpenCache();
+
+        Assert.False(File.Exists(stale));
+        Assert.True(File.Exists(fresh));
+        Assert.True(cache.TryLoad(HashA, out _));
+    }
+
+    [Fact]
     public void Z3Identity_FollowsSymlinks_AndChangesWhenTheTargetChanges()
     {
         if (OperatingSystem.IsWindows()) return;

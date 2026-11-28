@@ -22,7 +22,18 @@
     <ProjectReference Include="..\..\src\Verifiable.Contracts\Verifiable.Contracts.csproj" />
     <ProjectReference Include="..\..\src\Verifiable.Generators\Verifiable.Generators.csproj" />
     <ProjectReference Include="..\..\src\Verifiable.Analyzers\Verifiable.Analyzers.csproj" />
+    <!-- The stage-0 analyzer that proves src/Verifiable.Core. It defines the same type names as
+         Verifiable.Analyzers, so it is not referenced: BootstrapKernelTests loads it from bootstrap/. -->
+    <ProjectReference Include="..\..\src\Verifiable.Analyzers.Bootstrap\Verifiable.Analyzers.Bootstrap.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="BootstrapAnalyzer"
+                      SkipGetTargetFrameworkProperties="true"
+                      SetTargetFramework="TargetFramework=netstandard2.0" />
   </ItemGroup>
+
+  <Target Name="CopyBootstrapAnalyzer" AfterTargets="Build">
+    <Copy SourceFiles="@(BootstrapAnalyzer)" DestinationFolder="$(OutputPath)bootstrap" SkipUnchangedFiles="true" />
+  </Target>
 
   <Target Name="CopyRegexGenerator" AfterTargets="Build">
     <ItemGroup>
