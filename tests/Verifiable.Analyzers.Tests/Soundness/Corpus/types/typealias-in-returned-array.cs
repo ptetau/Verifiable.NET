@@ -1,7 +1,6 @@
 // Make returns an array holding new TodoId(x) unchecked, and Caller trusts every element of a returned array.
 // @expect: rejected
 // @witness: Corpus.Types.ReturnedArray.Caller(0)
-// @known-bug: Returning an ImmutableArray<TodoId> does not check IsValid on its elements, while callers assume every element of a returned array is valid.
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 
