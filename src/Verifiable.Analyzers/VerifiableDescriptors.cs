@@ -91,6 +91,14 @@ internal static class VerifiableDescriptors
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor VacuityCheckUndecided = new(
+        id: "VER106",
+        title: "Z3 could not decide whether a method's premises can hold, so its proofs may be vacuous",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor SmtSolverUnknown = new(
         id: "VER103",
         title: "SMT solver returned unknown or timed out",

@@ -28,7 +28,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             VerifiableDescriptors.ProofObligationFailed,
             VerifiableDescriptors.SmtSolverUnknown,
             VerifiableDescriptors.Z3SolverUnavailable,
-            VerifiableDescriptors.ContradictoryPremises
+            VerifiableDescriptors.ContradictoryPremises,
+            VerifiableDescriptors.VacuityCheckUndecided
         ];
 
     /// <inheritdoc />
@@ -259,11 +260,27 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 // A refuted goal shows its own premises are satisfiable, which settles it only if it saw all of them.
                 if (allObligations.Count > 0)
                 {
+                    var vacuity = new VacuityCheck(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceTree?.FilePath);
                     var allPremises = allObligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
-                    if (longestRefutedPreamble < allPremises.Length)
+                    var premises = longestRefutedPreamble < allPremises.Length
+                        ? vacuity.Run(allPremises)
+                        : SmtStatus.Sat;
+
+                    if (ProofKernel.PremisesContradict(premises))
                     {
-                        CheckPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceTree?.FilePath, allPremises);
+                        vacuity.ReportContradictoryPremises();
                     }
+                    else if (VacuityKernel.CheckUndecided(premises))
+                    {
+                        vacuity.Undecided.Add("whether the method's assumptions can all hold at once");
+                    }
+                    else
+                    {
+                        // The premises can hold as a whole, but a callee guarantee may still be impossible on one path.
+                        vacuity.CheckCalleeGuarantees(lowerer);
+                    }
+
+                    vacuity.ReportUndecided();
                 }
             });
         });
@@ -272,34 +289,22 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
     /// <summary>Premise checks Z3 could not decide, remembered for the life of the process so they are not retried on every build.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> UndecidedPremiseChecks = new(StringComparer.Ordinal);
 
-    private const int PremiseCheckTimeoutMs = 1000;
+    /// <summary>
+    /// Z3's deterministic work budget for a premise check (about one second on a typical machine). Using a work
+    /// budget rather than the clock makes "undecided" (VER106) the same answer on a fast laptop and a busy CI
+    /// runner, so a build cannot pass or fail by timing. Easy checks use a tiny fraction of it.
+    /// </summary>
+    internal const int PremiseCheckResourceLimit = 5_000_000;
 
-    private static void CheckPremises(
-        OperationBlockAnalysisContext opCtx,
-        IMethodSymbol method,
-        bool closedEnums,
-        bool nonDefaultImmArr,
-        string? msbuildZ3Path,
-        string? sourceFilePath,
-        string allPremises)
-    {
-        var key = Z3SolverRunner.ComputeSha256(allPremises);
-        if (UndecidedPremiseChecks.ContainsKey(key)) return;
+    /// <summary>Wall-clock backstop only; the resource limit above normally decides first.</summary>
+    private const int PremiseCheckTimeoutMs = 10_000;
 
-        var premiseCheck = Z3SolverRunner.Execute(allPremises, msbuildZ3Path, sourceFilePath, timeoutMs: PremiseCheckTimeoutMs);
-        if (ProofKernel.Decide(premiseCheck.Status) == ObligationVerdict.Undecided)
-        {
-            UndecidedPremiseChecks.TryAdd(key, 0);
-            return;
-        }
-
-        if (ProofKernel.PremisesContradict(premiseCheck.Status))
-        {
-            ReportContradictoryPremises(opCtx, method, closedEnums, nonDefaultImmArr, msbuildZ3Path, sourceFilePath);
-        }
-    }
-
-    private static void ReportContradictoryPremises(
+    /// <summary>
+    /// Checks that the assumptions behind a method's proofs can hold: all of them at once (<c>VER105</c>), and each
+    /// callee guarantee at the call that assumes it (<c>VER105</c> at the call). Checks Z3 cannot decide are
+    /// collected and reported once per method (<c>VER106</c>).
+    /// </summary>
+    private sealed class VacuityCheck(
         OperationBlockAnalysisContext opCtx,
         IMethodSymbol method,
         bool closedEnums,
@@ -307,59 +312,183 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         string? msbuildZ3Path,
         string? sourceFilePath)
     {
-        // Lower again with named premises so the unsat core can say which assumptions clash.
-        var tracking = new CfgSsaLowerer(
-            opCtx.Compilation,
-            method,
-            trackProofPremises: true,
-            closedEnums: closedEnums,
-            nonDefaultImmutableArrays: nonDefaultImmArr);
+        private CfgSsaLowerer? _tracking;
+        private List<ProofObligation>? _trackedObligations;
 
-        var obligations = new List<ProofObligation>();
-        foreach (var block in opCtx.OperationBlocks)
+        private string Display => $"{method.ContainingType?.Name}.{method.Name}";
+
+        /// <summary>Descriptions of the checks Z3 could not decide.</summary>
+        public List<string> Undecided { get; } = new();
+
+        /// <summary>Runs one premise check with the short timeout. Undecided scripts are remembered and not retried.</summary>
+        public SmtStatus Run(string script)
         {
-            if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
+            var key = Z3SolverRunner.ComputeSha256(script);
+            if (UndecidedPremiseChecks.ContainsKey(key)) return SmtStatus.Unknown;
+
+            // The option sets a work budget only; it adds no assertion, so it cannot change sat or unsat.
+            var budgeted = $"(set-option :rlimit {PremiseCheckResourceLimit})\n" + script;
+            var status = Z3SolverRunner.Execute(budgeted, msbuildZ3Path, sourceFilePath, timeoutMs: PremiseCheckTimeoutMs).Status;
+            if (VacuityKernel.CheckUndecided(status))
             {
-                obligations.AddRange(tracking.Lower(opCtx.GetControlFlowGraph(block), opCtx.OperationBlocks).Obligations);
+                UndecidedPremiseChecks.TryAdd(key, 0);
             }
+
+            return status;
         }
 
-        var lines = new List<string>();
-        if (obligations.Count > 0)
+        /// <summary>
+        /// Checks each callee guarantee against the assumptions made before it. Called only when the method's
+        /// premises as a whole can hold.
+        /// </summary>
+        public void CheckCalleeGuarantees(CfgSsaLowerer lowerer)
         {
-            var namedPremises = obligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
-            var core = Z3SolverRunner.ExecuteWithUnsatCore(namedPremises, msbuildZ3Path, sourceFilePath);
-            if (core.Status == SmtStatus.Unsat)
+            var guarantees = lowerer.CalleeGuarantees;
+            for (var i = 0; i < guarantees.Count; i++)
             {
-                var byId = tracking.Premises.ToDictionary(p => p.Id, StringComparer.Ordinal);
-                foreach (var id in core.UnsatCore)
+                var g = guarantees[i];
+
+                // Only goals emitted after the guarantee can rely on it.
+                if (g.ObligationsBefore >= lowerer.ObligationCount) continue;
+
+                // An unconditional guarantee is part of the premise set that was just shown to hold.
+                if (g.Context == "true") continue;
+
+                var prefix = lowerer.PremisePrefix(g.AssertionsBefore);
+                var withGuarantee = Run(VacuityKernel.GuaranteeQuery(prefix, g.Context, g.Guarantee));
+                var withoutGuarantee = VacuityKernel.NeedsReachabilityCheck(withGuarantee)
+                    ? Run(VacuityKernel.ReachabilityQuery(prefix, g.Context))
+                    : withGuarantee;
+
+                var verdict = VacuityKernel.ClassifyGuarantee(withGuarantee, withoutGuarantee);
+                if (verdict == GuaranteeVerdict.Impossible)
                 {
-                    if (!byId.TryGetValue(id, out var premise) || premise.Kind == "SsaBinding") continue;
-                    var where = premise.FilePath is null
-                        ? string.Empty
-                        : $" ({System.IO.Path.GetFileName(premise.FilePath)}:{premise.Line})";
-                    var why = string.IsNullOrWhiteSpace(premise.Reason) || premise.Label.Contains(premise.Reason!.Trim())
-                        ? string.Empty
-                        : $" — {premise.Reason!.Trim()}";
-                    lines.Add($"{premise.Kind}: {premise.Label}{where}{why}");
+                    ReportImpossibleGuarantee(i, g);
+                }
+                else if (verdict == GuaranteeVerdict.Undecided)
+                {
+                    Undecided.Add($"whether `{g.Label}` can hold at the call on line {g.CallLocation.GetLineSpan().StartLinePosition.Line + 1}");
                 }
             }
         }
 
-        var display = $"{method.ContainingType?.Name}.{method.Name}";
-        var loc = method.Locations.FirstOrDefault() ?? Location.None;
-        var conflict = lines.Count > 0
-            ? "These assumptions cannot all hold at once:\n    - " + string.Join("\n    - ", lines)
-            : "Z3 could not narrow the conflict down to named assumptions.";
-        var elm = ElmDiagnosticFormatter.Format(
-            "CONTRADICTORY PREMISES",
-            loc,
-            $"No input satisfies the assumptions of `{display}`, so Z3 would \"prove\" any contract here, true or false. Its proofs have been rejected.",
-            explanation: conflict,
-            fixHint: "Fix: Correct the conflicting rules (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, or a callee's `Spec.Ensures` / `[PureAxiom]`) so that at least one input satisfies them all. Note that a `Spec.Requires` anywhere in a method counts as an entry precondition.",
-            summary: $"Premises of {display} contradict each other, so its proofs are vacuous" +
-                     (lines.Count > 0 ? ": " + OneLine(string.Join("; ", lines)) : "."));
-        opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, loc, elm));
+        public void ReportContradictoryPremises()
+        {
+            var lines = new List<string>();
+            var obligations = TrackedObligations();
+            if (obligations.Count > 0)
+            {
+                var namedPremises = obligations.OrderByDescending(o => o.ScriptPreamble.Length).First().ScriptPreamble;
+                lines.AddRange(ExplainConflict(namedPremises));
+            }
+
+            var loc = method.Locations.FirstOrDefault() ?? Location.None;
+            var conflict = lines.Count > 0
+                ? "These assumptions cannot all hold at once:\n    - " + string.Join("\n    - ", lines)
+                : "Z3 could not narrow the conflict down to named assumptions.";
+            var elm = ElmDiagnosticFormatter.Format(
+                "CONTRADICTORY PREMISES",
+                loc,
+                $"No input satisfies the assumptions of `{Display}`, so Z3 would \"prove\" any contract here, true or false. Its proofs have been rejected.",
+                explanation: conflict,
+                fixHint: "Fix: Correct the conflicting rules (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, or a callee's `Spec.Ensures` / `[PureAxiom]`) so that at least one input satisfies them all. Note that a `Spec.Requires` anywhere in a method counts as an entry precondition.",
+                summary: $"Premises of {Display} contradict each other, so its proofs are vacuous" +
+                         (lines.Count > 0 ? ": " + OneLine(string.Join("; ", lines)) : "."));
+            opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, loc, elm));
+        }
+
+        private void ReportImpossibleGuarantee(int index, CalleeGuarantee g)
+        {
+            // The lowering is deterministic, so the tracked run records the same guarantee at the same index.
+            TrackedObligations();
+            var lines = new List<string>();
+            if (_tracking!.CalleeGuarantees.Count > index)
+            {
+                var tracked = _tracking.CalleeGuarantees[index];
+                var named = _tracking.PremisePrefix(tracked.AssertionsBefore) +
+                            $"\n(assert (! {tracked.Context} :named vacuity_call_context))" +
+                            $"\n(assert (! {tracked.Guarantee} :named vacuity_guarantee))\n";
+                lines.AddRange(ExplainConflict(named));
+            }
+
+            var conflict = lines.Count > 0
+                ? "Given the path to this call and the callee's preconditions, it clashes with:\n    - " + string.Join("\n    - ", lines)
+                : "It contradicts itself, the path to this call, or the callee's preconditions.";
+            var elm = ElmDiagnosticFormatter.Format(
+                "CONTRADICTORY PREMISES",
+                g.CallLocation,
+                $"The guarantee `{g.Label}` cannot hold where `{Display}` calls it, although the call is reachable. Every goal after the call on this path would be \"proved\" without meaning anything, so they have been rejected.",
+                spirit: g.Reason,
+                explanation: conflict,
+                fixHint: "Fix: Correct the callee's `Spec.Ensures` / `[PureAxiom]` so that it can hold for every input its preconditions allow, or correct the assumptions it clashes with.",
+                summary: $"Guarantee {OneLine(g.Label)} cannot hold where {Display} calls it, so proofs after the call are vacuous: fix the guarantee" +
+                         (lines.Count > 0 ? " or what it clashes with: " + OneLine(string.Join("; ", lines)) : "."),
+                relatedLocation: g.GuaranteeLocation,
+                relatedHeading: "The guarantee is declared here:");
+            var additional = g.GuaranteeLocation is { IsInSource: true } gl && gl != g.CallLocation ? new[] { gl } : null;
+            opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.ContradictoryPremises, g.CallLocation, additionalLocations: additional, elm));
+        }
+
+        public void ReportUndecided()
+        {
+            if (Undecided.Count == 0) return;
+
+            var loc = method.Locations.FirstOrDefault() ?? Location.None;
+            var elm = ElmDiagnosticFormatter.Format(
+                "VACUITY CHECK UNDECIDED",
+                loc,
+                $"Z3 could not decide, within its fixed work budget, whether the assumptions behind the proofs in `{Display}` can hold. If they cannot, those proofs are vacuous: they would pass even for false contracts.",
+                explanation: "Undecided:\n    - " + string.Join("\n    - ", Undecided),
+                fixHint: "Fix: Simplify the contracts this method relies on (its `Spec.Requires`, the types it uses, and the `Spec.Ensures` of the methods it calls), especially non-linear arithmetic and quantifiers, or split the method into smaller helpers with their own contracts.",
+                summary: $"Could not check that the assumptions of {Display} can hold, so its proofs may be vacuous: simplify the contracts it relies on or split it into helpers.");
+            opCtx.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.VacuityCheckUndecided, loc, elm));
+        }
+
+        /// <summary>Lowers the method again with named premises, so an unsat core can say which assumptions clash.</summary>
+        private List<ProofObligation> TrackedObligations()
+        {
+            if (_trackedObligations is not null) return _trackedObligations;
+
+            _tracking = new CfgSsaLowerer(
+                opCtx.Compilation,
+                method,
+                trackProofPremises: true,
+                closedEnums: closedEnums,
+                nonDefaultImmutableArrays: nonDefaultImmArr);
+            _trackedObligations = new List<ProofObligation>();
+            foreach (var block in opCtx.OperationBlocks)
+            {
+                if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
+                {
+                    _trackedObligations.AddRange(_tracking.Lower(opCtx.GetControlFlowGraph(block), opCtx.OperationBlocks).Obligations);
+                }
+            }
+
+            return _trackedObligations;
+        }
+
+        /// <summary>Names the assumptions in the unsat core of a script of named premises.</summary>
+        private List<string> ExplainConflict(string namedScript)
+        {
+            var lines = new List<string>();
+            var core = Z3SolverRunner.ExecuteWithUnsatCore(namedScript, msbuildZ3Path, sourceFilePath);
+            if (core.Status != SmtStatus.Unsat) return lines;
+
+            var byId = _tracking!.Premises.ToDictionary(p => p.Id, StringComparer.Ordinal);
+            foreach (var id in core.UnsatCore)
+            {
+                if (!byId.TryGetValue(id, out var premise) || premise.Kind == "SsaBinding") continue;
+                var where = premise.FilePath is null
+                    ? string.Empty
+                    : $" ({System.IO.Path.GetFileName(premise.FilePath)}:{premise.Line})";
+                var why = string.IsNullOrWhiteSpace(premise.Reason) || premise.Label.Contains(premise.Reason!.Trim())
+                    ? string.Empty
+                    : $" — {premise.Reason!.Trim()}";
+                lines.Add($"{premise.Kind}: {premise.Label}{where}{why}");
+            }
+
+            return lines;
+        }
     }
 
     internal static string BuildQueryScript(ProofObligation ob) =>
