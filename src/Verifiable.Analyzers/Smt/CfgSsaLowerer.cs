@@ -101,6 +101,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly ContractExpressionTranslator _translator;
 
     private readonly List<string> _decls = new();
+    private readonly Dictionary<IFieldSymbol, SmtTypedTerm> _staticReadonlyFields = new(SymbolEqualityComparer.Default);
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
     private readonly List<NamedPremise> _premises = new();
@@ -2175,6 +2176,16 @@ internal sealed partial class CfgSsaLowerer
             }
             if (!emitObligations)
                 throw new ContractLoweringException($"Unsupported static field '{field.Name}' in specification.");
+            if (field.IsReadOnly && _inQuantifierDepth == 0)
+            {
+                // A static readonly field never changes after its initializer, so every read sees the same unknown value.
+                if (!_staticReadonlyFields.TryGetValue(field, out var cached))
+                {
+                    cached = BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
+                    _staticReadonlyFields[field] = cached;
+                }
+                return cached;
+            }
             return BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
         }
 
@@ -2416,7 +2427,10 @@ internal sealed partial class CfgSsaLowerer
             if (method.Name == "Implies" && inv.Arguments.Length == 2)
             {
                 var ant = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
-                var cons = LowerExpression(GetOrderedArgOp(inv, 1), CombineAnd(gamma, ant.Term), env, emitObligations, inlineDepth);
+                // In code (obligations emitted) C# evaluates both arguments, so the consequent runs under the caller's path
+                // condition; only in a specification is Implies a logical connective guarding its consequent.
+                var consGamma = emitObligations ? gamma : CombineAnd(gamma, ant.Term);
+                var cons = LowerExpression(GetOrderedArgOp(inv, 1), consGamma, env, emitObligations, inlineDepth);
                 return new SmtTypedTerm($"(=> {ant.Term} {cons.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
             }
 
@@ -3041,8 +3055,26 @@ internal sealed partial class CfgSsaLowerer
         return lowered;
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, object> RegexUseCache = new();
+
+    /// <summary>True when the program mentions <c>Regex</c> at all, so that regex-related string assumptions are worth their cost.</summary>
+    private bool CompilationUsesRegex() =>
+        (bool)RegexUseCache.GetValue(_compilation, c =>
+            c.SyntaxTrees.Any(t => t.GetText().ToString().IndexOf("Regex", StringComparison.Ordinal) >= 0));
+
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (value.Type.SpecialType == SpecialType.System_String)
+        {
+            // A .NET string is a sequence of UTF-16 code units, but Z3's characters reach U+2FFFF; without this a
+            // regex over a full-BMP class could be "refuted" by a character no string can hold.
+            if (CompilationUsesRegex())
+            {
+                AddAssertion(RegexModel.BmpStringAssumption(value.Term), "StringAxiom", "string characters are UTF-16 code units", loc);
+            }
+            return;
+        }
+
         if (value.Type.TypeKind == TypeKind.Enum &&
             TryGetIntegralBounds(value.Type, out var eMin, out var eMax, out _, out _))
         {
@@ -3791,6 +3823,13 @@ internal sealed partial class CfgSsaLowerer
 
         if (cur is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } field })
         {
+            // A static constructor (or another static initializer) can replace the Regex the field was initialized with.
+            if (StaticFieldMayBeReassigned(field))
+            {
+                error = $"Static Regex field '{field.Name}' is assigned (or passed by reference) in a static constructor or initializer, so its initializer's pattern is not necessarily the one used.";
+                return false;
+            }
+
             foreach (var synRef in field.DeclaringSyntaxReferences)
             {
                 var syn = synRef.GetSyntax();
@@ -3821,6 +3860,77 @@ internal sealed partial class CfgSsaLowerer
         error = "Instance Regex.IsMatch requires a [GeneratedRegex] method/property or a static readonly Regex field initialized with a constant pattern.";
         return false;
     }
+
+    /// <summary>
+    /// True when anything other than the field's own initializer might store a different value into the static
+    /// readonly <paramref name="field"/>: any use of it in a static constructor of its type, or a write (assignment,
+    /// <c>ref</c>/<c>out</c> argument, address-taking) in another static initializer. A field declared in metadata,
+    /// whose code is not visible, counts as reassignable.
+    /// </summary>
+    private bool StaticFieldMayBeReassigned(IFieldSymbol field)
+    {
+        var type = field.ContainingType;
+        if (type is null || !field.DeclaringSyntaxReferences.Any())
+        {
+            return true;
+        }
+
+        foreach (var syntaxRef in type.DeclaringSyntaxReferences)
+        {
+            var typeSyntax = syntaxRef.GetSyntax();
+            if (!_compilation.SyntaxTrees.Contains(typeSyntax.SyntaxTree))
+            {
+                return true;
+            }
+
+            if (typeSyntax is not TypeDeclarationSyntax typeDecl)
+            {
+                return true;
+            }
+
+            var model = _compilation.GetSemanticModel(typeSyntax.SyntaxTree);
+            foreach (var member in typeDecl.Members)
+            {
+                // Methods cannot assign a readonly field; only the static constructor and initializers can.
+                var isStaticCtor = member is ConstructorDeclarationSyntax ctor && ctor.Modifiers.Any(SyntaxKind.StaticKeyword);
+                if (!isStaticCtor && member is not (FieldDeclarationSyntax or PropertyDeclarationSyntax))
+                {
+                    continue;
+                }
+
+                foreach (var node in member.DescendantNodes().OfType<ExpressionSyntax>())
+                {
+                    if (node is not (IdentifierNameSyntax or MemberAccessExpressionSyntax) ||
+                        !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(node).Symbol, field))
+                    {
+                        continue;
+                    }
+
+                    // The name inside "Type.Field" binds to the same symbol; only the outermost expression counts.
+                    if (node.Parent is MemberAccessExpressionSyntax parentAccess && parentAccess.Name == node)
+                    {
+                        continue;
+                    }
+
+                    if (isStaticCtor || model.GetOperation(node) is not { } op || !IsPlainRead(op))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsPlainRead(IOperation op) => op.Parent switch
+    {
+        IInvocationOperation inv => ReferenceEquals(inv.Instance, op) || inv.Arguments.Any(a => ReferenceEquals(a.Value, op) && a.Parameter?.RefKind == RefKind.None),
+        IPropertyReferenceOperation prop => ReferenceEquals(prop.Instance, op),
+        IFieldReferenceOperation fld => ReferenceEquals(fld.Instance, op),
+        IArgumentOperation arg => arg.Parameter?.RefKind == RefKind.None,
+        _ => false
+    };
 
     private static bool TryExtractImmutableCreateElements(IInvocationOperation inv, out List<IOperation> elements)
     {

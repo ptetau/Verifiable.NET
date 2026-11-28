@@ -322,6 +322,10 @@ internal static class VerifiableDescriptors
                 $"A `lock` statement is not allowed inside a `[Verifiable]` cage.",
                 "Locks imply shared mutable state and thread-interleaving schedules that cannot be verified locally.",
                 "Read an immutable snapshot at the boundary, run the `[Verifiable]` transition on that value, and commit outside the cage."),
+            "VER005_LocalFunction" => (
+                $"The local function `{subject}` is not allowed inside a `[Verifiable]` cage.",
+                "The prover does not look inside local functions: their bodies, loops and contracts would go unchecked, and their writes to captured variables would be lost.",
+                "Make it a `static` method of the class (with its own `Spec.Requires`/`Spec.Ensures`) and pass what it needs as parameters."),
             "VER005_Goto" => (
                 $"A `goto` statement is not allowed inside a `[Verifiable]` cage.",
                 "Unstructured jumps obscure loop structure and make path-condition / termination proofs fragile.",
