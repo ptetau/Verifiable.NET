@@ -1,6 +1,5 @@
 // string.StartsWith(string) with no StringComparison is culture-sensitive: ICU ignores "\0", so "abc".StartsWith("\0") is true.
 // @expect: rejected
-// @known-bug: StartsWith(string) without a StringComparison is culture-sensitive (ICU ignores \0) but is modelled as ordinal str.prefixof
 // @witness: Corpus.Strings.CultureStartsWith.StartsWithNul("abc")
 using Verifiable.Contracts;
 

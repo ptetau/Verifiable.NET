@@ -1,6 +1,5 @@
 // string.EndsWith(string) with no StringComparison is culture-sensitive: "é" ends with "é" (canonically equal), though it is one code unit long.
 // @expect: rejected
-// @known-bug: EndsWith(string) without a StringComparison is culture-sensitive (canonical equivalence) but is modelled as ordinal str.suffixof
 // @witness: Corpus.Strings.CultureEndsWith.EndsWithDecomposedAcute("é")
 using Verifiable.Contracts;
 

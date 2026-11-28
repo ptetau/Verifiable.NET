@@ -1527,6 +1527,28 @@ internal sealed partial class CfgSsaLowerer
                         return directConverted;
                     }
 
+                    if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                        _types.TryGetNullableInfo(inner.Type, out _, out var unwrapSrcId, out var unwrapSrcType) &&
+                        !_types.TryGetNullableInfo(target, out _, out _, out _) &&
+                        !conv.Conversion.IsUserDefined)
+                    {
+                        // `(int)x` on an int?: throws InvalidOperationException when x is empty, else the payload converted.
+                        if (!inCoalesce && (emitObligations || _inQuantifierDepth > 0))
+                        {
+                            EmitSafetyObligation("Precondition", $"Nullable must have a value for the cast in '{conv.Syntax}'",
+                                conv.Syntax.GetLocation(), gamma, $"(not (= {inner.Term} opt-none-{unwrapSrcId}))");
+                        }
+                        var unwrapped = new SmtTypedTerm($"(opt-val-{unwrapSrcId} {inner.Term})", unwrapSrcType!);
+                        if (SymbolEqualityComparer.Default.Equals(unwrapSrcType, target))
+                            return unwrapped;
+                        var unwrapNonNullGamma = CombineAnd(gamma, $"(not (= {inner.Term} opt-none-{unwrapSrcId}))");
+                        if (TryLowerIntegralOrEnumConversion(unwrapped, target, convChecked, unwrapNonNullGamma, conv.Syntax.GetLocation(), out var unwrapConverted))
+                            return unwrapConverted;
+                        return inCoalesce && conv.IsImplicit
+                            ? ConvertNullableValue(unwrapped, target)
+                            : _translator.ConvertTo(unwrapped, target);
+                    }
+
                     if (inCoalesce && conv.IsImplicit)
                         return ConvertNullableValue(inner, target);
                     return _translator.ConvertTo(inner, target);
@@ -1685,6 +1707,11 @@ internal sealed partial class CfgSsaLowerer
             case IIsPatternOperation isPat:
                 var subj = LowerExpression(isPat.Value, gamma, env, emitObligations, inlineDepth);
                 return LowerPatternOp(subj, isPat.Pattern, gamma, env, emitObligations, inlineDepth);
+
+            case IIsTypeOperation isType:
+                var typeSubject = LowerExpression(isType.ValueOperand, gamma, env, emitObligations, inlineDepth);
+                var typeTest = LowerTypeTest(typeSubject, isType.TypeOperand, isType);
+                return new SmtTypedTerm(isType.IsNegated ? $"(not {typeTest})" : typeTest, _compilation.GetSpecialType(SpecialType.System_Boolean));
 
             case IPropertyReferenceOperation propRef:
                 return LowerPropertyReference(propRef, gamma, env, emitObligations, inlineDepth);
@@ -1969,17 +1996,26 @@ internal sealed partial class CfgSsaLowerer
 
             case IRelationalPatternOperation rp:
                 var rVal = LowerExpression(rp.Value, gamma, env, emitObligations, inlineDepth);
+                if (_types.TryGetNullableInfo(subject.Type, out _, out var relOptId, out var relPayloadType))
+                {
+                    // `x is > 5` on an int? holds only when x has a value and the payload satisfies the relation.
+                    var relPayload = new SmtTypedTerm($"(opt-val-{relOptId} {subject.Term})", relPayloadType!);
+                    var relCmp = LowerBinaryOperator(rp.OperatorKind, relPayload, rVal, boolType, gamma, pattern.Syntax.GetLocation(), emitObligations);
+                    return new SmtTypedTerm($"(and (not (= {subject.Term} opt-none-{relOptId})) {relCmp.Term})", boolType);
+                }
                 return LowerBinaryOperator(rp.OperatorKind, subject, rVal, boolType, gamma, pattern.Syntax.GetLocation(), emitObligations);
 
+            case ITypePatternOperation tp:
+                return new SmtTypedTerm(LowerTypeTest(subject, tp.MatchedType, pattern), boolType);
+
             case IDeclarationPatternOperation dp:
-                var notNull = subject.Type.SpecialType == SpecialType.System_String
-                    ? $"(not (= {subject.Term} str-null))"
-                    : (_types.TryGetNullableInfo(subject.Type, out _, out var optId, out _)
-                        ? $"(not (= {subject.Term} opt-none-{optId}))"
-                        : "true");
+                // `is var t` (and a declaration of the subject's own nullable type) matches null; any other
+                // declaration pattern is a type test that null fails.
+                var notNull = dp.MatchesNull ? "true" : LowerTypeTest(subject, dp.MatchedType, pattern);
                 if (dp.DeclaredSymbol is ILocalSymbol locSym)
                 {
-                    var bound = _types.TryGetNullableInfo(subject.Type, out _, out var oId, out var innerT)
+                    var bound = !dp.MatchesNull && _types.TryGetNullableInfo(subject.Type, out _, out var oId, out var innerT) &&
+                                !_types.TryGetNullableInfo(locSym.Type, out _, out _, out _)
                         ? new SmtTypedTerm($"(opt-val-{oId} {subject.Term})", innerT!)
                         : subject;
                     env.Vars[locSym] = bound;
@@ -1993,10 +2029,38 @@ internal sealed partial class CfgSsaLowerer
                 return new SmtTypedTerm("true", boolType);
 
             default:
-                if (!emitObligations)
-                    throw new ContractLoweringException($"Unsupported pattern '{pattern.Kind}' in specification.");
-                return new SmtTypedTerm("true", boolType);
+                // Unmodelled pattern kinds (list, slice, ITuple, ...) must never be assumed to match.
+                throw new ContractLoweringException($"Unsupported pattern '{pattern.Kind}' in '{pattern.Syntax}'.");
         }
+    }
+
+    /// <summary>
+    /// The SMT test for "<paramref name="subject"/> is <paramref name="matched"/>": null never matches a type test,
+    /// a non-null value of the subject's own (underlying) type always does. Anything else is not modelled.
+    /// </summary>
+    private string LowerTypeTest(SmtTypedTerm subject, ITypeSymbol? matched, IOperation pattern)
+    {
+        if (matched is not null)
+        {
+            if (subject.Type.SpecialType == SpecialType.System_String &&
+                matched.SpecialType == SpecialType.System_String)
+            {
+                return $"(not (= {subject.Term} str-null))";
+            }
+            if (_types.TryGetNullableInfo(subject.Type, out _, out var optId, out var payloadType))
+            {
+                var matchedUnderlying = _types.TryGetNullableInfo(matched, out _, out _, out var matchedPayload) ? matchedPayload! : matched;
+                if (SymbolEqualityComparer.Default.Equals(matchedUnderlying, payloadType))
+                    return $"(not (= {subject.Term} opt-none-{optId}))";
+            }
+            else if (SymbolEqualityComparer.Default.Equals(matched, subject.Type))
+            {
+                // A value type, or a modelled reference type (never null in the SMT model).
+                return "true";
+            }
+        }
+
+        throw new ContractLoweringException($"Unsupported type pattern '{pattern.Syntax}' in specification or body.");
     }
 
     private SmtTypedTerm LowerRecursivePattern(
@@ -2131,6 +2195,18 @@ internal sealed partial class CfgSsaLowerer
             {
                 EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
             }
+            if (emitObligations || _inQuantifierDepth > 0)
+            {
+                if (recv.Type.SpecialType == SpecialType.System_String)
+                {
+                    EmitStringNonNullObligation(recv, $"Receiver must be non-null for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma);
+                }
+                else if (prop.Name == "Value" && _types.TryGetNullableInfo(recv.Type, out _, out var valOptId, out _))
+                {
+                    EmitSafetyObligation("Precondition", $"Nullable must have a value for '{propRef.Syntax}'",
+                        propRef.Syntax.GetLocation(), gamma, $"(not (= {recv.Term} opt-none-{valOptId}))");
+                }
+            }
             return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth, gamma);
         }
 
@@ -2199,6 +2275,14 @@ internal sealed partial class CfgSsaLowerer
     {
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
+            if (memberName == "Length" && receiver.Type.SpecialType == SpecialType.System_String &&
+                _types.GetSort(direct.Type) == "(_ BitVec 32)")
+            {
+                // Under [CheckedArithmetic] the length is a 32-bit vector; a .NET string holds at most 0x3FFFFFDF code
+                // units, so the conversion from Z3's unbounded length never wraps for a real string.
+                AddAssertion($"(or (= {receiver.Term} str-null) (<= (str.len (str-text {receiver.Term})) 1073741791))",
+                    "StringAxiom", "string length bound", Location.None);
+            }
             return direct;
         }
 
@@ -2791,6 +2875,10 @@ internal sealed partial class CfgSsaLowerer
             }
             ThrowIfEqualityUnmodeled(recvTerm.Type, viaOperator: false);
             ThrowIfEqualityUnmodeled(argValues[0].Type, viaOperator: false);
+            if ((emitObligations || _inQuantifierDepth > 0) && IsStringTyped(inv.Instance, recvTerm))
+            {
+                EmitStringNonNullObligation(recvTerm, $"Receiver must be non-null for '{inv.Syntax}'", loc, gamma);
+            }
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
             return new SmtTypedTerm(SymbolEqualityComparer.Default.Equals(recvTerm.Type, argValues[0].Type)
                 ? EqualityTerm(l, r, recvTerm.Type)
@@ -2809,6 +2897,21 @@ internal sealed partial class CfgSsaLowerer
         {
             _expandingCalls.Remove(method.OriginalDefinition);
         }
+    }
+
+    /// <summary>True when the receiver is a C# string, even if it was converted to an interface such as IEquatable&lt;string&gt;.</summary>
+    private static bool IsStringTyped(IOperation? instance, SmtTypedTerm recvTerm)
+    {
+        if (recvTerm.Type.SpecialType == SpecialType.System_String)
+            return true;
+        var cur = instance;
+        while (cur is IConversionOperation conv)
+        {
+            cur = conv.Operand;
+            if (cur.Type?.SpecialType == SpecialType.System_String)
+                return true;
+        }
+        return false;
     }
 
     private SmtTypedTerm LowerHelperCall(IMethodSymbol method, SmtTypedTerm? receiver, IReadOnlyList<SmtTypedTerm> args,

@@ -1,6 +1,5 @@
 // A list pattern on a string checks its characters: "b" is not ['a', ..].
 // @expect: rejected
-// @known-bug: list patterns (IListPatternOperation) fall into the default case of LowerPatternOp and are modelled as true
 // @witness: Corpus.Strings.ListPattern.StartsWithA("b")
 using Verifiable.Contracts;
 
