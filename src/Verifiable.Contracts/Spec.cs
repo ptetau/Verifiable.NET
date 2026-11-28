@@ -57,7 +57,7 @@ public static class Spec
     }
 
     /// <summary>
-    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?)"/>.
+    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?, string?)"/>.
     /// </summary>
     /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
     [PureAxiom]
