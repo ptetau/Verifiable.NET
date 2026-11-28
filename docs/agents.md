@@ -118,6 +118,27 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Context packs (`pack`)
+
+One command gives an agent everything it needs to work on a method, and nothing else (requirement R13):
+
+```bash
+verifiable-query pack --project App.csproj --holes --clauses spec.clauses.json --format json
+verifiable-query pack --project App.csproj --target Schedule.CanBook --max-tokens 4000 --format json
+verifiable-query pack --project App.csproj --clause C3 --format json
+```
+
+Each pack (schema `pack@1`) holds:
+
+- the method's `signature`, `contracts`, whether it is a `hole`, and the `clauses` with their text from the manifest;
+- `types`: every hand-written type in the signature, contracts or containing type, and every type reachable from their data members or from the closer helpers' signatures, each cut down to its data members and rules (`IsValid`, `[Invariant]`, with reason and clause);
+- `helpers`: the methods it may call, with their contracts, ranked 0 (named in its contracts), 1 (same type), 2 (a pack type's method), 3 (any other contracted method);
+- `callers`: the methods that call it, with their contracts and the call site.
+
+`--max-tokens <n>` (about four characters a token) drops the least relevant parts first — rank-3 helpers, callers, the deepest types, rank-2 and rank-1 helpers, then other first-level types — and lists each in `omitted`. The method's own signature, contracts and clause text are never dropped.
+
+A test holds every `[Verifiable]` method in `samples/` to this: every hand-written type and method its real body uses is in its pack.
+
 ### Contract lock (`lock`)
 
 Contracts sit at the top of the body, so the LLM filling a body edits the same method that holds its spec. The lock stops it weakening a contract until the proof passes (requirement R3; this is the hash-check option from open question 1).

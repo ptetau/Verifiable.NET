@@ -23,6 +23,7 @@ public static class Program
           verifiable-query list --project <path> [options]
           verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
+          verifiable-query pack --project <path> (--target <symbols> | --clause <ids> | --holes) [--max-tokens <n>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
@@ -34,6 +35,7 @@ public static class Program
           list              List queryable [Verifiable] methods, [Invariant] members, and [TypeAlias<T>] types.
           clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
           holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
+          pack              Everything an agent needs to fill one method: contracts, clause text, types, helpers, callers.
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
@@ -56,6 +58,8 @@ public static class Program
           --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000; `check` default: 2500).
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
+          --holes           With `pack`, one pack per hole.
+          --max-tokens <n>  With `pack`, drop the least relevant parts until each pack fits; dropped parts are listed.
           --out <file>      With `lock`, where to write the lock file.
           --clause <ids>    With `check`, prove only the symbols that carry these clauses (comma-separated).
           --stats           With `check`, add timing and proof-cache counts (not byte-stable).
@@ -79,7 +83,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack"];
 
     /// <summary>
     /// CLI entry point.
@@ -145,7 +149,9 @@ public static class Program
         string? assertExpr = null;
         string? assumeExpr = null;
         string? because = null;
-        var format = "elm";
+        // Read --format first, so an error in an earlier option is still reported in the format asked for.
+        var formatAt = Array.LastIndexOf(args, "--format");
+        var format = formatAt >= 0 && formatAt + 1 < args.Length ? args[formatAt + 1] : "elm";
         var colorMode = ElmColorMode.Auto;
         var includeWarnings = true;
         var timeoutMs = NormalizeTimeoutMs(5000);
@@ -156,6 +162,8 @@ public static class Program
         string? clauseManifest = null;
         string? clauseFilter = null;
         string? lockPath = null;
+        int? maxTokens = null;
+        var allHoles = false;
         string? outPath = null;
         var timeoutGiven = false;
         var stats = false;
@@ -242,6 +250,21 @@ public static class Program
                     break;
                 case "--lock":
                     lockPath = NextVal();
+                    break;
+                case "--holes":
+                    allHoles = true;
+                    break;
+                case "--max-tokens":
+                    var mtText = NextVal();
+                    if (!int.TryParse(mtText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var mt) || mt < 1)
+                    {
+                        var mtErr = new QueryReport(command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                            Array.Empty<MethodQueryResult>(), "INVALID OPTION VALUE",
+                            $"`--max-tokens` must be a positive whole number, not `{mtText}`.", Location.None, "Example: --max-tokens 4000");
+                        WriteOutput(command, mtErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                        return ResolveExitCode(QueryOutcomeStatus.Error);
+                    }
+                    maxTokens = mt;
                     break;
                 case "--out":
                     outPath = NextVal();
@@ -400,6 +423,57 @@ public static class Program
                 return ResolveExitCode(QueryOutcomeStatus.Error);
             }
             manifestClauses = mc;
+        }
+
+        if (command == "pack")
+        {
+            List<IMethodSymbol> targets;
+            if (allHoles) targets = ContextPacks.HoleMethods(loadResult.Compilation);
+            else if (!string.IsNullOrWhiteSpace(clauseFilter))
+            {
+                var wanted = clauseFilter!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(c => c.Trim()).ToList();
+                targets = ContextPacks.ForClauses(loadResult.Compilation, wanted);
+            }
+            else if (!string.IsNullOrWhiteSpace(target))
+            {
+                targets = ContextPacks.Resolve(loadResult.Compilation,
+                    target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList());
+            }
+            else targets = new List<IMethodSymbol>();
+
+            if (targets.Count == 0)
+            {
+                var pErr = new QueryReport(command, string.Empty, null, null, target ?? clauseFilter, QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "NOTHING TO PACK",
+                    allHoles ? "There are no holes in these sources." : "`pack` needs `--target <Type.Member>`, `--clause <id>` or `--holes`, naming at least one method.",
+                    Location.None, "Run `verifiable-query list` or `verifiable-query holes` to see what exists.");
+                WriteOutput(command, pErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+
+            var texts = manifestClauses?.ToDictionary(c => c.Id, c => c.Text, StringComparer.Ordinal) ?? new Dictionary<string, string?>();
+            var packs = targets
+                .Select(t => ContextPacks.Build(loadResult.Compilation, t, texts))
+                .Select(p => maxTokens is int budget ? ContextPacks.Trim(p, budget, ContextPacks.RenderOne) : p)
+                .OrderBy(p => p.Symbol, StringComparer.Ordinal).ThenBy(p => p.Line)
+                .ToList();
+            var packPage = AgentOutput.Slice(packs.Count, offset, limit);
+            var packJson = AgentOutput.Write(indented: format.Equals("json", StringComparison.OrdinalIgnoreCase), w =>
+            {
+                w.WriteStartObject();
+                w.WriteString("schema", AgentOutput.SchemaId("pack"));
+                w.WriteString("command", "pack");
+                w.WriteString("status", AgentOutput.StatusWord(AgentOutcome.Proved));
+                w.WriteNumber("exitCode", 0);
+                if (maxTokens is int mtv) w.WriteNumber("maxTokens", mtv); else w.WriteNull("maxTokens");
+                w.WriteStartArray("packs");
+                for (var i = packPage.Offset; i < packPage.Offset + packPage.Count; i++) ContextPacks.Write(w, packs[i]);
+                w.WriteEndArray();
+                AgentOutput.WritePage(w, packPage, limit);
+                w.WriteEndObject();
+            });
+            stdout.WriteLine(packJson);
+            return 0;
         }
 
         if (command == "lock")
