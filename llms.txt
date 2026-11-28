@@ -98,7 +98,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER005` (`DISALLOWED CONTROL FLOW`): unannotated `while`/`foreach`, `throw`, `try/catch`, `async`/`await`, `lock`, `goto`. Fix: `LoopInvariant` + `Decreases` or `Result<T, TError>`.
 - `VER006` (`UNVERIFIED CALL`): unverified callee, reflection, `dynamic`, unanalyzed delegate. Fix: `[Verifiable]` / `[PureAxiom]` / Sandwich I/O split.
 - `VER007` (`UNCONSUMED OBLIGATION`): dropped, overwritten, discarded, or double-consumed `[MustConsume]` token. Fix: pass to `[ConsumesObligation]`, return, or `Obligation.Discard(...)`.
-- `VER101` (`UNSUPPORTED CONTRACT`): invalid or non-lowerable contract.
+- `VER101` (`UNSUPPORTED CONTRACT`): invalid or non-lowerable contract. A warning (`METHOD NOT CHECKED`) when a `[Verifiable]` method with no contracts has code that cannot be lowered.
 - `VER102` (`PROOF FAILED`): Z3 refutation (`SAT`) with counterexample, `Why this rule exists:`, and under `VERIFIABLE_AGENT=1`:
   `<verifiable-counterexample>{"rule":"VER102","symbol":"...","kind":"...","contract":"...","reason":"...","counterexample":{...},"smtHash":"...","fix":"Fix: ..."}</verifiable-counterexample>`
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.

@@ -25,6 +25,7 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.AcceptCachedAnswer` | A cached answer replaces a Z3 call only if its signature checked out and it is a definitive `unsat` or `sat`. (The signature check itself is in `SignedAnswerCache`, which is tested, not proved.) |
 | `ProofKernel.PremisesContradict` | Premises are called contradictory only when Z3 answers `unsat` to them alone; an undecided check is not evidence either way. When they contradict, the analyzer rejects the method's proofs with `VER105`. |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
+| `CheckSelectionKernel.Select` | A method is passed over in silence only when it was lowered completely and has no obligations. Any obligation found goes to Z3. Code that cannot be lowered is a `VER101` error when the method has contracts or obligations, and a `VER101` warning otherwise, so an unchecked method never looks proved. |
 | `ObligationLattice.Join` | When two paths merge, a `[MustConsume]` token that may be live on either path is still flagged, unless one side is a sink-method parameter (which may hold the token). A token counts as consumed only if it was consumed on both paths. |
 | `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. Together with the per-block transfer rules (which are not proved), this is what lets the `VER007` analysis give the same answer in any visiting order. |
 
@@ -47,7 +48,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **Z3** gives correct `sat`/`unsat` answers.
 - **Roslyn** gives a correct control-flow graph and types.
 - **The C# to SMT translation** (`CfgSsaLowerer` and friends) turns your code and contracts into formulas that mean the same thing. This is the largest trusted part. It is covered by the analyzer test suite, not by proof.
-- **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved.
+- **Choosing what to check.** Every `[Verifiable]` method is lowered, and `CheckSelectionKernel.Select` (proved, above) passes over a method in silence only when lowering finished and found no obligation. If lowering stops at code it cannot translate, the method is reported with `VER101`: an error when it has contracts or obligations, a warning when it has neither. What is still trusted is the lowerer itself: it decides which obligations a method has, and an obligation it never creates is never checked.
 - **The query CLI script.** `QueryEngine.BuildNamedQueryScript` assembles the premises, path conditions and `--assume` for `verifiable-query`. Only its final, negated-goal line comes from the core.
 - **The `VER007` transfer rules.** How each statement changes a token's state, and the check at method exit, live in `LinearObligationAnalyzer`. Only the merge rule is in the core.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query, returns the output lines it read, and computes the cache key (`BuildHashInput`).
