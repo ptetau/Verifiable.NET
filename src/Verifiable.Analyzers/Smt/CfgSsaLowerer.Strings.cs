@@ -60,6 +60,59 @@ internal sealed partial class CfgSsaLowerer
         AddAssertion(axiom, "StringAxiom", "string.Trim specification", loc);
     }
 
+    /// <summary>
+    /// The raw text of a C# string term, with null read as "" (what concatenation does). A term that is
+    /// literally <c>(str-val X)</c> is never null, so its text is just X. Unwrapping it keeps a chain of
+    /// concatenations linear in size instead of copying each left operand twice per step.
+    /// </summary>
+    internal static string TextOrEmptyIfNull(string term)
+    {
+        const string wrapper = "(str-val ";
+        if (term.StartsWith(wrapper, StringComparison.Ordinal) && IndexOfClosingParen(term, 0) == term.Length - 1)
+        {
+            return term.Substring(wrapper.Length, term.Length - wrapper.Length - 1);
+        }
+
+        return $"(ite (= {term} str-null) \"\" (str-text {term}))";
+    }
+
+    /// <summary>
+    /// Index of the parenthesis that closes the one opened at <paramref name="open"/>, skipping string
+    /// literals (where <c>""</c> is an escaped quote) and <c>|quoted|</c> symbols. -1 if it is not closed.
+    /// </summary>
+    private static int IndexOfClosingParen(string term, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < term.Length; i++)
+        {
+            var ch = term[i];
+            if (ch == '"')
+            {
+                i++;
+                while (i < term.Length && !(term[i] == '"' && (i + 1 >= term.Length || term[i + 1] != '"')))
+                {
+                    i += term[i] == '"' ? 2 : 1;
+                }
+            }
+            else if (ch == '|')
+            {
+                i = term.IndexOf('|', i + 1);
+                if (i < 0) return -1;
+            }
+            else if (ch == '(')
+            {
+                depth++;
+            }
+            else if (ch == ')')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+
+        return -1;
+    }
+
     private void EmitStringNonNullObligation(SmtTypedTerm strTerm, string context, Location loc, string gamma)
     {
         EmitSafetyObligation("Precondition", context, loc, gamma, $"(not (= {strTerm.Term} str-null))");
@@ -92,6 +145,14 @@ internal sealed partial class CfgSsaLowerer
 
         switch (kind)
         {
+            case StringIntrinsicKind.CharToString:
+            {
+                // A char is one UTF-16 code unit (0..65535); Z3's alphabet covers that range, so this is exact.
+                var idx = _translator.IntTermForIndex(recvTerm!);
+                result = new SmtTypedTerm($"(str-val (str.from_code {idx}))", strType);
+                return true;
+            }
+
             case StringIntrinsicKind.IsNullOrEmpty:
             {
                 var arg = _translator.UnwrapRefinedIfApplicable(
@@ -183,7 +244,7 @@ internal sealed partial class CfgSsaLowerer
                 {
                     var sep = _translator.UnwrapRefinedIfApplicable(
                         LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth));
-                    sepRaw = $"(ite (= {sep.Term} str-null) \"\" (str-text {sep.Term}))";
+                    sepRaw = TextOrEmptyIfNull(sep.Term);
                 }
 
                 var valuesArg = GetOrderedArgOp(inv, 1);
@@ -213,7 +274,7 @@ internal sealed partial class CfgSsaLowerer
                     }
                     var elem = _translator.UnwrapRefinedIfApplicable(
                         LowerExpression(elemOps[i], gamma, env, emitObligations, inlineDepth));
-                    rawParts.Add($"(ite (= {elem.Term} str-null) \"\" (str-text {elem.Term}))");
+                    rawParts.Add(TextOrEmptyIfNull(elem.Term));
                 }
 
                 var joinedRaw = rawParts.Count == 1

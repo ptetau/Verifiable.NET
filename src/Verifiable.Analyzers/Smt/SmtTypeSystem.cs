@@ -168,7 +168,7 @@ internal sealed class SmtTypeSystem
             try
             {
                 var id = ++_typeCounter;
-                var safeName = SanitizeName(composite.Name);
+                var safeName = SymbolPart(composite.Name);
                 var dtSort = $"Dt_{safeName}_{id}";
                 var ctorName = $"mk-{dtSort}";
 
@@ -664,7 +664,7 @@ internal sealed class SmtTypeSystem
             foreach (var elem in symbol.TupleElements)
             {
                 var name = elem.Name;
-                fields.Add(new SmtFieldInfo(name, elem.Type, $"f_{dtSort}_{SanitizeName(name)}"));
+                fields.Add(new SmtFieldInfo(name, elem.Type, $"f_{dtSort}_{SymbolPart(name)}"));
             }
             return fields;
         }
@@ -719,7 +719,7 @@ internal sealed class SmtTypeSystem
                 if (IsStoredProperty(p, ctorParamNames) && seen.Add(p.Name))
                 {
                     var isNonDefault = VerifiableSymbolHelpers.IsNonDefaultMember(p, cur, globalNonDefault: false);
-                    fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SanitizeName(p.Name)}", isNonDefault));
+                    fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SymbolPart(p.Name)}", isNonDefault));
                 }
             }
 
@@ -730,7 +730,7 @@ internal sealed class SmtTypeSystem
                     seen.Add(f.Name))
                 {
                     var isNonDefault = VerifiableSymbolHelpers.IsNonDefaultMember(f, cur, globalNonDefault: false);
-                    fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SanitizeName(f.Name)}", isNonDefault));
+                    fields.Add(new SmtFieldInfo(f.Name, f.Type, $"f_{dtSort}_{SymbolPart(f.Name)}", isNonDefault));
                 }
             }
         }
@@ -789,6 +789,39 @@ internal sealed class SmtTypeSystem
         return sort;
     }
 
+    /// <summary>
+    /// Writes a C# name as part of an SMT-LIB symbol. ASCII letters, digits and <c>_</c> are kept; every other
+    /// UTF-16 code unit becomes <c>$</c> and four hex digits. Z3 rejects non-ASCII symbol characters, and the
+    /// mapping is one-to-one (no C# identifier contains <c>$</c>), so two different names can never share a
+    /// symbol, as <c>a_b</c> and <c>a‿b</c> did when every other character became <c>_</c>.
+    /// </summary>
+    public static string SymbolPart(string raw)
+    {
+        if (raw.Length == 0)
+        {
+            return "$";
+        }
+
+        var sb = new StringBuilder(raw.Length);
+        foreach (var ch in raw)
+        {
+            if (ch is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '_')
+            {
+                sb.Append(ch);
+            }
+            else
+            {
+                sb.Append('$').Append(((int)ch).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Writes a name as part of a C# identifier (for generated source), replacing anything else with <c>_</c>.
+    /// Not one-to-one; use <see cref="SymbolPart"/> for SMT symbols.
+    /// </summary>
     public static string SanitizeName(string raw)
     {
         var sb = new StringBuilder(raw.Length);

@@ -114,10 +114,22 @@ internal static class Z3SolverRunner
         return null;
     }
 
+    /// <summary>
+    /// SHA-256 of the UTF-16 code units of <paramref name="text"/>, as lowercase hex. The code units are hashed
+    /// directly: <c>Encoding.UTF8</c> would turn every unpaired surrogate into U+FFFD, so two different keys
+    /// could hash alike.
+    /// </summary>
     public static string ComputeSha256(string text)
     {
+        var units = new byte[text.Length * 2];
+        for (var i = 0; i < text.Length; i++)
+        {
+            units[2 * i] = (byte)text[i];
+            units[2 * i + 1] = (byte)(text[i] >> 8);
+        }
+
         using var sha = SHA256.Create();
-        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(text));
+        var bytes = sha.ComputeHash(units);
         var sb = new StringBuilder(bytes.Length * 2);
         foreach (var b in bytes)
         {
@@ -141,7 +153,7 @@ internal static class Z3SolverRunner
             return new SmtQueryResult(SmtStatus.SolverUnavailable, string.Empty, new Dictionary<string, string>(), "Z3 binary not found.");
         }
 
-        var hashInput = BuildHashInput(z3Path, string.Empty, timeoutMs, smtScriptBody, satEvalExprs);
+        var hashInput = BuildHashInput(Z3Identity(z3Path), string.Empty, timeoutMs, smtScriptBody, satEvalExprs);
         var hash = ComputeSha256(hashInput);
         if (MemoryCache.TryGetValue(hash, out var cached))
         {
@@ -184,7 +196,7 @@ internal static class Z3SolverRunner
                 "Z3 binary not found.");
         }
 
-        var hashInput = BuildHashInput(z3Path, "CORE", timeoutMs, smtScriptBody, satEvalExprs);
+        var hashInput = BuildHashInput(Z3Identity(z3Path), "CORE", timeoutMs, smtScriptBody, satEvalExprs);
         var hash = ComputeSha256(hashInput);
         if (DetailedMemoryCache.TryGetValue(hash, out var cached))
         {
@@ -202,26 +214,32 @@ internal static class Z3SolverRunner
         return result;
     }
 
-    private static string BuildHashInput(
-        string z3Path,
+    /// <summary>
+    /// The text a solver answer is cached under. The layout (one length-prefixed field per part) is fixed by
+    /// <see cref="SolverPlumbingKernel.CacheKeyMaterial"/>, which is proved to give different queries different keys.
+    /// </summary>
+    internal static string BuildHashInput(
+        string solverIdentity,
         string mode,
         int timeoutMs,
         string smtScriptBody,
         IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs)
     {
-        var sb = new StringBuilder(smtScriptBody.Length + 128);
-        sb.Append(Z3Identity(z3Path)).Append('\n');
-        if (!string.IsNullOrEmpty(mode)) sb.Append(mode).Append('\n');
-        sb.Append(timeoutMs).Append('\n').Append(smtScriptBody);
-        if (satEvalExprs is { Count: > 0 })
+        var evals = new StringBuilder();
+        if (satEvalExprs is not null)
         {
-            sb.Append("\nEVALS:");
             foreach (var (k, e) in satEvalExprs)
             {
-                sb.Append('\n').Append(k).Append('=').Append(e);
+                evals.Append(SolverPlumbingKernel.CacheKeyEvalEntry(k, e));
             }
         }
-        return sb.ToString();
+
+        return SolverPlumbingKernel.CacheKeyMaterial(
+            solverIdentity,
+            mode,
+            timeoutMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            smtScriptBody,
+            evals.ToString());
     }
 
     private static readonly Lazy<SignedAnswerCache?> DiskCache =
@@ -290,25 +308,42 @@ internal static class Z3SolverRunner
         return result;
     }
 
+    /// <summary>
+    /// Index just past the string literal that starts at <paramref name="start"/> (a <c>"</c>). In SMT-LIB 2.6
+    /// output the only escape inside a literal is <c>""</c>; a backslash is an ordinary character, so a value
+    /// such as <c>"C:\"</c> ends at its last quote.
+    /// </summary>
+    private static int SkipStringLiteral(string text, int start, int limit)
+    {
+        var i = start + 1;
+        while (i < limit)
+        {
+            if (text[i] == '"')
+            {
+                if (i + 1 < limit && text[i + 1] == '"')
+                {
+                    i += 2;
+                    continue;
+                }
+
+                return i + 1;
+            }
+
+            i++;
+        }
+
+        return limit;
+    }
+
     private static string? ReadBalancedForm(string text, int start, out int endPos)
     {
         var depth = 0;
-        var inString = false;
         for (var i = start; i < text.Length; i++)
         {
             var ch = text[i];
-            if (inString)
-            {
-                if (ch == '"' && (i == 0 || text[i - 1] != '\\'))
-                {
-                    inString = false;
-                }
-                continue;
-            }
-
             if (ch == '"')
             {
-                inString = true;
+                i = SkipStringLiteral(text, i, text.Length) - 1;
             }
             else if (ch == '(')
             {
@@ -376,9 +411,8 @@ internal static class Z3SolverRunner
             }
             else if (sexp[i] == '"')
             {
-                var start = i++;
-                while (i < limit && !(sexp[i] == '"' && sexp[i - 1] != '\\')) i++;
-                if (i < limit) i++;
+                var start = i;
+                i = SkipStringLiteral(sexp, i, limit);
                 items.Add(sexp.Substring(start, i - start));
             }
             else
@@ -601,6 +635,14 @@ internal static class Z3SolverRunner
         {
             shouldRecycle = false;
 
+            // Each sentinel carries a fresh nonce. A model value can never equal it, because nothing Z3 was
+            // told mentions it, so a counterexample that prints a sentinel's base text cannot end a read early.
+            var nonce = Guid.NewGuid().ToString("N");
+            var doneSentinel = DoneSentinel + nonce;
+            var coreSentinel = CoreSentinel + nonce;
+            var modelSentinel = ModelSentinel + nonce;
+            var evalSentinel = EvalSentinel + nonce;
+
             _stdin.WriteLine("(reset)");
             _stdin.WriteLine($"(set-option :timeout {timeoutMs})");
             _stdin.WriteLine("(set-option :model true)");
@@ -610,11 +652,11 @@ internal static class Z3SolverRunner
             }
             _stdin.WriteLine(scriptBody);
             _stdin.WriteLine("(check-sat)");
-            _stdin.WriteLine($"(echo \"{DoneSentinel}\")");
+            _stdin.WriteLine($"(echo \"{doneSentinel}\")");
             _stdin.Flush();
 
             var hardWaitMs = timeoutMs + 10000;
-            var checkOutput = ReadUntilSentinel(DoneSentinel, hardWaitMs, out var timedOut);
+            var checkOutput = ReadUntilSentinel(doneSentinel, hardWaitMs, out var timedOut);
             if (timedOut)
             {
                 shouldRecycle = true;
@@ -636,10 +678,10 @@ internal static class Z3SolverRunner
                 }
 
                 _stdin.WriteLine("(get-unsat-core)");
-                _stdin.WriteLine($"(echo \"{CoreSentinel}\")");
+                _stdin.WriteLine($"(echo \"{coreSentinel}\")");
                 _stdin.Flush();
 
-                var coreOutput = ReadUntilSentinel(CoreSentinel, hardWaitMs, out var coreTimedOut);
+                var coreOutput = ReadUntilSentinel(coreSentinel, hardWaitMs, out var coreTimedOut);
                 if (coreTimedOut)
                 {
                     shouldRecycle = true;
@@ -656,10 +698,10 @@ internal static class Z3SolverRunner
             }
 
             _stdin.WriteLine("(get-model)");
-            _stdin.WriteLine($"(echo \"{ModelSentinel}\")");
+            _stdin.WriteLine($"(echo \"{modelSentinel}\")");
             _stdin.Flush();
 
-            var modelOutput = ReadUntilSentinel(ModelSentinel, hardWaitMs, out var modelTimedOut);
+            var modelOutput = ReadUntilSentinel(modelSentinel, hardWaitMs, out var modelTimedOut);
             if (modelTimedOut)
             {
                 shouldRecycle = true;
@@ -680,10 +722,10 @@ internal static class Z3SolverRunner
                 exprList.Append("))");
 
                 _stdin.WriteLine(exprList.ToString());
-                _stdin.WriteLine($"(echo \"{EvalSentinel}\")");
+                _stdin.WriteLine($"(echo \"{evalSentinel}\")");
                 _stdin.Flush();
 
-                var evalOutput = ReadUntilSentinel(EvalSentinel, hardWaitMs, out var evalTimedOut);
+                var evalOutput = ReadUntilSentinel(evalSentinel, hardWaitMs, out var evalTimedOut);
                 if (evalTimedOut)
                 {
                     shouldRecycle = true;

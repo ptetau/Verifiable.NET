@@ -47,6 +47,10 @@ public class KernelSelfVerificationTests
         { "ObligationLattice.cs", "        a == b\n            ? a", "        a == b && a != ObligationState.Live\n            ? a", "LatticeLaws.JoinIsIdempotent" },
         { "ObligationLattice.cs", ": ObligationState.MaybeLive);", ": ObligationState.Consumed);", "ObligationLattice.Join" },
         { "ObligationLattice.cs", "        a == b\n            ? a", "        a == b || b == ObligationState.Consumed\n            ? a", "LatticeLaws.JoinIsCommutative" },
+        { "SolverPlumbingKernel.cs", "((char)(text.Length / 65536)).ToString() + ((char)(text.Length % 65536)).ToString() + text", "text", "CacheKeyLaws.FieldThenRestDecodesUniquely" },
+        { "SolverPlumbingKernel.cs", "return CacheKeyField(key) + CacheKeyField(expression);", "return CacheKeyField(key) + expression;", "SolverPlumbingKernel.CacheKeyEvalEntry" },
+        { "SolverPlumbingKernel.cs", "               CacheKeyField(script) + CacheKeyField(evals);", "               script + CacheKeyField(evals);", "SolverPlumbingKernel.CacheKeyMaterial" },
+        { "SolverPlumbingKernel.cs", "return \"(assert (! \" + formula + \" :named \" + name + \"))\\n\";", "return \"(assert false)\\n(assert (! \" + formula + \" :named \" + name + \"))\\n\";", "SolverPlumbingKernel.NamedAssertion" },
     };
 
     [Theory]

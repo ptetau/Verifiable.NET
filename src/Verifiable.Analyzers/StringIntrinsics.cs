@@ -17,7 +17,8 @@ internal enum StringIntrinsicKind
     EndsWithString,
     EndsWithChar,
     JoinStringParams,
-    JoinCharParams
+    JoinCharParams,
+    CharToString
 }
 
 internal static class StringIntrinsics
@@ -29,6 +30,11 @@ internal static class StringIntrinsics
 
     public static bool IsTrustedStringMethod(IMethodSymbol method)
     {
+        if (IsCharToString(method))
+        {
+            return true;
+        }
+
         if (method.ContainingType?.SpecialType != SpecialType.System_String)
         {
             return false;
@@ -84,6 +90,11 @@ internal static class StringIntrinsics
     {
         error = null;
         var method = inv.TargetMethod;
+        if (IsCharToString(method))
+        {
+            return StringIntrinsicKind.CharToString;
+        }
+
         if (method.ContainingType?.SpecialType != SpecialType.System_String)
         {
             return StringIntrinsicKind.None;
@@ -148,6 +159,16 @@ internal static class StringIntrinsics
 
         return StringIntrinsicKind.None;
     }
+
+    /// <summary>
+    /// <c>c.ToString()</c> on a <c>char</c>: the one-character string holding that UTF-16 code unit. It does not
+    /// depend on culture.
+    /// </summary>
+    public static bool IsCharToString(IMethodSymbol method) =>
+        method.ContainingType?.SpecialType == SpecialType.System_Char &&
+        !method.IsStatic &&
+        method.Name == "ToString" &&
+        method.Parameters.Length == 0;
 
     public static bool IsSupportedJoinOverload(IMethodSymbol method)
     {

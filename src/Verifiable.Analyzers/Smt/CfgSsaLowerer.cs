@@ -253,7 +253,8 @@ internal sealed partial class CfgSsaLowerer
         if (!_method.IsStatic && _method.ContainingType is { } recvType)
         {
             var sort = _types.GetSort(recvType);
-            const string thisSmt = "p_this";
+            // Not "p_this": a parameter named @this would get that name.
+            const string thisSmt = "p_$this";
             _decls.Add($"(declare-const {thisSmt} {sort})");
             _trackedParams.Add(("this", thisSmt));
             var thisTerm = new SmtTypedTerm(thisSmt, recvType);
@@ -265,7 +266,7 @@ internal sealed partial class CfgSsaLowerer
         foreach (var p in _method.Parameters)
         {
             var sort = _types.GetSort(p.Type);
-            var smtName = "p_" + SmtTypeSystem.SanitizeName(p.Name);
+            var smtName = "p_" + SmtTypeSystem.SymbolPart(p.Name);
             _decls.Add($"(declare-const {smtName} {sort})");
             _trackedParams.Add((p.Name, smtName));
             var pTerm = new SmtTypedTerm(smtName, p.Type);
@@ -710,7 +711,7 @@ internal sealed partial class CfgSsaLowerer
         foreach (var sym in modifiedVars)
         {
             var type = GetSymbolType(sym);
-            var smtVar = BindSsaValue("loop_" + SmtTypeSystem.SanitizeName(sym.Name), new SmtTypedTerm(_types.GetDefaultTerm(type), type), isFreshFreeSymbol: true);
+            var smtVar = BindSsaValue("loop_" + SmtTypeSystem.SymbolPart(sym.Name), new SmtTypedTerm(_types.GetDefaultTerm(type), type), isFreshFreeSymbol: true);
             loopEnv.Vars[sym] = smtVar;
             EmitTypeAssumptions(smtVar, headerLoc);
         }
@@ -1041,7 +1042,8 @@ internal sealed partial class CfgSsaLowerer
             if (_queryAssumeOp is not null && _queryAssumeUsesResult)
             {
                 var assumeTerm = LowerExpression(_queryAssumeOp, gamma, queryEnv, emitObligations: false);
-                var assumeId = $"p_assume_result_{++_premiseCounter}";
+                // No lowerer name starts with "assume_", so this label cannot clash with a parameter or local.
+                var assumeId = $"assume_result_{++_premiseCounter}";
                 var (filePath, line) = ExtractFileAndLine(retLoc);
                 resultAssumption = new NamedPremise(
                     assumeId,
@@ -1476,7 +1478,7 @@ internal sealed partial class CfgSsaLowerer
                 if (env.Vars.TryGetValue(pr.Parameter, out var pVal)) return pVal;
                 if (pr.Parameter.Name == CrossAssemblyContractCache.ThisPlaceholder && env.ThisOverride is not null) return env.ThisOverride;
                 if (pr.Parameter.Name == CrossAssemblyContractCache.ResultPlaceholder && env.SpecResult is not null) return env.SpecResult;
-                return new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type);
+                return new SmtTypedTerm("p_" + SmtTypeSystem.SymbolPart(pr.Parameter.Name), pr.Parameter.Type);
 
             case IInstanceReferenceOperation inst when inst.ReferenceKind == InstanceReferenceKind.ContainingTypeInstance:
                 if (env.ThisOverride is not null) return env.ThisOverride;
@@ -1774,8 +1776,8 @@ internal sealed partial class CfgSsaLowerer
         {
             if (left.Type.SpecialType == SpecialType.System_String && right.Type.SpecialType == SpecialType.System_String)
             {
-                var lStr = $"(ite (= {left.Term} str-null) \"\" (str-text {left.Term}))";
-                var rStr = $"(ite (= {right.Term} str-null) \"\" (str-text {right.Term}))";
+                var lStr = TextOrEmptyIfNull(left.Term);
+                var rStr = TextOrEmptyIfNull(right.Term);
                 return new SmtTypedTerm($"(str-val (str.++ {lStr} {rStr}))", _compilation.GetSpecialType(SpecialType.System_String));
             }
             var strType = _compilation.GetSpecialType(SpecialType.System_String);
@@ -2255,7 +2257,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var constructed = new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", args)})", targetType);
-        return BindSsaValue("new_" + SmtTypeSystem.SanitizeName(targetType.Name), constructed);
+        return BindSsaValue("new_" + SmtTypeSystem.SymbolPart(targetType.Name), constructed);
     }
 
     private SmtTypedTerm LowerTuple(ITupleOperation tuple, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
@@ -2362,7 +2364,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         // 0c. String intrinsics (intercept before eager arg lowering so string.Join params arrays/spans are handled cleanly)
-        if (containing?.SpecialType == SpecialType.System_String)
+        if (containing?.SpecialType == SpecialType.System_String || StringIntrinsics.IsCharToString(method))
         {
             var strRecv = inv.Instance is not null ? LowerExpression(inv.Instance, gamma, env, emitObligations, inlineDepth) : null;
             if (TryLowerStringIntrinsic(inv, strRecv, gamma, env, emitObligations, inlineDepth, out var strResult))
@@ -2437,7 +2439,7 @@ internal sealed partial class CfgSsaLowerer
                 {
                     _expandingCalls.Remove(method.OriginalDefinition);
                 }
-                return BindSsaValue("ref_" + SmtTypeSystem.SanitizeName(containing.Name),
+                return BindSsaValue("ref_" + SmtTypeSystem.SymbolPart(containing.Name),
                     new SmtTypedTerm($"({refComp!.ConstructorName} {arg.Term})", containing));
             }
             if (method.Name == "IsValid" && argValues.Count == 1 && inlineDepth < 8 &&
@@ -2775,7 +2777,7 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm("0", _compilation.GetSpecialType(SpecialType.System_Int32));
         }
 
-        var retTerm = BindSsaValue("call_" + SmtTypeSystem.SanitizeName(method.Name),
+        var retTerm = BindSsaValue("call_" + SmtTypeSystem.SymbolPart(method.Name),
             new SmtTypedTerm(_types.GetDefaultTerm(method.ReturnType), method.ReturnType),
             isFreshFreeSymbol: true);
 
@@ -3250,7 +3252,7 @@ internal sealed partial class CfgSsaLowerer
                 iteExpr = $"(ite {values[i].ReachCond} {values[i].Val.Term} {iteExpr})";
             }
 
-            mergedEnv.Vars[sym] = BindSsaValue("phi_" + SmtTypeSystem.SanitizeName(sym.Name), new SmtTypedTerm(iteExpr, type));
+            mergedEnv.Vars[sym] = BindSsaValue("phi_" + SmtTypeSystem.SymbolPart(sym.Name), new SmtTypedTerm(iteExpr, type));
         }
 
         var allCaptures = new HashSet<CaptureId>();
@@ -3319,7 +3321,7 @@ internal sealed partial class CfgSsaLowerer
                             fieldTerms.Add($"({f.AccessorName} {recv.Term})");
                         }
                     }
-                    var updated = BindSsaValue("upd_" + SmtTypeSystem.SanitizeName(mr.Member.Name),
+                    var updated = BindSsaValue("upd_" + SmtTypeSystem.SymbolPart(mr.Member.Name),
                         new SmtTypedTerm($"({comp.ConstructorName} {string.Join(" ", fieldTerms)})", recv.Type));
                     AssignTarget(mr.Instance, updated, env, updateCaptureAlias: false);
                 }
@@ -3333,7 +3335,7 @@ internal sealed partial class CfgSsaLowerer
         IParameterReferenceOperation pr =>
             env.Vars.TryGetValue(pr.Parameter, out var v) ? v :
             pr.Parameter.Name == CrossAssemblyContractCache.ThisPlaceholder && env.ThisOverride is not null ? env.ThisOverride :
-            new SmtTypedTerm("p_" + SmtTypeSystem.SanitizeName(pr.Parameter.Name), pr.Parameter.Type),
+            new SmtTypedTerm("p_" + SmtTypeSystem.SymbolPart(pr.Parameter.Name), pr.Parameter.Type),
         IFlowCaptureReferenceOperation cr => env.Captures.TryGetValue(cr.Id, out var v) ? v : null,
         _ => null
     };
@@ -3371,7 +3373,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var sort = _types.GetSort(value.Type);
-        var name = $"ssa_{++_ssaCounter}_{prefix}";
+        var name = $"ssa_{++_ssaCounter}_{SmtTypeSystem.SymbolPart(prefix)}";
         _decls.Add($"(declare-const {name} {sort})");
         if (!isFreshFreeSymbol)
         {

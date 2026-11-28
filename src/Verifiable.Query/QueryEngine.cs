@@ -576,16 +576,21 @@ internal static class QueryEngine
             hint);
     }
 
-    private static string BuildNamedQueryScript(QueryObligation ob, Dictionary<string, NamedPremise> premiseMap)
+    /// <summary>
+    /// The unsat-core query for one return path: the premises, each path condition and the result assumption
+    /// as labelled assertions, then the labelled negated goal last. The assertion text comes from the kernel.
+    /// </summary>
+    internal static string BuildNamedQueryScript(QueryObligation ob, Dictionary<string, NamedPremise> premiseMap)
     {
         var sb = new StringBuilder(ob.ScriptPreamble.Length + 512);
-        sb.AppendLine(ob.ScriptPreamble);
+        sb.Append(ob.ScriptPreamble).Append('\n');
 
         var (retFile, retLine) = GetLocationInfo(ob.ReturnLocation);
         for (var i = 0; i < ob.PathConjuncts.Count; i++)
         {
             var conj = ob.PathConjuncts[i];
-            var pathId = $"p_path_{i + 1}";
+            // No lowerer name starts with "path_", so this label cannot clash with a parameter (p_...) or local.
+            var pathId = $"path_cond_{i + 1}";
             premiseMap[pathId] = new NamedPremise(
                 pathId,
                 "PathCondition",
@@ -594,13 +599,13 @@ internal static class QueryEngine
                 retFile,
                 retLine,
                 conj);
-            sb.Append("(assert (! ").Append(conj).Append(" :named ").Append(pathId).AppendLine("))");
+            sb.Append(SolverPlumbingKernel.NamedAssertion(conj, pathId));
         }
 
         if (ob.ResultAssumption is { } ra)
         {
             premiseMap[ra.Id] = ra;
-            sb.Append("(assert (! ").Append(ra.SmtFormula).Append(" :named ").Append(ra.Id).AppendLine("))");
+            sb.Append(SolverPlumbingKernel.NamedAssertion(ra.SmtFormula, ra.Id));
         }
 
         sb.Append(ProofKernel.NamedNegatedGoal(ob.GoalTerm));
