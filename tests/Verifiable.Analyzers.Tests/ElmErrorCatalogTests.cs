@@ -215,7 +215,7 @@ public sealed class ElmErrorCatalogTests
             {
                 public static CounterState Increment(CounterState s)
                 {
-                    Spec.Requires(s.Version >= 1 && s.Active >= 0 && s.Total >= 0);
+                    Spec.Requires(s.Version >= 1 && s.Version <= 1000 && s.Active >= 0 && s.Active <= 1000 && s.Total >= 0 && s.Total <= 1000);
                     Spec.Ensures<CounterState>(result =>
                         result.Version == s.Version + 1
                         && result.Active == s.Active + 1

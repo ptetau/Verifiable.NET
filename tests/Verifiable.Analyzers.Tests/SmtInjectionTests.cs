@@ -137,17 +137,17 @@ public class SmtInjectionTests
         },
         // Non-ASCII names: Z3 rejects non-ASCII symbol characters.
         {
-            "public static int F(int \u00e4) { Spec.Requires(\u00e4 > 0, \"positive\"); var \u00f6 = \u00e4 + 1; Spec.Ensures<int>(r => r > 1, \"grows\"); return \u00f6; }",
-            "public static int F(int \u00e4) { Spec.Requires(\u00e4 > 0, \"positive\"); var \u00f6 = \u00e4 + 1; Spec.Ensures<int>(r => r > 2, \"false on purpose\"); return \u00f6; }"
+            "public static int F(int \u00e4) { Spec.Requires(\u00e4 > 0 && \u00e4 <= 1000, \"positive\"); var \u00f6 = \u00e4 + 1; Spec.Ensures<int>(r => r > 1, \"grows\"); return \u00f6; }",
+            "public static int F(int \u00e4) { Spec.Requires(\u00e4 > 0 && \u00e4 <= 1000, \"positive\"); var \u00f6 = \u00e4 + 1; Spec.Ensures<int>(r => r > 2, \"false on purpose\"); return \u00f6; }"
         },
         {
-            "public static int F(int \u0394x) { var \u5024 = \u0394x * 2; Spec.Ensures<int>(r => r == \u0394x + \u0394x, \"doubles\"); return \u5024; }",
-            "public static int F(int \u0394x) { var \u5024 = \u0394x * 2; Spec.Ensures<int>(r => r == \u0394x + 1, \"false on purpose\"); return \u5024; }"
+            "public static int F(int \u0394x) { Spec.Requires(\u0394x >= -1000 && \u0394x <= 1000, \"small\"); var \u5024 = \u0394x * 2; Spec.Ensures<int>(r => r == \u0394x + \u0394x, \"doubles\"); return \u5024; }",
+            "public static int F(int \u0394x) { Spec.Requires(\u0394x >= -1000 && \u0394x <= 1000, \"small\"); var \u5024 = \u0394x * 2; Spec.Ensures<int>(r => r == \u0394x + 1, \"false on purpose\"); return \u5024; }"
         },
         // Verbatim identifiers and names that are SMT keywords or look like the lowerer's own names.
         {
-            "public static int F(int @class, int @if, int assert, int ite, int let, int forall) { Spec.Requires(@class > 0 && @if > 0, \"positive\"); Spec.Ensures<int>(r => r > 0, \"sum of positives\"); return @class + @if + 0 * (assert + ite + let + forall); }",
-            "public static int F(int @class, int @if, int assert, int ite, int let, int forall) { Spec.Requires(@class > 0 && @if > 0, \"positive\"); Spec.Ensures<int>(r => r > @class + @if, \"false on purpose\"); return @class + @if + 0 * (assert + ite + let + forall); }"
+            "public static int F(int @class, int @if, int assert, int ite, int let, int forall) { Spec.Requires(@class > 0 && @class <= 1000 && @if > 0 && @if <= 1000 && assert >= 0 && assert <= 1000 && ite >= 0 && ite <= 1000 && let >= 0 && let <= 1000 && forall >= 0 && forall <= 1000, \"positive\"); Spec.Ensures<int>(r => r > 0, \"sum of positives\"); return @class + @if + 0 * (assert + ite + let + forall); }",
+            "public static int F(int @class, int @if, int assert, int ite, int let, int forall) { Spec.Requires(@class > 0 && @class <= 1000 && @if > 0 && @if <= 1000 && assert >= 0 && assert <= 1000 && ite >= 0 && ite <= 1000 && let >= 0 && let <= 1000 && forall >= 0 && forall <= 1000, \"positive\"); Spec.Ensures<int>(r => r > @class + @if, \"false on purpose\"); return @class + @if + 0 * (assert + ite + let + forall); }"
         },
         {
             "public static int F(int p_x, int ssa_1_x, int x) { Spec.Requires(x == 1 && p_x == 2 && ssa_1_x == 3, \"pinned\"); var p_y = x + p_x; var ssa_2_y = p_y + ssa_1_x; Spec.Ensures<int>(r => r == 6, \"sums\"); return ssa_2_y; }",

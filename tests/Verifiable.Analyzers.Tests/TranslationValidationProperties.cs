@@ -10,7 +10,8 @@ namespace Verifiable.Analyzers.Tests;
 /// <summary>
 /// Differential tests of the C# to SMT translation. Each test case is a small random C# method. The CLR runs it, and
 /// the analyzer must then prove the result the CLR got, refute any other result, and refute the division-by-zero or
-/// overflow obligation exactly when the CLR threw. A disagreement means the translation gives some construct a
+/// overflow obligation exactly when the CLR threw. This is checked in all three arithmetic modes: the default (overflow
+/// must not happen), <c>[CheckedArithmetic]</c> (bit-vectors) and <c>[UncheckedArithmetic]</c> (wrap-around). A disagreement means the translation gives some construct a
 /// meaning that C# does not. See <see cref="TvOracle.Check"/> for the exact rules, and docs/trusted-core.md for what
 /// is and is not covered.
 /// </summary>
@@ -19,27 +20,38 @@ public class TranslationValidationProperties
     private const int Iterations = 40;
     private const int InputsPerProgram = 3;
 
+    // No attribute: the default. Overflow is refuted exactly where the CLR's checked run throws.
     [Property(Iterations = Iterations, Seed = 7001, ShrinkLimit = 60)]
-    public Property Int_AnalyzerAgreesWithClr() => Agrees(TvType.Int, checkedArithmetic: false);
+    public Property Int_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Default);
 
     [Property(Iterations = Iterations, Seed = 7002, ShrinkLimit = 60)]
-    public Property Long_AnalyzerAgreesWithClr() => Agrees(TvType.Long, checkedArithmetic: false);
+    public Property Long_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Default);
 
     [Property(Iterations = Iterations, Seed = 7003, ShrinkLimit = 60)]
-    public Property CheckedArithmeticInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, checkedArithmetic: true);
+    public Property CheckedArithmeticInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Checked);
 
     [Property(Iterations = Iterations, Seed = 7004, ShrinkLimit = 60)]
-    public Property CheckedArithmeticLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, checkedArithmetic: true);
+    public Property CheckedArithmeticLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Checked);
 
     [Property(Iterations = Iterations, Seed = 7005, ShrinkLimit = 60)]
-    public Property Strings_AnalyzerAgreesWithClr() => Agrees(TvType.Int, checkedArithmetic: false, strings: true);
+    public Property Strings_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Default, strings: true);
 
-    private static Property Agrees(TvType t, bool checkedArithmetic, bool strings = false) =>
-        (from program in TvGenerators.Program(t, checkedArithmetic, strings)
+    // [UncheckedArithmetic]: integers wrap as in a default C# build, so values agree even where the arithmetic overflows.
+    [Property(Iterations = Iterations, Seed = 7006, ShrinkLimit = 60)]
+    public Property UncheckedArithmeticInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Unchecked);
+
+    [Property(Iterations = Iterations, Seed = 7007, ShrinkLimit = 60)]
+    public Property UncheckedArithmeticLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Unchecked);
+
+    [Property(Iterations = Iterations, Seed = 7008, ShrinkLimit = 60)]
+    public Property UncheckedArithmeticStrings_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Unchecked, strings: true);
+
+    private static Property Agrees(TvType t, TvArith arithmetic, bool strings = false) =>
+        (from program in TvGenerators.Program(t, arithmetic, strings)
          from inputs in TvGenerators.Inputs(t, InputsPerProgram, strings)
          select (program, inputs)).ForAll(c =>
         {
-            var disagreement = TvOracle.Check(c.program, c.inputs, out _);
+            var disagreement = TvOracle.Check(c.program, c.inputs);
             if (disagreement is not null)
             {
                 throw new TranslationDisagreement(disagreement);
@@ -97,7 +109,7 @@ public class TranslationValidationRegressions
 
                 public static int RemNegative(int x, int y)
                 {
-                    Spec.Requires(x < 0 && y != 0);
+                    Spec.Requires(x < 0 && x > int.MinValue && y != 0);
                     Spec.Ensures<int>(r => r <= 0, "the remainder of a negative dividend is never positive");
                     return x % y;
                 }
@@ -233,13 +245,13 @@ public class TranslationValidationRegressions
         Assert.Equal(1.5m, 7.5m % -2m);
     }
 
-    // KNOWN GAP, not fixed. Without [CheckedArithmetic], int and long are unbounded integers in SMT, so the analyzer
-    // ignores wrap-around and the OverflowException of MinValue / -1. The differential suite skips such inputs.
-    // This test shows the gap, so that a fix (or a change) is noticed.
+    // This used to be a known gap: without [CheckedArithmetic] int and long were unbounded integers, so the analyzer
+    // proved contracts that wrap-around or the OverflowException of MinValue / -1 make false in C#. Now overflow
+    // is checked by default, and these programs are refuted.
     [Fact]
-    public void KnownGap_WithoutCheckedArithmetic_IntegersDoNotWrap()
+    public void Default_IntegersAreCheckedForOverflow()
     {
-        var addOne = new TvProgram(TvType.Int, CheckedArithmetic: false, ImmutableArray<TvStmt>.Empty,
+        var addOne = new TvProgram(TvType.Int, TvArith.Default, ImmutableArray<TvStmt>.Empty,
             new TvBin("+", new TvVar("x"), new TvLit(1)));
         var run = TvOracle.Execute(addOne, [new TvInput(int.MaxValue, 0, false)])!;
         Assert.Equal(int.MinValue, run[0].Unchecked.Value);
@@ -264,11 +276,66 @@ public class TranslationValidationRegressions
                     Spec.Ensures<int>(r => r > 0, "false in C#: this division throws OverflowException");
                     return x / y;
                 }
+
+                public static int Negate(int x)
+                {
+                    Spec.Requires(x == int.MinValue);
+                    Spec.Ensures<int>(r => r > 0, "false in C#: -int.MinValue wraps to int.MinValue");
+                    return -x;
+                }
+
+                public static long LongMultiply(long x)
+                {
+                    Spec.Requires(x == long.MaxValue);
+                    return x * 2L;
+                }
             }
             """;
 
-        // Both contracts are false in C#, yet nothing is refuted.
-        AssertRefutes(source);
+        // Both contracts are false in C#, and the arithmetic that makes them false is refuted.
+        AssertRefutes(source,
+            ("AddOne", "Overflow"),
+            ("MinOverMinusOne", "Overflow"),
+            ("Negate", "Overflow"),
+            ("LongMultiply", "Overflow"));
+    }
+
+    // With [UncheckedArithmetic] the analyzer models wrap-around, so what is true in C# is proved and what is false
+    // is refuted. Only the throw of MinValue / -1 remains an Overflow obligation, because C# throws even unchecked.
+    [Fact]
+    public void UncheckedArithmetic_IntegersWrapLikeCSharp()
+    {
+        const string source = """
+            using Verifiable.Contracts;
+            namespace Tv;
+            [Verifiable]
+            [UncheckedArithmetic]
+            public static class G
+            {
+                public static int AddOne(int x)
+                {
+                    Spec.Requires(x == int.MaxValue);
+                    Spec.Ensures<int>(r => r == int.MinValue, "true in C#: int.MaxValue + 1 wraps");
+                    Spec.Ensures<int>(r => r > x, "false in C#");
+                    return x + 1;
+                }
+
+                public static int MinOverMinusOne(int x, int y)
+                {
+                    Spec.Requires(x == int.MinValue && y == -1);
+                    return x / y;
+                }
+
+                public static long LongMultiply(long x)
+                {
+                    Spec.Requires(x == long.MaxValue);
+                    Spec.Ensures<long>(r => r == -2L, "true in C#: the product wraps");
+                    return x * 2L;
+                }
+            }
+            """;
+
+        AssertRefutes(source, ("AddOne", "Postcondition"), ("MinOverMinusOne", "Overflow"));
     }
 
     // KNOWN GAP, not fixed. decimal is a real number in SMT, so division is exact, while C# rounds 1m / 3m to 28

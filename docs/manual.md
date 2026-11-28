@@ -13,13 +13,21 @@ from the GitHub release assets (or pack this checkout) in your own feed.
 The component packages do not
 require `Verifiable.Z3`. Put `z3` on `PATH`, set `VERIFIABLE_Z3_PATH`, or pass
 `-p:VerifiableZ3Path=/absolute/path/to/z3`. The analyzer package exposes
-`VerifiableZ3Path`, `VerifiableAgent` and `VerifiableAllowMissingZ3` to the
-compiler; no hand-written `CompilerVisibleProperty` entries are needed.
+`VerifiableZ3Path`, `VerifiableAgent`, `VerifiableAllowMissingZ3` and
+`VerifiableAllowWeakenedProofs` to the compiler; no hand-written `CompilerVisibleProperty` entries are needed.
 
 If Z3 cannot be found, `VER104` stops the build, because nothing was proved.
 To build without proofs on purpose (for example on a machine that only packs),
 set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`. `VER104` then
 stays a warning, even under `TreatWarningsAsErrors` or `-warnaserror`.
+
+`[Verifiable]` code is sound by default. Anything that lowers a proof check (a
+`<NoWarn>`, a `#pragma warning disable`, a `[SuppressMessage]`, an `.editorconfig`
+severity) is reported by `VER107`, and that report is a build **error**. A project
+that has to weaken a check on purpose, for example while migrating, sets
+`<VerifiableAllowWeakenedProofs>true</VerifiableAllowWeakenedProofs>`. `VER107` then
+stays a warning, even under `TreatWarningsAsErrors` or `-warnaserror`, so each
+weakening is still listed in the build output.
 
 ## 1. Making invalid values unrepresentable (`[TypeAlias<T>]`)
 
@@ -324,14 +332,34 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`), so no proof was checked. Build error by default, because unchecked code must not pass as verified. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` (downgrades it to a warning). |
 | `VER105` | `CONTRADICTORY PREMISES` | A proof rests on assumptions that cannot hold, so Z3 would "prove" any contract there. Reported at the method when no input satisfies all its assumptions (`Spec.Requires`, `[Invariant]`, `[TypeAlias<T>]`, callee guarantees, ...), listing the ones that clash. Also reported at a call when the callee's `Spec.Ensures` (or `[PureAxiom]`) cannot hold there, although the call is reachable: every goal after it on that path would be vacuous. Fix the conflicting rule. Dead branches and unreachable calls are not reported. Only the `Spec.Requires` calls in the leading contract block are entry preconditions; one inside a branch is a `VER101` error and is not assumed. |
 | `VER106` | `VACUITY CHECK UNDECIDED` | Warning. Z3 could not decide, within its fixed work budget, whether a method's assumptions, or a callee guarantee at one of its calls, can hold, so its proofs may be vacuous. Reported once per method. Simplify the contracts it relies on (non-linear arithmetic, quantifiers) or split it into helpers with their own contracts. |
-| `VER107` | `PROOF CHECK WEAKENED` | A setting lowers a proof check (`VER101`-`VER106`) below an error, so unproved code would build: `<NoWarn>` / `-nowarn`, a ruleset, `dotnet_diagnostic.VER10x.severity` (or a category or all-analyzer severity) in `.editorconfig` / `.globalconfig`, `#pragma warning disable`, or `[SuppressMessage]` / `[assembly: SuppressMessage]`. Reported once per setting, at the pragma or attribute, or without a location for project-wide settings. The message names the setting and how to undo it. Only checked in projects (and, for file-level settings, files) with `[Verifiable]` code. Default severity: `Warning`. `VER104` as a warning under `VerifiableAllowMissingZ3` is the deliberate opt-out and is not reported. Limits: `VER107` itself can be switched off the same ways, and `<WarningsNotAsErrors>` only changes promotion, so it is not reported (see `docs/trusted-core.md`). |
+| `VER107` | `PROOF CHECK WEAKENED` | A setting lowers a proof check (`VER101`-`VER106`) below an error, so unproved code would build: `<NoWarn>` / `-nowarn`, a ruleset, `dotnet_diagnostic.VER10x.severity` (or a category or all-analyzer severity) in `.editorconfig` / `.globalconfig`, `#pragma warning disable`, or `[SuppressMessage]` / `[assembly: SuppressMessage]`. Reported once per setting, at the pragma or attribute, or without a location for project-wide settings. The message names the setting and how to undo it. Only checked in projects (and, for file-level settings, files) with `[Verifiable]` code. Default severity: `Error`; with `<VerifiableAllowWeakenedProofs>true</VerifiableAllowWeakenedProofs>` it is a `Warning`, so a project that weakens a check on purpose still lists every weakening. `VER104` as a warning under `VerifiableAllowMissingZ3` is the deliberate opt-out and is not reported. Limits: `VER107` itself can be switched off the same ways, and `<WarningsNotAsErrors>` only changes promotion, so it is not reported (see `docs/trusted-core.md`). |
 | `VER201` | `INVALID CONSTRAINED TYPE` | Type with `[TypeAlias<T>]` / `[Refined<T>]` is missing `readonly partial record struct` modifiers. |
 | `VER202` | `MISSING ISVALID PREDICATE` | Constrained struct is missing `public static bool IsValid(T value) => ...;`. |
 | `VER203` | `INVALID MAPTO PROJECTION` | `[MapTo]` declaration is malformed, missing a matching source member for a target field/parameter, or requires narrowing/validation (use `[InboundPort]` for `[TypeAlias<T>]` targets). |
 | `VER301` | `COMPLEX CONTRACT` | `Spec.Requires` / `Spec.Ensures` packs more than 3 top-level `&&` clauses (configurable via `verifiable.max_spec_clauses` / `VerifiableMaxSpecClauses`, with an automatic split CodeFix) or uses nested ternaries. Default severity: `Info` (configurable via `.editorconfig`). |
 | `VER302` | `MISSING CONTRACT EXPLANATION` | A `[Verifiable]` `Spec.Requires` / `Spec.Ensures` call omits or leaves blank its plain-English `because` string. Default severity: `Info` (configurable via `.editorconfig`). |
 
-For integer overflow proofs, add `[CheckedArithmetic]` (on assembly, type, or method) so Z3 also checks 32/64-bit arithmetic bounds.
+### Integer overflow
+
+`[Verifiable]` code is sound by default, so `int`, `uint`, `long` and `ulong` arithmetic must not overflow. Z3 models these types with their real 32- and 64-bit ranges, assumes every input (parameter, field or property read, call result) is a value of its type, and checks every `+`, `-`, `*`, unary `-`, `Math.Abs` and `MinValue / -1` for overflow. A method that can overflow is rejected with a `VER102` `Overflow` counterexample; bound the inputs with `Spec.Requires` to fix it:
+
+```csharp
+public static int Next(int x)
+{
+    Spec.Requires(x >= 0 && x <= 1000, "Small inputs only.");   // without this bound: VER102 Overflow at x = int.MaxValue
+    Spec.Ensures<int>(r => r > x, "The successor is bigger.");
+    return x + 1;
+}
+```
+
+Wrap-around is allowed only when you say so:
+
+- `unchecked(...)` or `unchecked { }` around an expression lets just that arithmetic wrap, and the prover models the wrapped result (so `unchecked(x + 1) > x` is *not* provable).
+- `[UncheckedArithmetic]` (on assembly, type or method) lets all `int`/`long`/`uint`/`ulong` arithmetic in the scope wrap in the same way, as a default C# build does. Proofs stay sound because the wrapped value is what the prover reasons about; it just does not require that overflow never happens. Use it for hashes, checksums and ring-buffer indices.
+- `[CheckedArithmetic]` (on assembly, type or method) restores the default inside an `[UncheckedArithmetic]` scope, and models integers as bit-vectors, which is the most precise model and the slowest to prove.
+- A `checked(...)` expression or block must never overflow, even inside an `[UncheckedArithmetic]` scope, because there C# throws.
+- The nearest attribute wins: method, then enclosing types, then the assembly.
+- `MinValue / -1`, `MinValue % -1` and `Math.Abs(MinValue)` throw `OverflowException` in every mode, so they are always checked.
 
 ---
 
@@ -341,4 +369,4 @@ See [**`samples/README.md`**](../samples/README.md) for full walkthroughs, Galax
 
 - [**TodoApp**](../samples/TodoApp/README.md) — workflow state machine, `[MustConsume]` UI/API/SQLite protocol, and `CountItemsByStatus` loop proof.
 - [**AccountingApp**](../samples/AccountingApp/README.md) — double-entry ledger, 3-leg fee splits, `ComputeTrialBalance`, and entry reversals.
-- [**InventoryPricing**](../samples/InventoryPricing/README.md) — `[CheckedArithmetic]` BitVec overflow/underflow proofs, `BasisPoints` share bounds, and `WarehouseBin.ReadUnchecked`.
+- [**InventoryPricing**](../samples/InventoryPricing/README.md) — overflow/underflow proofs (the default; `[CheckedArithmetic]` for BitVec), `BasisPoints` share bounds, and `WarehouseBin.ReadUnchecked`.

@@ -14,8 +14,7 @@ internal sealed partial class CfgSsaLowerer
     /// applied to the absolute values and the sign is put back. On bit-vectors, <c>bvsdiv</c> and <c>bvsrem</c>
     /// already match C#.
     /// Both throw: <c>DivideByZeroException</c> for a zero divisor, and <c>OverflowException</c> for
-    /// <c>MinValue / -1</c> and <c>MinValue % -1</c>, even in unchecked code. The overflow case is only checked under
-    /// <c>[CheckedArithmetic]</c>; without it integers are unbounded and have no <c>MinValue</c>.
+    /// <c>MinValue / -1</c> and <c>MinValue % -1</c>, even in unchecked code. Both are checked.
     /// </remarks>
     private SmtTypedTerm LowerIntegerDivision(
         BinaryOperatorKind kind,
@@ -49,6 +48,12 @@ internal sealed partial class CfgSsaLowerer
         if (checkThrows)
         {
             EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
+            if (resultType.SpecialType is SpecialType.System_Int32 or SpecialType.System_Int64 && TryGetIntegralRange(resultType, out var range))
+            {
+                // MinValue / -1 and MinValue % -1 throw OverflowException even in unchecked code.
+                EmitSafetyObligation("Overflow", $"MinValue {(isDivide ? "/" : "%")} -1 throws OverflowException", loc, gamma,
+                    $"(not (and (= {lTerm} {range.Min}) (= {rTerm} (- 1))))");
+            }
         }
 
         // A positive literal divisor needs no sign case on the divisor. C# truncation is then floor division of the

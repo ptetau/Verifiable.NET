@@ -22,6 +22,11 @@ public static class TodoEngine
             return new TodoTransition(board, false, "Duplicate next TodoId detected.", null);
         }
 
+        if (board.NextId == int.MaxValue || board.ActiveCount == int.MaxValue)
+        {
+            return new TodoTransition(board, false, "The board is full: no todo id is left.", null);
+        }
+
         var item = new TodoItem(board.NextId, title, TodoStatus.Active, now, now);
         var nextId = TodoId.From(board.NextId + 1);
         var nextBoard = board with

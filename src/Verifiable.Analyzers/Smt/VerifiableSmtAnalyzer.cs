@@ -580,6 +580,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return true;
                 }
 
+                // Integer arithmetic that must not overflow (the default) carries an overflow obligation.
+                if (op is IBinaryOperation { OperatorKind: BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply } arith &&
+                    CfgSsaLowerer.TryGetIntegralRange(arith.Type, out _) && CfgSsaLowerer.RequiresNoOverflow(method))
+                {
+                    return true;
+                }
+
                 if (op is IWithOperation withOp && withOp.Type is not null &&
                     SmtTypeSystem.HasAnyNonDefaultImmutableArray(withOp.Type, nonDefaultImmutableArrays))
                 {

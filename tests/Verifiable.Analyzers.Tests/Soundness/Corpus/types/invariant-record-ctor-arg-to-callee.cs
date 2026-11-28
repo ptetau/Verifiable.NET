@@ -18,12 +18,14 @@ public static class SpanArg
 {
     public static int Width(Span s)
     {
+        Spec.Requires(s.Lo >= 0 && s.Hi <= 1000, "Small bounds only.");
         Spec.Ensures<int>(r => r >= 0, "A width is never negative.");
         return s.Hi - s.Lo;
     }
 
     public static int Caller(int a, int b)
     {
+        Spec.Requires(a >= 0 && a <= 1000 && b >= 0 && b <= 1000, "Small bounds only.");
         Spec.Ensures<int>(r => r >= 0, "Still non-negative.");
         return Width(new Span(a, b));
     }

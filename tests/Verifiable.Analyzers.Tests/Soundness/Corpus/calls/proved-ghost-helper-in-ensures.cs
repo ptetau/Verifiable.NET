@@ -8,7 +8,11 @@ namespace Corpus.Calls;
 public static class GhostSpec
 {
     [Ghost]
-    public static int Sq(int x) => x * x;
+    public static int Sq(int x)
+    {
+        Spec.Requires(x >= -1000 && x <= 1000, "Small inputs only.");
+        return x * x;
+    }
 
     public static int Square(int x)
     {
