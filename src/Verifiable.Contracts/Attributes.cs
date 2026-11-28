@@ -65,10 +65,28 @@ public sealed class GhostAttribute : Attribute;
 public sealed class PureAxiomAttribute : Attribute;
 
 /// <summary>
-/// Enables finite bit-vector overflow checking in the SMT prover for integer arithmetic inside the annotated scope.
+/// Requires that <c>int</c> and <c>long</c> arithmetic in the annotated scope never overflows. This is the default for
+/// <c>[Verifiable]</c> code; the attribute restores it inside an <see cref="UncheckedArithmeticAttribute"/> scope.
 /// </summary>
+/// <remarks>
+/// The prover models <c>int</c> and <c>long</c> as 32- and 64-bit values and proves that every <c>+</c>, <c>-</c>,
+/// <c>*</c> and unary <c>-</c> stays in range. Code inside an explicit <c>unchecked(...)</c> expression or
+/// <c>unchecked { }</c> block may wrap around instead, and is modelled as wrapping.
+/// </remarks>
 [AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
 public sealed class CheckedArithmeticAttribute : Attribute;
+
+/// <summary>
+/// Lets <c>int</c> and <c>long</c> arithmetic in the annotated scope wrap around, as C# does by default.
+/// </summary>
+/// <remarks>
+/// The prover still models <c>int</c> and <c>long</c> as 32- and 64-bit values, so wrap-around is taken into account
+/// and proofs stay sound; it just does not require that overflow never happens. Arithmetic in a C# <c>checked</c>
+/// context still must not overflow, because there it throws. The nearest of this attribute and
+/// <see cref="CheckedArithmeticAttribute"/> (method, then enclosing types, then assembly) wins.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Struct | AttributeTargets.Method)]
+public sealed class UncheckedArithmeticAttribute : Attribute;
 
 /// <summary>
 /// Marks a <c>readonly partial record struct</c> declaring <c>public static bool IsValid(TUnderlying value)</c>

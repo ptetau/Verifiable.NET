@@ -1,7 +1,6 @@
-// C# int addition wraps by default, so x + 1 is not always bigger than x.
+// C# int addition wraps by default, so x + 1 is not always bigger than x. The prover now checks int overflow by default.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.IntWrap.Next(int.MaxValue)
-// @known-bug: Without [CheckedArithmetic], int is an unbounded integer, so wrap-around is not seen (documented gap in docs/trusted-core.md).
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

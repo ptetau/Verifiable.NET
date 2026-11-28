@@ -11,12 +11,12 @@ public static class Spin
 {
     public static int Run(int x)
     {
-        Spec.Requires(x >= 0, "Non-negative input.");
+        Spec.Requires(x >= 0 && x <= 1000, "Small non-negative input.");
         Spec.Ensures<int>(r => r == -1, "Returns minus one.");
         var i = x;
         while (i >= 0)
         {
-            Spec.LoopInvariant(i >= 0, "i stays non-negative.");
+            Spec.LoopInvariant(i >= 0 && i <= 1000, "i stays small and non-negative.");
             i = i + 1 - 1;
         }
         return i;

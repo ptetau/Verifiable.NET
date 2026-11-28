@@ -62,7 +62,7 @@ public class CheckSelectionTests
     [Fact]
     public async Task GuardedDivisionWithoutContracts_IsProved()
     {
-        var diagnostics = await AnalyzeAsync("public static int Div(int a, int b) => b == 0 ? 0 : a / b;");
+        var diagnostics = await AnalyzeAsync("public static int Div(int a, int b) => b == 0 || b == -1 ? 0 : a / b;");
 
         Assert.Empty(diagnostics.Where(d => d.Severity >= DiagnosticSeverity.Warning).Select(d => d.ToString()));
     }
@@ -96,7 +96,7 @@ public class CheckSelectionTests
     [Fact]
     public async Task MethodWithNothingToProve_ReportsNothing()
     {
-        var diagnostics = await AnalyzeAsync("public static int Add(int a, int b) => a + b;");
+        var diagnostics = await AnalyzeAsync("[UncheckedArithmetic] public static int Add(int a, int b) => a + b;");
 
         Assert.Empty(diagnostics.Select(d => d.ToString()));
     }

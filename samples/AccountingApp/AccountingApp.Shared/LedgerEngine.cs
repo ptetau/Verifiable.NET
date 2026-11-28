@@ -24,8 +24,9 @@ public static class LedgerEngine
         UnixTimestamp now)
     {
         Spec.Requires(
-            from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount,
-            "Transfers require two distinct existing accounts and enough balance in the source account to avoid overdraft.");
+            from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount &&
+            state.NextEntryId < int.MaxValue,
+            "Transfers require two distinct existing accounts, enough balance in the source account to avoid overdraft, and a journal entry id left to use.");
         Spec.Ensures<LedgerState>(
             result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m,
             "After the transfer, the source account remains non-negative.");
@@ -167,6 +168,11 @@ public static class LedgerEngine
             false,
             null);
 
+        if (state.NextEntryId == int.MaxValue)
+        {
+            return new LedgerTransition(state, false, "The journal is full: no journal entry id is left.", null);
+        }
+
         var nextState = state with
         {
             Accounts = nextAccounts,
@@ -264,6 +270,11 @@ public static class LedgerEngine
             now,
             false,
             null);
+
+        if (state.NextEntryId == int.MaxValue)
+        {
+            return new LedgerTransition(state, false, "The journal is full: no journal entry id is left.", null);
+        }
 
         var nextState = state with
         {
@@ -420,6 +431,11 @@ public static class LedgerEngine
             false,
             null);
 
+        if (state.NextEntryId == int.MaxValue)
+        {
+            return new LedgerTransition(state, false, "The journal is full: no journal entry id is left.", null);
+        }
+
         var nextState = state with
         {
             Accounts = applied.Accounts,
@@ -527,6 +543,11 @@ public static class LedgerEngine
         var updatedJournal = state.Journal
             .SetItem(idx, orig with { IsReversed = true })
             .Add(reversalEntry);
+
+        if (state.NextEntryId == int.MaxValue)
+        {
+            return new LedgerTransition(state, false, "The journal is full: no journal entry id is left.", null);
+        }
 
         var nextState = state with
         {
