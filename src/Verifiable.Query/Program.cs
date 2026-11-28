@@ -24,6 +24,7 @@ public static class Program
           verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query pack --project <path> (--target <symbols> | --clause <ids> | --holes) [--max-tokens <n>]
+          verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
@@ -36,6 +37,7 @@ public static class Program
           clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
           holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
           pack              Everything an agent needs to fill one method: contracts, clause text, types, helpers, callers.
+          export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
@@ -60,7 +62,7 @@ public static class Program
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
           --holes           With `pack`, one pack per hole.
           --max-tokens <n>  With `pack`, drop the least relevant parts until each pack fits; dropped parts are listed.
-          --out <file>      With `lock`, where to write the lock file.
+          --out <file>      With `lock` or `export`, where to write the file (`export` writes every entry, unpaged).
           --clause <ids>    With `check`, prove only the symbols that carry these clauses (comma-separated).
           --stats           With `check`, add timing and proof-cache counts (not byte-stable).
           --z3 <path>       Explicit path to z3 / z3.exe executable.
@@ -83,7 +85,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export"];
 
     /// <summary>
     /// CLI entry point.
@@ -423,6 +425,20 @@ public static class Program
                 return ResolveExitCode(QueryOutcomeStatus.Error);
             }
             manifestClauses = mc;
+        }
+
+        if (command == "export")
+        {
+            var exported = ContractExport.Collect(loadResult.Compilation);
+            var isJsonExport = format.Equals("json", StringComparison.OrdinalIgnoreCase);
+            if (outPath is not null)
+            {
+                File.WriteAllText(outPath, ContractExport.Document(exported, indented: true, int.MaxValue, 0, null) + "\n");
+            }
+            stdout.WriteLine(isJsonExport || outPath is null
+                ? ContractExport.Document(exported, indented: true, limit, offset, outPath)
+                : $"Exported {exported.Count} contracts to {outPath}.");
+            return 0;
         }
 
         if (command == "pack")

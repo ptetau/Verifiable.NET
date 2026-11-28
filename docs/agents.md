@@ -118,6 +118,19 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Contract export (`export`)
+
+Every contract, constrained type and invariant, as data (requirement R2). The round trip back to ACE, SQL `CHECK` constraints, UI messages and change impact read this instead of C#.
+
+```bash
+verifiable-query export --project App.csproj --out contracts.export.json
+```
+
+- Each entry (schema `export@1`) has `symbol` (`Type.Member(param types)` for method contracts), `kind` (`requires`, `ensures`, `loopInvariant`, `decreases`, `typeAlias`, `refined`, `invariant`), `clause`, `reason`, `text`, `result` (the name an `Ensures` lambda gives the return value), `guard` (for `RequiresWhen` / `EnsuresWhen`) and `expr`.
+- `expr` is a tree of `{"op": ...}` nodes, each with its C# `type`: `and`, `or`, `not`, `eq` … `ge`, `add` … `mod`, `cond`, `implies`, `forall` / `exists` (`variable`, `from`, `to`, `body`), `member`, `index`, `call`, `cast`, `isNull` / `notNull`, and leaves `const`, `param`, `local`, `result`, `static`. Property patterns such as `value is { Length: >= 1 and <= 100 }` become plain comparisons. A form with no node yet is `{"op":"csharp","text":...}`; the samples have none.
+- `--out` writes every entry, unpaged; the same source gives a byte-identical file.
+- Not done yet: the cross-assembly contract metadata the analyzer reads is still its own format.
+
 ### Context packs (`pack`)
 
 One command gives an agent everything it needs to work on a method, and nothing else (requirement R13):
