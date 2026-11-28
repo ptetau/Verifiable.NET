@@ -101,6 +101,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly ContractExpressionTranslator _translator;
 
     private readonly List<string> _decls = new();
+    private readonly Dictionary<IFieldSymbol, SmtTypedTerm> _staticReadonlyFields = new(SymbolEqualityComparer.Default);
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
     private readonly List<NamedPremise> _premises = new();
@@ -1648,7 +1649,13 @@ internal sealed partial class CfgSsaLowerer
                 }
                 var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                 var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+                if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
+                    TryLowerUserEquality(bin, lhs, rhs, gamma, emitObligations, inlineDepth, out var userEq))
+                    return userEq;
                 return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
+
+            case ITupleBinaryOperation tupleBin:
+                return LowerTupleBinary(tupleBin, gamma, env, emitObligations, inlineDepth);
 
             case IIsNullOperation isNull:
                 var subject = LowerExpression(isNull.Operand, gamma, env, emitObligations, inlineDepth);
@@ -1859,8 +1866,10 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(left.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(right.Type, viaOperator: false);
             var (lEq, rEq, _) = _translator.UnifyForComparison(left, right);
-            var eq = $"(= {lEq} {rEq})";
+            var eq = SymbolEqualityComparer.Default.Equals(left.Type, right.Type) ? EqualityTerm(lEq, rEq, left.Type) : $"(= {lEq} {rEq})";
             return new SmtTypedTerm(kind == BinaryOperatorKind.Equals ? eq : $"(not {eq})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
@@ -2031,7 +2040,7 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException($"Unsupported property subpattern member '{sub.Member.Kind}' in specification.");
             }
 
-            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth);
+            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth, gamma);
             var subPat = LowerPatternOp(memberTerm, sub.Pattern, gamma, env, emitObligations, inlineDepth);
             clauses.Add(subPat.Term);
         }
@@ -2122,7 +2131,7 @@ internal sealed partial class CfgSsaLowerer
             {
                 EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
             }
-            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth);
+            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth, gamma);
         }
 
         if (!emitObligations)
@@ -2169,14 +2178,24 @@ internal sealed partial class CfgSsaLowerer
             }
             if (!emitObligations)
                 throw new ContractLoweringException($"Unsupported static field '{field.Name}' in specification.");
+            if (field.IsReadOnly && _inQuantifierDepth == 0)
+            {
+                // A static readonly field never changes after its initializer, so every read sees the same unknown value.
+                if (!_staticReadonlyFields.TryGetValue(field, out var cached))
+                {
+                    cached = BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
+                    _staticReadonlyFields[field] = cached;
+                }
+                return cached;
+            }
             return BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
         }
 
         var recv = LowerExpression(fieldRef.Instance, gamma, env, emitObligations, inlineDepth);
-        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth);
+        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth, gamma);
     }
 
-    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth)
+    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth, string gamma = "true")
     {
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
@@ -2188,7 +2207,8 @@ internal sealed partial class CfgSsaLowerer
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, prop, out _, out var bodyOp))
         {
             var propEnv = new BlockEnv { ThisOverride = receiver };
-            return LowerExpression(bodyOp!, "true", propEnv, emitObligations: false, inlineDepth + 1);
+            // A computed property is user code run at the access: its checks (a division, an index) belong to the caller.
+            return LowerExpression(bodyOp!, gamma, propEnv, emitObligations, inlineDepth + 1);
         }
 
         throw new ContractLoweringException($"Member '{memberName}' not found or unsupported on '{receiver.Type.Name}'.");
@@ -2263,6 +2283,7 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm(_types.GetDefaultTerm(targetType), targetType);
         }
 
+        Dictionary<string, SmtTypedTerm>? ctorFields = null;
         if (!InitializerProjection.IsSupportedProjection(objCreate, _types, out var projErr))
         {
             // Keep compatibility with existing constrained-struct/internal constructors when not a custom DTO projection
@@ -2270,23 +2291,31 @@ internal sealed partial class CfgSsaLowerer
             {
                 throw new ContractLoweringException(projErr!);
             }
+            if (UnmodeledConstructionReason(objCreate) is { } unmodeled)
+            {
+                // User code (a constructor body, a property initializer): lower it, or refuse (see CfgSsaLowerer.Equality.cs).
+                ctorFields = LowerSourceConstructor(objCreate, comp!, unmodeled, gamma, env, emitObligations, inlineDepth);
+            }
         }
 
-        var argMap = new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
+        var argMap = ctorFields ?? new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
         var ctorArgs = new SmtTypedTerm?[objCreate.Constructor?.Parameters.Length ?? 0];
+        // With an explicit constructor body, LowerSourceConstructor has already bound the fields (and checked the
+        // constructor's Spec.Requires). The arguments are still lowered here so their validity can be checked.
         foreach (var arg in objCreate.Arguments)
         {
             if (arg.Parameter is not null)
             {
                 var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
-                argMap[arg.Parameter.Name] = _translator.ConvertTo(v, arg.Parameter.Type);
-                if (arg.Parameter.Ordinal < ctorArgs.Length) ctorArgs[arg.Parameter.Ordinal] = argMap[arg.Parameter.Name];
+                var converted = _translator.ConvertTo(v, arg.Parameter.Type);
+                if (ctorFields is null) argMap[arg.Parameter.Name] = converted;
+                if (arg.Parameter.Ordinal < ctorArgs.Length) ctorArgs[arg.Parameter.Ordinal] = converted;
             }
         }
 
         if (emitObligations)
         {
-            CheckConstructorCall(objCreate, ctorArgs, gamma);
+            CheckConstructorCall(objCreate, ctorArgs, gamma, requiresAlreadyChecked: ctorFields is not null);
         }
 
         if (objCreate.Initializer is not null)
@@ -2410,7 +2439,10 @@ internal sealed partial class CfgSsaLowerer
             if (method.Name == "Implies" && inv.Arguments.Length == 2)
             {
                 var ant = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
-                var cons = LowerExpression(GetOrderedArgOp(inv, 1), CombineAnd(gamma, ant.Term), env, emitObligations, inlineDepth);
+                // In code (obligations emitted) C# evaluates both arguments, so the consequent runs under the caller's path
+                // condition; only in a specification is Implies a logical connective guarding its consequent.
+                var consGamma = emitObligations ? gamma : CombineAnd(gamma, ant.Term);
+                var cons = LowerExpression(GetOrderedArgOp(inv, 1), consGamma, env, emitObligations, inlineDepth);
                 return new SmtTypedTerm($"(=> {ant.Term} {cons.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
             }
 
@@ -2757,8 +2789,12 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality via Equals on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(recvTerm.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(argValues[0].Type, viaOperator: false);
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
-            return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            return new SmtTypedTerm(SymbolEqualityComparer.Default.Equals(recvTerm.Type, argValues[0].Type)
+                ? EqualityTerm(l, r, recvTerm.Type)
+                : $"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
         if (!_expandingCalls.Add(method.OriginalDefinition))
@@ -3033,8 +3069,26 @@ internal sealed partial class CfgSsaLowerer
         return lowered;
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, object> RegexUseCache = new();
+
+    /// <summary>True when the program mentions <c>Regex</c> at all, so that regex-related string assumptions are worth their cost.</summary>
+    private bool CompilationUsesRegex() =>
+        (bool)RegexUseCache.GetValue(_compilation, c =>
+            c.SyntaxTrees.Any(t => t.GetText().ToString().IndexOf("Regex", StringComparison.Ordinal) >= 0));
+
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (value.Type.SpecialType == SpecialType.System_String)
+        {
+            // A .NET string is a sequence of UTF-16 code units, but Z3's characters reach U+2FFFF; without this a
+            // regex over a full-BMP class could be "refuted" by a character no string can hold.
+            if (CompilationUsesRegex())
+            {
+                AddAssertion(RegexModel.BmpStringAssumption(value.Term), "StringAxiom", "string characters are UTF-16 code units", loc);
+            }
+            return;
+        }
+
         if (value.Type.TypeKind == TypeKind.Enum &&
             TryGetIntegralBounds(value.Type, out var eMin, out var eMax, out _, out _))
         {
@@ -3791,6 +3845,13 @@ internal sealed partial class CfgSsaLowerer
 
         if (cur is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } field })
         {
+            // A static constructor (or another static initializer) can replace the Regex the field was initialized with.
+            if (StaticFieldMayBeReassigned(field))
+            {
+                error = $"Static Regex field '{field.Name}' is assigned (or passed by reference) in a static constructor or initializer, so its initializer's pattern is not necessarily the one used.";
+                return false;
+            }
+
             foreach (var synRef in field.DeclaringSyntaxReferences)
             {
                 var syn = synRef.GetSyntax();
@@ -3821,6 +3882,77 @@ internal sealed partial class CfgSsaLowerer
         error = "Instance Regex.IsMatch requires a [GeneratedRegex] method/property or a static readonly Regex field initialized with a constant pattern.";
         return false;
     }
+
+    /// <summary>
+    /// True when anything other than the field's own initializer might store a different value into the static
+    /// readonly <paramref name="field"/>: any use of it in a static constructor of its type, or a write (assignment,
+    /// <c>ref</c>/<c>out</c> argument, address-taking) in another static initializer. A field declared in metadata,
+    /// whose code is not visible, counts as reassignable.
+    /// </summary>
+    private bool StaticFieldMayBeReassigned(IFieldSymbol field)
+    {
+        var type = field.ContainingType;
+        if (type is null || !field.DeclaringSyntaxReferences.Any())
+        {
+            return true;
+        }
+
+        foreach (var syntaxRef in type.DeclaringSyntaxReferences)
+        {
+            var typeSyntax = syntaxRef.GetSyntax();
+            if (!_compilation.SyntaxTrees.Contains(typeSyntax.SyntaxTree))
+            {
+                return true;
+            }
+
+            if (typeSyntax is not TypeDeclarationSyntax typeDecl)
+            {
+                return true;
+            }
+
+            var model = _compilation.GetSemanticModel(typeSyntax.SyntaxTree);
+            foreach (var member in typeDecl.Members)
+            {
+                // Methods cannot assign a readonly field; only the static constructor and initializers can.
+                var isStaticCtor = member is ConstructorDeclarationSyntax ctor && ctor.Modifiers.Any(SyntaxKind.StaticKeyword);
+                if (!isStaticCtor && member is not (FieldDeclarationSyntax or PropertyDeclarationSyntax))
+                {
+                    continue;
+                }
+
+                foreach (var node in member.DescendantNodes().OfType<ExpressionSyntax>())
+                {
+                    if (node is not (IdentifierNameSyntax or MemberAccessExpressionSyntax) ||
+                        !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(node).Symbol, field))
+                    {
+                        continue;
+                    }
+
+                    // The name inside "Type.Field" binds to the same symbol; only the outermost expression counts.
+                    if (node.Parent is MemberAccessExpressionSyntax parentAccess && parentAccess.Name == node)
+                    {
+                        continue;
+                    }
+
+                    if (isStaticCtor || model.GetOperation(node) is not { } op || !IsPlainRead(op))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsPlainRead(IOperation op) => op.Parent switch
+    {
+        IInvocationOperation inv => ReferenceEquals(inv.Instance, op) || inv.Arguments.Any(a => ReferenceEquals(a.Value, op) && a.Parameter?.RefKind == RefKind.None),
+        IPropertyReferenceOperation prop => ReferenceEquals(prop.Instance, op),
+        IFieldReferenceOperation fld => ReferenceEquals(fld.Instance, op),
+        IArgumentOperation arg => arg.Parameter?.RefKind == RefKind.None,
+        _ => false
+    };
 
     private static bool TryExtractImmutableCreateElements(IInvocationOperation inv, out List<IOperation> elements)
     {

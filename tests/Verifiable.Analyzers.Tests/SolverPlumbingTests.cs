@@ -105,4 +105,83 @@ public class SolverPlumbingTests
             Assert.Equal((i + 100).ToString(System.Globalization.CultureInfo.InvariantCulture), sat.Model["y"]);
         }
     }
+
+    private const string UnsatScript = "(declare-const x Int)\n(assert (> x 5))\n(assert (< x 3))";
+
+    /// <summary>A stand-in solver that goes silent on its first <paramref name="silentStarts"/> starts, then runs the real one.</summary>
+    private static string FakeSolver(string dir, int silentStarts, string counterFile)
+    {
+        var real = Z3SolverRunner.DiscoverZ3Path();
+        Assert.NotNull(real);
+        var path = System.IO.Path.Combine(dir, "fake-z3.sh");
+        System.IO.File.WriteAllText(path, $"""
+            #!/bin/sh
+            echo x >> "{counterFile}"
+            if [ "$(wc -l < "{counterFile}")" -le {silentStarts} ]; then exec sleep 600; fi
+            exec "{real}" "$@"
+            """.Replace("\r\n", "\n"));
+        return path;
+    }
+
+    [Fact]
+    public void AStalledWorker_IsRetriedOnceOnAFreshWorker()
+    {
+        if (OperatingSystem.IsWindows()) return; // the stand-in solver is a shell script; the retry logic is the same everywhere
+
+        var dir = System.IO.Directory.CreateTempSubdirectory("verifiable-stall-").FullName;
+        try
+        {
+            var counter = System.IO.Path.Combine(dir, "starts.txt");
+            var fake = FakeSolver(dir, silentStarts: 1, counter);
+
+            // Long enough for a fresh Z3 to start and answer on a loaded CI runner; the stalled first worker costs this
+            // much waiting, so keep it to a few seconds.
+            Z3SolverRunner.HardWaitExtraMsOverride = 4000;
+            try
+            {
+                var result = Z3SolverRunner.RunUncached(fake, UnsatScript, timeoutMs: 200);
+
+                Assert.Equal(SmtStatus.Unsat, result.Status);
+                Assert.Equal(2, System.IO.File.ReadAllLines(counter).Length);
+            }
+            finally
+            {
+                Z3SolverRunner.HardWaitExtraMsOverride = null;
+            }
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AWorkerThatStallsTwice_GivesUp_AsUnknownNotAsAProof()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var dir = System.IO.Directory.CreateTempSubdirectory("verifiable-stall-").FullName;
+        try
+        {
+            var counter = System.IO.Path.Combine(dir, "starts.txt");
+            var fake = FakeSolver(dir, silentStarts: 100, counter);
+
+            Z3SolverRunner.HardWaitExtraMsOverride = 300;
+            try
+            {
+                var result = Z3SolverRunner.RunUncached(fake, UnsatScript, timeoutMs: 200);
+
+                Assert.Equal(SmtStatus.Unknown, result.Status);
+                Assert.Equal(2, System.IO.File.ReadAllLines(counter).Length);
+            }
+            finally
+            {
+                Z3SolverRunner.HardWaitExtraMsOverride = null;
+            }
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, recursive: true); } catch (System.IO.IOException) { /* a sleeping stand-in may still hold the folder */ }
+        }
+    }
 }

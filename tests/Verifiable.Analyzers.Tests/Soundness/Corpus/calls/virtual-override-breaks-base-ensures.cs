@@ -2,7 +2,6 @@
 // the base promise, so the override must be held to it (behavioural subtyping).
 // @expect: rejected
 // @witness: Corpus.Calls.VirtualCalls.AreaOf(new Corpus.Calls.NegShape(1))
-// @known-bug: A virtual call assumes the base method's Spec.Ensures, but overrides are never checked against it.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

@@ -298,7 +298,7 @@ internal sealed partial class CfgSsaLowerer
     /// A constructor call is a call: its <c>Spec.Requires</c> must hold, and an explicit constructor body
     /// assumes its parameters are valid like any method.
     /// </summary>
-    private void CheckConstructorCall(IObjectCreationOperation objCreate, IReadOnlyList<SmtTypedTerm?> argsByOrdinal, string gamma)
+    private void CheckConstructorCall(IObjectCreationOperation objCreate, IReadOnlyList<SmtTypedTerm?> argsByOrdinal, string gamma, bool requiresAlreadyChecked = false)
     {
         var ctor = objCreate.Constructor;
         if (ctor is null || !HasExplicitConstructorBody(ctor)) return;
@@ -307,7 +307,7 @@ internal sealed partial class CfgSsaLowerer
         var args = argsByOrdinal.Select(a => a!).ToList();
         var loc = objCreate.Syntax.GetLocation();
         EmitArgumentValidityObligations(ctor, args, gamma, loc);
-        CheckMethodRequires(ctor, null, args, gamma, loc);
+        if (!requiresAlreadyChecked) CheckMethodRequires(ctor, null, args, gamma, loc);
     }
 
     private static bool HasExplicitConstructorBody(IMethodSymbol ctor) =>

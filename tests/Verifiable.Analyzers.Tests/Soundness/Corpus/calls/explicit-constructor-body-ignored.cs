@@ -1,7 +1,6 @@
 // The explicit constructor swaps its arguments; the analyzer maps constructor parameters to properties by name.
 // @expect: rejected
 // @witness: Corpus.Calls.SwappedCtor.First(1, 2)
-// @known-bug: Object creation maps constructor parameters to same-named properties and ignores the constructor body.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;
