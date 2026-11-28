@@ -51,6 +51,22 @@ internal sealed partial class CfgSsaLowerer
             EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
         }
 
+        // A positive literal divisor needs no sign case on the divisor. C# truncation is then floor division of the
+        // magnitude with the dividend's sign, which is the same value as the general form below but much easier for
+        // Z3 (it avoids `abs` on both sides), so proofs that split numbers into fixed-width digits stay decidable.
+        if (System.Numerics.BigInteger.TryParse(rTerm, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var literal) && literal > 0)
+        {
+            var op = isDivide ? "div" : "mod";
+
+            // A string length is never negative, so the dividend's sign case is dead and plain floor division is exact.
+            if (IsStringLengthTerm(lTerm))
+            {
+                return new SmtTypedTerm($"({op} {lTerm} {rTerm})", resultType);
+            }
+
+            return new SmtTypedTerm($"(ite (>= {lTerm} 0) ({op} {lTerm} {rTerm}) (- ({op} (- {lTerm}) {rTerm})))", resultType);
+        }
+
         var magnitude = $"({(isDivide ? "div" : "mod")} (abs {lTerm}) (abs {rTerm}))";
         var negative = isDivide
             ? $"(not (= (>= {lTerm} 0) (>= {rTerm} 0)))"
@@ -63,6 +79,17 @@ internal sealed partial class CfgSsaLowerer
     /// <c>l - r * trunc(l / r)</c>, so <c>-7m % 2m == -1m</c>. The result is exact, so no rounding is lost.
     /// SMT-LIB <c>mod</c> is only defined on Int.
     /// </summary>
+    /// <summary>
+    /// Whether a term is exactly the lowering of <c>string.Length</c> (zero for null, else the SMT length), which is
+    /// never negative. Matched by shape so nothing else is mistaken for it.
+    /// </summary>
+    private static bool IsStringLengthTerm(string term) =>
+        StringLengthShape.IsMatch(term);
+
+    private static readonly System.Text.RegularExpressions.Regex StringLengthShape = new(
+        @"^\(ite \(= (?<s>[^\s()]+) str-null\) 0 \(str\.len \(str-text \k<s>\)\)\)$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     private static string RealRemainder(string lTerm, string rTerm)
     {
         var quotient = $"(/ {lTerm} {rTerm})";
