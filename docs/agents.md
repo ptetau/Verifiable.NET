@@ -262,6 +262,18 @@ verifiable-query check --project App.csproj --target "LedgerEngine,LedgerState" 
 - `--timeout <ms>` sets the per-obligation solver timeout (default 2500). A timeout is `VER103`, status `undecided` (exit `2`), and the diagnostic names the `symbol`, the `obligation` kind (`Postcondition`, `Overflow`, `LoopInvariantStep`, ...), the `contract` and its `line`, so the agent can split that one step or add a helper.
 - Measured on `samples/AccountingApp` (4 cores): one method is 71 proof queries against 398 for the project. Warm, it takes about 0.7 s in-process and about 3.3 s as a fresh process, most of which is .NET and compiler start-up. The time target is open question 7.
 
+### MCP server (`mcp`)
+
+Some agent hosts call tools more reliably than shell commands (requirement R17). `verifiable-query mcp` serves every command except `build` as a Model Context Protocol tool over stdio (newline-delimited JSON-RPC 2.0, protocol `2025-06-18`):
+
+```json
+{ "mcpServers": { "verifiable": { "command": "verifiable-query", "args": ["mcp"] } } }
+```
+
+- Each tool's `inputSchema` is built from the command's options: `--max-tokens` becomes `maxTokens` (integer), switches become booleans, `file` is an array; `explain` takes `rules`, `tools` takes `action` and `tool`. Unknown or mistyped arguments are rejected (`-32602`).
+- A call runs the command exactly as `--format json` does: `content[0].text` is the same document byte for byte, also given as `structuredContent`. `isError` is true only for exit codes 3 and 4; refuted or undecided is a valid answer.
+- The command line stays the main interface; the server is a thin layer over it.
+
 ### Native tools (`tools`)
 
 Agents only ever call `dotnet` commands; native tools sit behind `verifiable-query` (requirement R16). Today that is Z3; APE (SWI-Prolog) for the pipeline's ACE step will join it once its packaging is decided.

@@ -32,6 +32,7 @@ public static class Program
           verifiable-query impact --old <export.json> (--new <export.json> | --project <path>)
           verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
+          verifiable-query mcp
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
         Commands:
@@ -51,6 +52,7 @@ public static class Program
           impact            Compare two contract exports: widened / narrowed / changed, and the proofs each change breaks.
           export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
+          mcp               Serve every command as an MCP tool over stdio (same JSON in and out).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
         Options:
@@ -104,7 +106,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe", "impact", "data"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe", "impact", "data", "mcp"];
 
     /// <summary>
     /// CLI entry point.
@@ -158,6 +160,12 @@ public static class Program
         if (command == "tools")
         {
             return RunTools(args, agentMode, stdout, stderr);
+        }
+
+        if (command == "mcp")
+        {
+            // Model Context Protocol over stdio: one JSON-RPC message per line in, one per line out.
+            return McpServer.Run(Console.In, stdout);
         }
 
         if (command is "explain" or "describe")
