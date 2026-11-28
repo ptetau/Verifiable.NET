@@ -69,6 +69,20 @@ public class RegexModelDotNetParityTests
     [InlineData(@"^\u 41 \z", 0)]
     [InlineData(@"^\x 4\z", 0)]
     [InlineData(@"^\u+041\z", 0)]
+    // issue #53: stacked quantifiers and a quantifier with nothing to repeat
+    [InlineData(@"^a{2}{3}\z", 0)]
+    [InlineData(@"^a*{2}\z", 0)]
+    [InlineData(@"^a{2}*\z", 0)]
+    [InlineData(@"^a{2}+\z", 0)]
+    [InlineData(@"^a{2}??\z", 0)]
+    [InlineData(@"^a*?{3}\z", 0)]
+    [InlineData(@"^a{1,2}{3,4}\z", 0)]
+    [InlineData(@"^a+{2}\z", 0)]
+    [InlineData(@"{2}a", 0)]
+    [InlineData(@"^(?:{2}a)\z", 0)]
+    [InlineData(@"^(a|{2}b)\z", 0)]
+    [InlineData(@"^a|{2}b", 0)]
+    [InlineData(@"{1}", 0)]
     public void PatternsDotNetRejects_AreRejectedByTheModel(string pattern, int options)
     {
         Assert.ThrowsAny<ArgumentException>(() => new Regex(pattern, (RegexOptions)options));
@@ -83,10 +97,39 @@ public class RegexModelDotNetParityTests
     [InlineData(@"^\012\z", 0)]
     [InlineData(@"^\0123\z", 0)]
     [InlineData(@"^[\012-\015]\z", 0)]
+    // issue #53: a '{' that does not form a quantifier is literal, also after a quantifier
+    [InlineData(@"^a{,3}\z", 0)]
+    [InlineData(@"^a{x}\z", 0)]
+    [InlineData(@"^a{2}{x}\z", 0)]
+    [InlineData(@"^a{2}{,3}\z", 0)]
+    [InlineData(@"^a*{\z", 0)]
+    [InlineData(@"^{\z", 0)]
+    [InlineData(@"^{,3}\z", 0)]
+    [InlineData(@"^a{2}?\z", 0)]
+    [InlineData(@"^(?:){2}a\z", 0)]
     public void PatternsDotNetAccepts_AreStillAccepted(string pattern, int options)
     {
         _ = new Regex(pattern, (RegexOptions)options);
         Assert.True(RegexModel.TryTranslate(pattern, options, out _, out var error), error);
+    }
+
+    // A quantifier on a zero-width anchor is valid in .NET but not modelled, so the model must refuse it.
+    [Theory]
+    [InlineData(@"^{2}a\z")]
+    [InlineData(@"^{2}")]
+    [InlineData(@"\A{2}a")]
+    [InlineData(@"^*a")]
+    [InlineData(@"^?a")]
+    [InlineData(@"\A+a")]
+    [InlineData(@"a$*")]
+    [InlineData(@"a$?")]
+    [InlineData(@"a\z{2}")]
+    [InlineData(@"a$+")]
+    [InlineData(@"a\Z*")]
+    public void QuantifiedAnchors_AreRejectedByTheModel(string pattern)
+    {
+        _ = new Regex(pattern);
+        Assert.False(RegexModel.TryTranslate(pattern, 0, out _, out _), pattern);
     }
 
     [Fact]

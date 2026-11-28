@@ -296,12 +296,31 @@ internal static class RegexModel
             }
 
             // Reject stacked quantifiers like a** or a+?+
-            if (_pos < _p.Length && _p[_pos] is '*' or '+' or '?')
+            if (_pos < _p.Length && (_p[_pos] is '*' or '+' or '?' || BraceQuantifierAhead()))
             {
                 throw new RegexTranslationException($"Nested quantifier at position {_pos} is not supported in regex '{_p}'.");
             }
 
             return result;
+        }
+
+        // True when a well-formed {n}, {n,} or {n,m} starts at the current position (nothing is consumed).
+        private bool BraceQuantifierAhead()
+        {
+            if (_pos >= _p.Length || _p[_pos] != '{')
+            {
+                return false;
+            }
+
+            var save = _pos;
+            try
+            {
+                return TryParseBraceQuantifier(out _, out _);
+            }
+            finally
+            {
+                _pos = save;
+            }
         }
 
         private void ConsumeOptionalLazyOrCheckPossessive()
@@ -417,6 +436,15 @@ internal static class RegexModel
                 case '+':
                 case '?':
                     throw new RegexTranslationException($"Unexpected quantifier '{ch}' at position {_pos} in regex '{_p}'.");
+                case '{':
+                    // A quantifier with nothing to repeat (at the start, after '|', '(' or an anchor): .NET throws,
+                    // or for an anchor quantifies the zero-width assertion. Neither is modelled.
+                    if (BraceQuantifierAhead())
+                    {
+                        throw new RegexTranslationException($"Quantifier '{{' at position {_pos} has nothing to repeat (or follows an anchor) in regex '{_p}'.");
+                    }
+                    _pos++;
+                    return SingleCharRe(ch);
                 case '.':
                     _pos++;
                     return _singleline ? "re.allchar" : "(re.diff re.allchar (str.to_re \"\\u{a}\"))";
