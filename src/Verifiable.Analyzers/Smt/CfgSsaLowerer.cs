@@ -1245,6 +1245,8 @@ internal sealed partial class CfgSsaLowerer
 
     private void EmitValueInvariantObligations(SmtTypedTerm value, string gamma, Location loc)
     {
+        if (TryEmitCompoundValidity(value, gamma, loc)) return;
+
         if (SmtTypeSystem.TryGetIsValidMethod(value.Type, out var isValidMethod) &&
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
@@ -1256,7 +1258,7 @@ internal sealed partial class CfgSsaLowerer
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var goal = LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false);
                 var clauses = ExtractGoalClauses(isValidBody!, gamma, valEnv);
-                AddObligation(
+                AddValidityObligation(
                     "TypeInvariant",
                     $"{value.Type.Name}.IsValid",
                     loc,
@@ -1290,7 +1292,7 @@ internal sealed partial class CfgSsaLowerer
                 var invEnv = new BlockEnv { ThisOverride = value };
                 var goal = LowerExpression(invBody!, gamma, invEnv, emitObligations: false);
                 var clauses = ExtractGoalClauses(invBody!, gamma, invEnv);
-                AddObligation(
+                AddValidityObligation(
                     "TypeInvariant",
                     $"[Invariant] {value.Type.Name}.{invMember.Name}",
                     loc,
@@ -1311,7 +1313,7 @@ internal sealed partial class CfgSsaLowerer
         if (IsClosedEnum(value.Type, out var enumType, out var enumVals))
         {
             var domainFormula = BuildClosedEnumFormula(value.Term, enumVals);
-            AddObligation("TypeInvariant", $"Closed enum domain for '{enumType!.Name}'", loc, gamma, domainFormula,
+            AddValidityObligation("TypeInvariant", $"Closed enum domain for '{enumType!.Name}'", loc, gamma, domainFormula,
                 $"Values of closed enum '{enumType.Name}' must be one of its declared members.");
             return;
         }
@@ -1320,7 +1322,7 @@ internal sealed partial class CfgSsaLowerer
             IsClosedEnum(optInner!, out var optEnumType, out var optEnumVals))
         {
             var domainFormula = BuildClosedEnumFormula($"(opt-val-{optId} {value.Term})", optEnumVals);
-            AddObligation("TypeInvariant", $"Closed enum domain for '{optEnumType!.Name}'", loc,
+            AddValidityObligation("TypeInvariant", $"Closed enum domain for '{optEnumType!.Name}'", loc,
                 CombineAnd(gamma, $"(not (= {value.Term} opt-none-{optId}))"),
                 domainFormula,
                 $"Values of closed enum '{optEnumType.Name}' must be one of its declared members.");
@@ -1335,7 +1337,7 @@ internal sealed partial class CfgSsaLowerer
                     _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
                     fIsImmArr)
                 {
-                    AddObligation(
+                    AddValidityObligation(
                         "TypeInvariant",
                         $"[NonDefault] field '{value.Type.Name}.{f.Name}'",
                         loc,
@@ -1345,7 +1347,7 @@ internal sealed partial class CfgSsaLowerer
                 }
 
                 if (SmtTypeSystem.HasAnyInvariants(f.Type) ||
-                    HasAnyClosedEnum(f.Type) ||
+                    HasAnyClosedEnum(f.Type) || HasValidityRule(f.Type) ||
                     SmtTypeSystem.HasAnyNonDefaultImmutableArray(f.Type, _nonDefaultImmutableArrays))
                 {
                     EmitValueInvariantObligations(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), gamma, loc);
@@ -2297,13 +2299,23 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var argMap = ctorFields ?? new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
-        foreach (var arg in ctorFields is null ? objCreate.Arguments : System.Collections.Immutable.ImmutableArray<IArgumentOperation>.Empty)
+        var ctorArgs = new SmtTypedTerm?[objCreate.Constructor?.Parameters.Length ?? 0];
+        // With an explicit constructor body, LowerSourceConstructor has already bound the fields (and checked the
+        // constructor's Spec.Requires). The arguments are still lowered here so their validity can be checked.
+        foreach (var arg in objCreate.Arguments)
         {
             if (arg.Parameter is not null)
             {
                 var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
-                argMap[arg.Parameter.Name] = _translator.ConvertTo(v, arg.Parameter.Type);
+                var converted = _translator.ConvertTo(v, arg.Parameter.Type);
+                if (ctorFields is null) argMap[arg.Parameter.Name] = converted;
+                if (arg.Parameter.Ordinal < ctorArgs.Length) ctorArgs[arg.Parameter.Ordinal] = converted;
             }
+        }
+
+        if (emitObligations)
+        {
+            CheckConstructorCall(objCreate, ctorArgs, gamma, requiresAlreadyChecked: ctorFields is not null);
         }
 
         if (objCreate.Initializer is not null)
@@ -2842,6 +2854,8 @@ internal sealed partial class CfgSsaLowerer
             }
         }
 
+        EmitArgumentValidityObligations(method, args, gamma, loc);
+
         var calleeRequires = CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
         var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
@@ -3112,9 +3126,10 @@ internal sealed partial class CfgSsaLowerer
             AddAssertion($"(>= (map_count_{dictId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
             AddAssertion($"(= (= (map_count_{dictId} {value.Term}) 0) (= (map_has_{dictId} {value.Term}) ((as const (Array {kSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
-        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out _, out var isImmArr))
+        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out var seqElemType, out var isImmArr))
         {
             AddAssertion($"(>= (seq_count_{seqId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            EmitSequenceElementAssumptions(value, seqId, seqElemType!, guardCond: null, loc);
             if (isImmArr)
             {
                 AddAssertion($"(=> (seq_is_default_{seqId} {value.Term}) (= (seq_count_{seqId} {value.Term}) 0))",
@@ -3266,7 +3281,14 @@ internal sealed partial class CfgSsaLowerer
             return;
         }
 
-        if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out _, out var elIsImmArr) && elIsImmArr)
+        if (TryEmitNullableOnDemandAssumptions(guardCond, element, loc)) return;
+
+        if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out var elElemType, out var elIsImmArr))
+        {
+            EmitSequenceElementAssumptions(element, elSeqId, elElemType!, guardCond, loc);
+        }
+
+        if (_types.TryGetSequenceInfo(element.Type, out _, out elSeqId, out _, out elIsImmArr) && elIsImmArr)
         {
             AddAssertion($"(=> {guardCond} (>= (seq_count_{elSeqId} {element.Term}) 0))",
                 "CollectionAxiom", $"{element.Type.Name}.Count >= 0", loc);
@@ -3950,6 +3972,11 @@ internal sealed partial class CfgSsaLowerer
 
     private void AddAssertion(string smtFormula, string kind, string label, Location loc, string? reason = null)
     {
+        if (_assertionBinders.Count > 0)
+        {
+            smtFormula = $"(forall ({string.Join(" ", _assertionBinders.Select(b => $"({b} Int)"))}) (! {smtFormula} :pattern ({_assertionPatterns[_assertionPatterns.Count - 1]})))";
+        }
+
         if (!_trackProofPremises)
         {
             _assertions.Add($"(assert {smtFormula})");

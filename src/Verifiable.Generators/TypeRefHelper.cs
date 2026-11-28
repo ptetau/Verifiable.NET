@@ -15,6 +15,7 @@ internal static class TypeRefHelper
     public const string TypeAliasAttributeMetadataName = "Verifiable.Contracts.TypeAliasAttribute`1";
     public const string RefinedAttributeMetadataName = "Verifiable.Contracts.RefinedAttribute`1";
     public const string InvariantAttributeMetadataName = "Verifiable.Contracts.InvariantAttribute";
+    public const string NonDefaultAttributeMetadataName = "Verifiable.Contracts.NonDefaultAttribute";
     public const string InboundPortAttributeMetadataName = "Verifiable.Contracts.InboundPortAttribute";
     public const string GhostAttributeMetadataName = "Verifiable.Contracts.GhostAttribute";
     public const string VerifiableAttributeMetadataName = "Verifiable.Contracts.VerifiableAttribute";

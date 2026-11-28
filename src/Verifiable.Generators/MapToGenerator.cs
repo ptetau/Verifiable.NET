@@ -191,6 +191,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
                 item.TargetType,
                 "source",
                 out var projectionExpr,
+                out var sourceRequires,
                 out var errorReason,
                 out var fixHint))
         {
@@ -222,6 +223,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
                 .Append(", \"Body\", ")
                 .Append(TypeRefHelper.EscapeStringLiteral(projectionExpr!))
                 .AppendLine(")]");
+            AppendRequiresMetadata(sb, memberId, sourceRequires);
         }
 
         sb.AppendLine();
@@ -238,8 +240,8 @@ public sealed class MapToGenerator : IIncrementalGenerator
         sb.Append(indent).AppendLine("{");
         sb.Append(indent).AppendLine("    [global::Verifiable.Contracts.Verifiable]");
         sb.Append(indent).Append("    ").Append(methodVisibility).Append(" static ").Append(targetTypeName)
-            .Append(' ').Append(methodName).Append("(this ").Append(sourceTypeName).AppendLine(" source) =>");
-        sb.Append(indent).Append("        ").Append(projectionExpr).AppendLine(";");
+            .Append(' ').Append(methodName).Append("(this ").Append(sourceTypeName).Append(" source)");
+        AppendProjectionBody(sb, indent + "    ", projectionExpr!, sourceRequires);
         sb.Append(indent).AppendLine("}");
 
         if (!string.IsNullOrEmpty(targetNs))
@@ -306,6 +308,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
                 targetType,
                 paramName,
                 out var projectionExpr,
+                out var sourceRequires,
                 out var errorReason,
                 out var fixHint))
         {
@@ -336,6 +339,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
                     .Append(", \"Body\", ")
                     .Append(TypeRefHelper.EscapeStringLiteral(projectionExpr!))
                     .AppendLine(")]");
+                AppendRequiresMetadata(sb, memberId!, sourceRequires);
             }
         }
 
@@ -357,8 +361,8 @@ public sealed class MapToGenerator : IIncrementalGenerator
         }
 
         sb.Append(indent).Append(acc).Append("static partial ").Append(returnTypeName)
-            .Append(' ').Append(method.Name).Append('(').Append(paramTypeName).Append(' ').Append(paramName).AppendLine(") =>");
-        sb.Append(indent).Append("    ").Append(projectionExpr).AppendLine(";");
+            .Append(' ').Append(method.Name).Append('(').Append(paramTypeName).Append(' ').Append(paramName).Append(')');
+        AppendProjectionBody(sb, indent, projectionExpr!, sourceRequires);
 
         for (var i = 0; i < enclosing.Count; i++)
         {
@@ -382,10 +386,12 @@ public sealed class MapToGenerator : IIncrementalGenerator
         INamedTypeSymbol targetType,
         string sourceParamExpr,
         out string? projectionExpr,
+        out List<string> sourceRequires,
         out string? errorReason,
         out string? fixHint)
     {
         projectionExpr = null;
+        sourceRequires = new List<string>();
         errorReason = null;
         fixHint = null;
 
@@ -436,6 +442,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
                 }
 
                 ctorArgs.Add($"{sourceParamExpr}.{EscapeIdentifier(matched!.Name)}");
+                NoteNonDefaultSource(sourceType, targetType, p.Name, matched.Name, sourceParamExpr, sourceRequires);
                 coveredNames.Add(p.Name);
             }
         }
@@ -477,6 +484,7 @@ public sealed class MapToGenerator : IIncrementalGenerator
             }
 
             initAssignments.Add($"{EscapeIdentifier(tm.Name)} = {sourceParamExpr}.{EscapeIdentifier(matched!.Name)}");
+            NoteNonDefaultSource(sourceType, targetType, tm.Name, matched.Name, sourceParamExpr, sourceRequires);
             coveredNames.Add(tm.Name);
         }
 
@@ -559,6 +567,109 @@ public sealed class MapToGenerator : IIncrementalGenerator
         matched = exact;
         return true;
     }
+
+    private const string NonDefaultRequiresBecause =
+        "A [NonDefault] target member cannot receive default(ImmutableArray).";
+
+    private static void AppendRequiresMetadata(StringBuilder sb, string memberId, List<string> sourceRequires)
+    {
+        foreach (var req in sourceRequires)
+        {
+            sb.Append("[assembly: global::Verifiable.Contracts.VerifiableContractMetadata(")
+                .Append(TypeRefHelper.EscapeStringLiteral(memberId))
+                .Append(", \"Requires\", ")
+                .Append(TypeRefHelper.EscapeStringLiteral(req))
+                .Append(", ")
+                .Append(TypeRefHelper.EscapeStringLiteral(NonDefaultRequiresBecause))
+                .AppendLine(")]");
+        }
+    }
+
+    /// <summary>Writes the rest of the signature line and the body: an expression, or a block that starts with the requirements.</summary>
+    private static void AppendProjectionBody(StringBuilder sb, string indent, string projectionExpr, List<string> sourceRequires)
+    {
+        if (sourceRequires.Count == 0)
+        {
+            sb.AppendLine(" =>");
+            sb.Append(indent).Append("    ").Append(projectionExpr).AppendLine(";");
+            return;
+        }
+
+        sb.AppendLine();
+        sb.Append(indent).AppendLine("{");
+        foreach (var req in sourceRequires)
+        {
+            sb.Append(indent).Append("    global::Verifiable.Contracts.Spec.Requires(")
+                .Append(req).Append(", ")
+                .Append(TypeRefHelper.EscapeStringLiteral(NonDefaultRequiresBecause))
+                .AppendLine(");");
+        }
+        sb.Append(indent).Append("    return ").Append(projectionExpr).AppendLine(";");
+        sb.Append(indent).AppendLine("}");
+    }
+
+    /// <summary>
+    /// A <c>[NonDefault]</c> target array is assumed initialized by every analysed caller, and generated code is not
+    /// analysed. Unless the source member is itself <c>[NonDefault]</c>, the projection therefore requires
+    /// <c>!source.Member.IsDefault</c>, which the callers of the generated method must then prove.
+    /// </summary>
+    private static void NoteNonDefaultSource(
+        INamedTypeSymbol sourceType,
+        INamedTypeSymbol targetType,
+        string targetMemberName,
+        string sourceMemberName,
+        string sourceParamExpr,
+        List<string> sourceRequires)
+    {
+        if (IsNonDefaultImmutableArrayMember(targetType, targetMemberName) &&
+            !IsNonDefaultImmutableArrayMember(sourceType, sourceMemberName))
+        {
+            sourceRequires.Add($"!{sourceParamExpr}.{EscapeIdentifier(sourceMemberName)}.IsDefault");
+        }
+    }
+
+    private static bool IsNonDefaultImmutableArrayMember(INamedTypeSymbol type, string memberName)
+    {
+        foreach (var cur in BuildHierarchy(type))
+        {
+            foreach (var member in cur.GetMembers().Where(m =>
+                         string.Equals(m.Name, memberName, StringComparison.OrdinalIgnoreCase)))
+            {
+                var memberType = member switch
+                {
+                    IPropertySymbol p => p.Type,
+                    IFieldSymbol f => f.Type,
+                    _ => null
+                };
+                if (memberType is INamedTypeSymbol { IsGenericType: true } named &&
+                    named.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableArray<T>" &&
+                    HasNonDefaultAttribute(member))
+                {
+                    return true;
+                }
+            }
+
+            // Positional record parameters carry the attribute on the primary constructor parameter.
+            foreach (var ctor in cur.InstanceConstructors)
+            {
+                foreach (var p in ctor.Parameters)
+                {
+                    if (string.Equals(p.Name, memberName, StringComparison.OrdinalIgnoreCase) &&
+                        HasNonDefaultAttribute(p) &&
+                        p.Type is INamedTypeSymbol { IsGenericType: true } pt &&
+                        pt.OriginalDefinition.ToDisplayString() == "System.Collections.Immutable.ImmutableArray<T>")
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasNonDefaultAttribute(ISymbol symbol) =>
+        symbol.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == TypeRefHelper.NonDefaultAttributeMetadataName);
 
     private static Dictionary<string, SourceMember> CollectReadableSourceMembers(
         INamedTypeSymbol sourceType,

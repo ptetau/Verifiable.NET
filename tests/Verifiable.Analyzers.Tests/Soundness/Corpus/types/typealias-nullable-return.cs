@@ -1,7 +1,6 @@
 // Returning TodoId? skips the IsValid check that a plain TodoId return gets, and the caller trusts the payload.
 // @expect: rejected
 // @witness: Corpus.Types.NullableReturn.Caller(0)
-// @known-bug: Returning TodoId? does not check TodoId.IsValid on the payload, while callers assume it.
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

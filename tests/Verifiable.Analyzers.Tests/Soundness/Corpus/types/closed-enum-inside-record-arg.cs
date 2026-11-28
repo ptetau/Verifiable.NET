@@ -1,7 +1,6 @@
 // (Shade)raw is checked when passed as a bare closed-enum argument, but not when wrapped in a record first.
 // @expect: rejected
 // @witness: Corpus.Types.ClosedEnumInRecord.Caller(7)
-// @known-bug: The closed-enum call-site check covers only bare enum parameters, not enum fields of a record argument.
 using Verifiable.Contracts;
 
 namespace Corpus.Types;
