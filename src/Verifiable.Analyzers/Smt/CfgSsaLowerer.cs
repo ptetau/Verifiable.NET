@@ -1646,7 +1646,13 @@ internal sealed partial class CfgSsaLowerer
                 }
                 var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                 var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
+                if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
+                    TryLowerUserEquality(bin, lhs, rhs, gamma, emitObligations, inlineDepth, out var userEq))
+                    return userEq;
                 return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
+
+            case ITupleBinaryOperation tupleBin:
+                return LowerTupleBinary(tupleBin, gamma, env, emitObligations, inlineDepth);
 
             case IIsNullOperation isNull:
                 var subject = LowerExpression(isNull.Operand, gamma, env, emitObligations, inlineDepth);
@@ -1857,8 +1863,10 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(left.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(right.Type, viaOperator: false);
             var (lEq, rEq, _) = _translator.UnifyForComparison(left, right);
-            var eq = $"(= {lEq} {rEq})";
+            var eq = SymbolEqualityComparer.Default.Equals(left.Type, right.Type) ? EqualityTerm(lEq, rEq, left.Type) : $"(= {lEq} {rEq})";
             return new SmtTypedTerm(kind == BinaryOperatorKind.Equals ? eq : $"(not {eq})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
@@ -2029,7 +2037,7 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException($"Unsupported property subpattern member '{sub.Member.Kind}' in specification.");
             }
 
-            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth);
+            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth, gamma);
             var subPat = LowerPatternOp(memberTerm, sub.Pattern, gamma, env, emitObligations, inlineDepth);
             clauses.Add(subPat.Term);
         }
@@ -2120,7 +2128,7 @@ internal sealed partial class CfgSsaLowerer
             {
                 EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
             }
-            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth);
+            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth, gamma);
         }
 
         if (!emitObligations)
@@ -2171,10 +2179,10 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var recv = LowerExpression(fieldRef.Instance, gamma, env, emitObligations, inlineDepth);
-        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth);
+        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth, gamma);
     }
 
-    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth)
+    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth, string gamma = "true")
     {
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
@@ -2186,7 +2194,8 @@ internal sealed partial class CfgSsaLowerer
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, prop, out _, out var bodyOp))
         {
             var propEnv = new BlockEnv { ThisOverride = receiver };
-            return LowerExpression(bodyOp!, "true", propEnv, emitObligations: false, inlineDepth + 1);
+            // A computed property is user code run at the access: its checks (a division, an index) belong to the caller.
+            return LowerExpression(bodyOp!, gamma, propEnv, emitObligations, inlineDepth + 1);
         }
 
         throw new ContractLoweringException($"Member '{memberName}' not found or unsupported on '{receiver.Type.Name}'.");
@@ -2261,6 +2270,7 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm(_types.GetDefaultTerm(targetType), targetType);
         }
 
+        Dictionary<string, SmtTypedTerm>? ctorFields = null;
         if (!InitializerProjection.IsSupportedProjection(objCreate, _types, out var projErr))
         {
             // Keep compatibility with existing constrained-struct/internal constructors when not a custom DTO projection
@@ -2268,10 +2278,15 @@ internal sealed partial class CfgSsaLowerer
             {
                 throw new ContractLoweringException(projErr!);
             }
+            if (UnmodeledConstructionReason(objCreate) is { } unmodeled)
+            {
+                // User code (a constructor body, a property initializer): lower it, or refuse (see CfgSsaLowerer.Equality.cs).
+                ctorFields = LowerSourceConstructor(objCreate, comp!, unmodeled, gamma, env, emitObligations, inlineDepth);
+            }
         }
 
-        var argMap = new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
-        foreach (var arg in objCreate.Arguments)
+        var argMap = ctorFields ?? new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
+        foreach (var arg in ctorFields is null ? objCreate.Arguments : System.Collections.Immutable.ImmutableArray<IArgumentOperation>.Empty)
         {
             if (arg.Parameter is not null)
             {
@@ -2748,8 +2763,12 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality via Equals on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(recvTerm.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(argValues[0].Type, viaOperator: false);
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
-            return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            return new SmtTypedTerm(SymbolEqualityComparer.Default.Equals(recvTerm.Type, argValues[0].Type)
+                ? EqualityTerm(l, r, recvTerm.Type)
+                : $"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
         if (!_expandingCalls.Add(method.OriginalDefinition))

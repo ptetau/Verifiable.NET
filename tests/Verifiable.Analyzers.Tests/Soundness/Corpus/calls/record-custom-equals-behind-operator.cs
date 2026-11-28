@@ -2,7 +2,6 @@
 // compares the fields instead.
 // @expect: rejected
 // @witness: Corpus.Calls.RecordEq.Same(1, 2)
-// @known-bug: A record's synthesized == is lowered as field-by-field equality (IsBuiltInValueOperator / structural =), ignoring a user-declared Equals that it calls at run time.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

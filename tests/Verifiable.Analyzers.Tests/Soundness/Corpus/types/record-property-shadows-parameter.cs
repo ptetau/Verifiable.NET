@@ -1,7 +1,6 @@
 // The record redeclares X as X * 2, so Doubled(n).X is 2n, not n.
 // @expect: rejected
 // @witness: Corpus.Types.ShadowedProp.Get(1)
-// @known-bug: Object creation binds record fields by constructor parameter name, ignoring an explicit property initializer (X { get; } = X * 2).
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

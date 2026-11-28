@@ -383,7 +383,14 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
-        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.UserDefinedOperator or MethodKind.Conversion)
+        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.Conversion)
+        {
+            return true;
+        }
+
+        // An operator someone wrote in this compilation runs unproved code unless its type is [Verifiable] (checked above);
+        // framework operators and the ones the compiler synthesizes for records are trusted.
+        if (method.MethodKind == MethodKind.UserDefinedOperator && (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
             return true;
         }
