@@ -1,6 +1,5 @@
 // Correct: every UTF-16 code unit is in [\u0000-￿], so a one-unit string always matches.
 // @expect: proved
-// @known-bug: false rejection: string characters are not bounded to UTF-16 code units, so Z3 picks U+17B3E as a one-unit counterexample
 using System.Text.RegularExpressions;
 using Verifiable.Contracts;
 

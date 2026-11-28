@@ -1,7 +1,6 @@
 // A constructor's Spec.Requires is a precondition callers must meet; here the caller passes a negative value.
 // @expect: rejected
 // @witness: Corpus.Calls.CtorRequires.Make(-1)
-// @known-bug: Calls to a constructor never check its Spec.Requires (LowerObjectCreation does not call CheckMethodRequires).
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

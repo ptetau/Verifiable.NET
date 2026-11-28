@@ -1,7 +1,6 @@
 // The [MapTo] mapper copies a possibly default ImmutableArray into a [NonDefault] field, and Count then throws.
 // @expect: rejected
 // @witness: Corpus.Types.MapToArray.Handle(new Corpus.Types.ListDto())
-// @known-bug: The [MapTo] generator does not check [NonDefault] target fields and generated code is not analysed, so a default ImmutableArray reaches a [NonDefault] field.
 using System.Collections.Immutable;
 using Verifiable.Contracts;
 

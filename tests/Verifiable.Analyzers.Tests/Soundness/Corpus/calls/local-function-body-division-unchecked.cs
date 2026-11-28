@@ -2,7 +2,6 @@
 // about the local function's result, but its body is never checked for division by zero either.
 // @expect: rejected
 // @witness: Corpus.Calls.LocalFnBody.Use(0)
-// @known-bug: Local function bodies are never lowered, so a division by zero inside one is not checked (contracts on local functions are ignored too).
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

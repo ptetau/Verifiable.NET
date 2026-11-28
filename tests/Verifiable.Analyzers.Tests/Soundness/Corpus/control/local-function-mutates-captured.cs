@@ -1,7 +1,6 @@
 // The local function Bump changes the captured c, so c is 1 after the call, not 0.
 // @expect: rejected
 // @witness: Corpus.Control.LocalCapture.Run(0)
-// @known-bug: Calling a local function drops its writes to captured locals, so c keeps its old value after Bump().
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

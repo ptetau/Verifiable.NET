@@ -1,7 +1,6 @@
 // A user-defined == whose body says "never equal": the analyzer treats it as structural equality instead.
 // @expect: rejected
 // @witness: Corpus.Calls.CustomEq.Same(1)
-// @known-bug: A user-defined operator == is lowered as structural equality; its body (OperatorMethod) is ignored.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

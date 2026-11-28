@@ -125,7 +125,13 @@ public sealed record TvLogic(string Op, TvBool Left, TvBool Right) : TvBool
 public sealed record TvStrPred(string Op, TvStr Left, TvStr Right) : TvBool
 {
     public override string Render(TvType t) =>
-        Op == "==" ? $"({Left.Render()} == {Right.Render()})" : $"{Left.Render()}.{Op}({Right.Render()})";
+        Op switch
+        {
+            "==" => $"({Left.Render()} == {Right.Render()})",
+            // StartsWith(string) alone is culture-sensitive; only the ordinal overload is modelled.
+            "StartsWith" => $"{Left.Render()}.StartsWith({Right.Render()}, System.StringComparison.Ordinal)",
+            _ => $"{Left.Render()}.{Op}({Right.Render()})"
+        };
 }
 
 /// <summary>A statement of a generated method body.</summary>

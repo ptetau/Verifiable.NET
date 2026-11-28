@@ -81,6 +81,12 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                 MisplacedPreconditions.Report(opCtx, method);
 
+                if (method.IsOverride &&
+                    CfgSsaLowerer.FindContractedOverriddenMethod(opCtx.Compilation, method) is { } contractedBase)
+                {
+                    opCtx.ReportDiagnostic(OverrideOfContractedMethodError(method, contractedBase));
+                }
+
                 var sourceTree = opCtx.OperationBlocks.FirstOrDefault()?.Syntax.SyntaxTree;
                 var nonDefaultImmArr = globalNonDefaultImmArr;
                 if (sourceTree is not null &&
@@ -495,6 +501,25 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
     internal static string BuildQueryScript(ProofObligation ob) =>
         ProofKernel.BuildRefutationQuery(ob.ScriptPreamble, ob.PathCondition ?? string.Empty, ob.GoalTerm);
+
+    /// <summary>
+    /// Callers of a virtual method are proved against the base method's contracts. An override is not checked against
+    /// them, so rather than let it break the promise silently it is rejected.
+    /// </summary>
+    private static Diagnostic OverrideOfContractedMethodError(IMethodSymbol method, IMethodSymbol baseMethod)
+    {
+        var display = $"{method.ContainingType?.Name}.{method.Name}";
+        var baseDisplay = $"{baseMethod.ContainingType?.Name}.{baseMethod.Name}";
+        var loc = method.Locations.FirstOrDefault(l => l.IsInSource) ?? Location.None;
+        var elm = ElmDiagnosticFormatter.Format(
+            "OVERRIDE OF A CONTRACTED METHOD",
+            loc,
+            $"`{display}` overrides `{baseDisplay}`, which has `Spec.Requires`/`Spec.Ensures`, and an override is not checked against the base contracts.",
+            explanation: "A caller that holds the base type is proved against the base method's contracts, but the call runs the override. If the override breaks the promise, the proof is wrong.",
+            fixHint: $"Do not override `{baseDisplay}` in `[Verifiable]` code. Make the contracted method non-virtual (or `sealed`), or move the varying behaviour into a separate method that has no contracts of its own.",
+            summary: $"{display} overrides contracted {baseDisplay}; overrides are not checked against base contracts. Do not override it.");
+        return Diagnostic.Create(VerifiableDescriptors.InvalidContractExpression, loc, elm);
+    }
 
     private static Diagnostic UnsupportedContractError(IMethodSymbol method, (string Contract, Location Location, string Error) err)
     {

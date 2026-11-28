@@ -1,6 +1,5 @@
 // Calling Equals through IEquatable<string> on a null string throws NullReferenceException.
 // @expect: rejected
-// @known-bug: Equals on a metadata method (here IEquatable<string>.Equals) is lowered as structural = with no non-null receiver obligation (CfgSsaLowerer.cs, method.Name == "Equals")
 // @witness: Corpus.Strings.EquatableNull.Same(null, null)
 using System;
 using Verifiable.Contracts;

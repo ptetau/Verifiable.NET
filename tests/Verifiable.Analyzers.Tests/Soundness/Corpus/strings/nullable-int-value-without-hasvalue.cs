@@ -1,6 +1,5 @@
 // x.Value on an empty int? throws InvalidOperationException; nothing guards it.
 // @expect: rejected
-// @known-bug: x.Value on an int? has no HasValue obligation; Value of an empty int? is an unconstrained opt-val
 // @witness: Corpus.Strings.NullableValue.Unwrap(null)
 using Verifiable.Contracts;
 
