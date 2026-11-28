@@ -270,6 +270,8 @@ To keep every token followable, `VER007` only accepts tokens in local variables 
 
 - Pass a token only to a `[ConsumesObligation]` method (mark your own helper `[ConsumesObligation]` if it takes the token over). A call to any other method that takes the token by value is rejected.
 - Do not store a token in an array, tuple, `Nullable<T>`, collection, field or property (`VER007 -- UNTRACKED OBLIGATION`). Deconstruct a tuple straight into locals, or return it.
+- Do not hold a token in a field or property, either: a field or auto-property initializer (`static readonly T Shared = new(1);`) is rejected, and so is reading a token out of a field or property of another object (`Commit(holder.Tok)`), because each read would hand out the same obligation again. Pass the token itself. Reading a plain field of a token (`token.Id`) is fine.
+- `using` on a token is a call to its `Dispose` on every way out of the scope. If `Dispose` is `[ConsumesObligation]`, the `using` consumes the token, so consuming it again inside the scope is a double consume. If `Dispose` is not a sink, the `using` does not consume it and the token must still be consumed.
 - An async `[ConsumesObligation]` method must have its `Task` awaited or returned. `_ = CommitAsync(token)` is rejected.
 - A token that a method hands back through an `out` parameter is tracked by the caller; a local function that consumes a captured token consumes it at each call.
 

@@ -1,6 +1,5 @@
 // Wrong: a property hands out the same token on every read, and each read is committed.
 // @expect: rejected
-// @known-bug: a token read twice from a property (h.Tok) is not tracked as a copy, so both commits are accepted
 // @witness: Corpus.Linear.PropTok.Run()
 using System;
 using System.Collections.Generic;

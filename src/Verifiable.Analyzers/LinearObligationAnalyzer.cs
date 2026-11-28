@@ -191,7 +191,54 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         context.EnableConcurrentExecution();
 
         context.RegisterOperationBlockAction(AnalyzeOperationBlock);
+        context.RegisterOperationAction(AnalyzeMemberInitializer, OperationKind.FieldInitializer, OperationKind.PropertyInitializer);
     }
+
+    /// <summary>
+    /// A field or property initializer (<c>static readonly T Shared = new(1);</c>, <c>T Tok { get; } = new(1);</c>) that
+    /// holds a token puts it where the analyzer cannot follow it, just like an assignment to a field.
+    /// </summary>
+    private static void AnalyzeMemberInitializer(OperationAnalysisContext context)
+    {
+        var initializer = (ISymbolInitializerOperation)context.Operation;
+        var value = initializer.Value;
+        var holdsToken = VerifiableSymbolHelpers.ContainsMustConsumeElement(UnwrapConversion(value).Type, out var linearType);
+        if (!holdsToken)
+        {
+            foreach (var member in GetInitializedMembers(initializer))
+            {
+                if (VerifiableSymbolHelpers.ContainsMustConsumeElement(GetSymbolTypeOrNull(member), out linearType))
+                {
+                    holdsToken = true;
+                    break;
+                }
+            }
+        }
+
+        var first = GetInitializedMembers(initializer).FirstOrDefault();
+        if (!holdsToken || first is null || VerifiableSymbolHelpers.IsGeneratedByVerifiableGenerators(first))
+        {
+            return;
+        }
+
+        var name = first.Name;
+        var elm = ElmDiagnosticFormatter.Format(
+            "UNTRACKED OBLIGATION",
+            value.Syntax.GetLocation(),
+            $"Linear obligation token `{name}` (`{linearType!.Name}`) was stored in a field or property initializer, where the analyzer cannot follow it.",
+            spirit: "A `[MustConsume]` token represents work that must finish exactly once along every code path (such as emitting a command or committing state).",
+            fixHint: "Keep the token in a local variable or parameter and pass it to a `[ConsumesObligation]` method, return it, or call `Obligation.Discard(...)`. Do not store tokens in arrays, tuples, `Nullable<T>`, fields or collections.",
+            relatedLocation: null,
+            relatedHeading: null);
+        context.ReportDiagnostic(Diagnostic.Create(VerifiableDescriptors.LinearObligationViolation, value.Syntax.GetLocation(), elm));
+    }
+
+    private static IEnumerable<ISymbol> GetInitializedMembers(ISymbolInitializerOperation initializer) => initializer switch
+    {
+        IFieldInitializerOperation f => f.InitializedFields,
+        IPropertyInitializerOperation p => p.InitializedProperties,
+        _ => []
+    };
 
     private static void AnalyzeOperationBlock(OperationBlockAnalysisContext context)
     {
@@ -1620,6 +1667,17 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 case IConversionOperation conv when IsConversionToNullableToken(conv) && !IsAssignedToVariable(conv):
                     Escape(conv, conv.Syntax.GetLocation(), "was stored in a `Nullable<T>`");
                     return;
+                case IFieldReferenceOperation or IPropertyReferenceOperation when IsUntrackableTokenRead(op):
+                    Report(
+                        op.Syntax.GetLocation(),
+                        null,
+                        null,
+                        "UNTRACKED OBLIGATION",
+                        MemberName(op),
+                        op.Type!.Name,
+                        $"was read from the member `{MemberName(op)}`, where the analyzer cannot tell whether the obligation was already consumed",
+                        $"Token read from member `{MemberName(op)}` cannot be tracked; pass the token itself. Keep tokens in local variables or parameters, not in fields or properties.");
+                    return;
             }
 
             if (!skipMovedRoot && TryResolve(op, out var resolved) && IsToken(GetSymbolTypeOrNull(resolved.Symbols[0])))
@@ -1655,6 +1713,52 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 var childSkip = skipMovedRoot && UnwrapConversion(op) == UnwrapConversion(child);
                 Walk(child, childSkip);
             }
+        }
+
+        private static string MemberName(IOperation op) => op switch
+        {
+            IFieldReferenceOperation f => f.Field.Name,
+            IPropertyReferenceOperation pr => pr.Property.Name,
+            _ => "<member>"
+        };
+
+        /// <summary>
+        /// A token read out of a field or property of an object that is not itself a token. Every read yields the
+        /// same obligation again, which the analyzer cannot follow. Reading a field of a token (<c>p.Id</c>) is
+        /// not a token read, and neither is reading a member of a token that is held in such a member.
+        /// </summary>
+        private static bool IsUntrackableTokenRead(IOperation op)
+        {
+            if (!IsToken(op.Type))
+            {
+                return false;
+            }
+
+            var member = op switch
+            {
+                IFieldReferenceOperation f => (ISymbol)f.Field,
+                IPropertyReferenceOperation pr => pr.Property,
+                _ => null
+            };
+            if (member is null || IsToken(member.ContainingType))
+            {
+                return false;
+            }
+
+            // `holder.Tok.Id`: only a field of the token is read, the obligation is untouched.
+            var parent = op.Parent;
+            while (parent is IConversionOperation or IParenthesizedOperation)
+            {
+                parent = parent.Parent;
+            }
+
+            var receiver = parent switch
+            {
+                IFieldReferenceOperation f => f.Instance,
+                IPropertyReferenceOperation pr => pr.Instance,
+                _ => null
+            };
+            return receiver is null || UnwrapConversion(receiver) != op;
         }
 
         private static IOperation? CollectTokenLeaf(IOperation element) =>
@@ -1725,12 +1829,35 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
             var target = inv.TargetMethod;
             var consumesArgs = VerifiableSymbolHelpers.HasAttribute(target, VerifiableSymbolHelpers.ConsumesObligationAttr);
+            var instanceConsumed = false;
             if (inv.Instance is not null)
             {
-                Walk(inv.Instance);
+                var instance = UnwrapConversion(inv.Instance);
+                var instanceSinks = consumesArgs;
+                if (!instanceSinks && IsToken(instance.Type) && target.ContainingType.TypeKind == TypeKind.Interface)
+                {
+                    // `using` calls `IDisposable.Dispose`; what counts is the token type's own implementation.
+                    instanceSinks = instance.Type!.FindImplementationForInterfaceMember(target) is IMethodSymbol impl &&
+                        VerifiableSymbolHelpers.HasAttribute(impl, VerifiableSymbolHelpers.ConsumesObligationAttr);
+                }
+
+                if (instanceSinks && IsToken(instance.Type) && TryResolve(instance, out var self))
+                {
+                    // A `[ConsumesObligation]` method on the token itself (such as `Dispose`) takes the token over.
+                    instanceConsumed = true;
+                    foreach (var sym in self.Symbols)
+                    {
+                        ConsumeSymbol(sym, weak: !self.Exact, inv.Syntax.GetLocation(), ConsumeContext.Argument, reportUninitialized: self.Exact);
+                    }
+                }
+                else
+                {
+                    Walk(inv.Instance);
+                }
             }
 
-            var consumedAny = WalkArguments(inv.Arguments, target, consumesArgs, inv, out var firstConsumedName);
+            var consumedAny = instanceConsumed;
+            consumedAny |= WalkArguments(inv.Arguments, target, consumesArgs, inv, out var firstConsumedName);
 
             if (target.MethodKind == MethodKind.LocalFunction)
             {
