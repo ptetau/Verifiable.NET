@@ -213,19 +213,18 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                     continue;
                 }
 
-                var args = inv.ArgumentList.Arguments;
                 var isWhen = target.Name is "RequiresWhen" or "EnsuresWhen";
-                var minArgs = isWhen ? 2 : 1;
-                var maxArgs = isWhen ? 3 : 2;
-                if (args.Count < minArgs || args.Count > maxArgs)
+                var arg0 = SpecCallArguments.Get(inv, target.Name, 0);
+                var arg1 = isWhen ? SpecCallArguments.Get(inv, target.Name, 1) : null;
+                if (arg0 is null || (isWhen && arg1 is null))
                 {
                     continue;
                 }
 
                 string? because = null;
-                if (args.Count == maxArgs)
+                if (SpecCallArguments.Get(inv, target.Name, SpecCallArguments.BecauseOrdinal(target.Name)) is { } becauseExpr)
                 {
-                    var constBecause = model.GetConstantValue(args[maxArgs - 1].Expression);
+                    var constBecause = model.GetConstantValue(becauseExpr);
                     if (constBecause.HasValue && constBecause.Value is string bStr)
                     {
                         because = bStr;
@@ -239,15 +238,15 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
 
                 if (target.Name == "Requires")
                 {
-                    if (ContractExpressionCanonicalizer.TryCanonicalize(model, args[0].Expression, allowInternal, out var canonReq))
+                    if (ContractExpressionCanonicalizer.TryCanonicalize(model, arg0, allowInternal, out var canonReq))
                     {
                         builder.Add(new ExportedEntry(memberId!, "Requires", canonReq, because, order++));
                     }
                 }
                 else if (target.Name == "RequiresWhen")
                 {
-                    if (ContractExpressionCanonicalizer.TryCanonicalize(model, args[0].Expression, allowInternal, out var canonGuard) &&
-                        ContractExpressionCanonicalizer.TryCanonicalize(model, args[1].Expression, allowInternal, out var canonReq))
+                    if (ContractExpressionCanonicalizer.TryCanonicalize(model, arg0, allowInternal, out var canonGuard) &&
+                        ContractExpressionCanonicalizer.TryCanonicalize(model, arg1!, allowInternal, out var canonReq))
                     {
                         builder.Add(new ExportedEntry(
                             memberId!,
@@ -259,7 +258,7 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                 }
                 else if (target.Name is "Ensures" or "EnsuresWhen" && !method.ReturnsVoid)
                 {
-                    var predArg = args[isWhen ? 1 : 0].Expression;
+                    var predArg = isWhen ? arg1! : arg0;
                     ExpressionSyntax? ensExpr = null;
                     IParameterSymbol? lambdaParam = null;
 
@@ -286,7 +285,7 @@ public sealed class ContractMetadataGenerator : IIncrementalGenerator
                     {
                         if (isWhen)
                         {
-                            if (ContractExpressionCanonicalizer.TryCanonicalize(model, args[0].Expression, allowInternal, out var canonGuard))
+                            if (ContractExpressionCanonicalizer.TryCanonicalize(model, arg0, allowInternal, out var canonGuard))
                             {
                                 builder.Add(new ExportedEntry(
                                     memberId!,

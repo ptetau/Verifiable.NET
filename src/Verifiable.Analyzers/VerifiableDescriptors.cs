@@ -10,6 +10,7 @@ internal static class VerifiableDescriptors
     private const string LinearCategory = "Verifiable.LinearTypes";
     private const string SmtCategory = "Verifiable.SMT";
     private const string SpecQualityCategory = "Verifiable.SpecQuality";
+    private const string TraceabilityCategory = "Verifiable.Traceability";
 
     public static readonly DiagnosticDescriptor HeapAliasingOrMutableState = new(
         id: "VER001",
@@ -130,6 +131,42 @@ internal static class VerifiableDescriptors
         category: SpecQualityCategory,
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor UnknownClause = new(
+        id: "VER201",
+        title: "Contract or type names a clause that is not in the clause manifest",
+        messageFormat: "{0}",
+        category: TraceabilityCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+
+    public static readonly DiagnosticDescriptor UncoveredClause = new(
+        id: "VER202",
+        title: "Clause in the manifest has no contract or type in this project",
+        messageFormat: "{0}",
+        category: TraceabilityCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+
+    public static readonly DiagnosticDescriptor MissingClause = new(
+        id: "VER203",
+        title: "Contract or constrained type has no clause ID",
+        messageFormat: "{0}",
+        category: TraceabilityCategory,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+
+    public static readonly DiagnosticDescriptor InvalidClause = new(
+        id: "VER204",
+        title: "Clause ID is not a usable constant string, or the clause manifest is malformed",
+        messageFormat: "{0}",
+        category: TraceabilityCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static Diagnostic CreateScoped(
         DiagnosticDescriptor descriptor,
