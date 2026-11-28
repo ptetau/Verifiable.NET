@@ -1,6 +1,5 @@
 // Wrong: a static field initializer creates a token that two methods commit.
 // @expect: rejected
-// @known-bug: a token held in a static readonly field can be committed from several methods without any diagnostic
 // @witness: Corpus.Linear.FieldTok.Run()
 using System;
 using System.Collections.Generic;

@@ -185,4 +185,75 @@ public class LinearObligationPathTests
         var reported = await Run("static void P() { try { var t = Make(1); Work(); Sink(t); } catch (Exception) { Work(); } }");
         Assert.Empty(reported);
     }
+
+    private const string MemberPreamble = """
+        using System;
+        using Verifiable.Contracts;
+
+        namespace MemberDomain;
+
+        [MustConsume]
+        public readonly record struct Tok(int Id);
+
+        [MustConsume]
+        public readonly record struct Scoped(int Id) : IDisposable
+        {
+            [ConsumesObligation]
+            public void Dispose() { _ = Id; }
+        }
+
+        [MustConsume]
+        public readonly record struct Plain(int Id) : IDisposable
+        {
+            public void Dispose() { }
+        }
+
+        public static class Sinks
+        {
+            [ConsumesObligation]
+            public static void Sink(Tok t) { _ = t.Id; }
+        }
+
+        """;
+
+    private static async Task<string[]> RunMembers(string body)
+    {
+        var diags = await AnalyzerTestHarness.AnalyzeAsync(MemberPreamble + body, new LinearObligationAnalyzer());
+        Assert.DoesNotContain(diags, d => d.Id == "AD0001");
+        Assert.True(!diags.Any(d => d.Id.StartsWith("CS") && d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error), string.Join("|", diags.Where(d => d.Id.StartsWith("CS")).Select(d => d.ToString())));
+        return diags.Where(d => d.Id == "VER007").Select(d => d.GetMessage().Split('\n')[0].TrimEnd('\r')).ToArray();
+    }
+
+    [Theory]
+    [InlineData("public sealed class H { public Tok T { get; set; } public static void P(H h) { Sinks.Sink(h.T); } }", "cannot tell")]
+    [InlineData("public sealed class H { public Tok T; public static void P(H h) { var t = h.T; Sinks.Sink(t); } }", "cannot tell")]
+    [InlineData("public static class H { public static Tok T; public static void P() { Sinks.Sink(T); } }", "cannot tell")]
+    [InlineData("public static class H { public static readonly Tok T = new(1); }", "initializer")]
+    [InlineData("public sealed class H { public Tok T { get; } = new(1); }", "initializer")]
+    [InlineData("public sealed class H { public Tok T = new(1); }", "initializer")]
+    public async Task TokenInMember_IsRejected(string members, string fragment)
+    {
+        var reported = await RunMembers(members);
+        Assert.Contains(reported, line => line.Contains(fragment, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("public sealed class H { public Tok T; public static int P(H h) => h.T.Id; }")]
+    [InlineData("public static class H { public static void P() { using var s = new Scoped(1); _ = s.Id; } }")]
+    [InlineData("public static class H { public static void P() { var s = new Scoped(1); using (s) { _ = s.Id; } } }")]
+    public async Task MemberShapes_ThatAreFine_AreNotReported(string members)
+    {
+        var r = await RunMembers(members);
+        Assert.True(r.Length == 0, string.Join("|", r));
+    }
+
+    [Theory]
+    [InlineData("public static class H { [ConsumesObligation] public static void Done(Scoped s) => s.Dispose(); public static void P() { var s = new Scoped(1); using (s) { Done(s); } } }")]
+    [InlineData("public static class H { public static void P() { using var s = new Plain(1); } }")]
+    [InlineData("public static class H { public static void P(bool b) { using var s = new Scoped(1); if (b) { return; } s.Dispose(); } }")]
+    public async Task UsingOnAToken_IsAnImplicitDisposeCall(string members)
+    {
+        Assert.NotEmpty(await RunMembers(members));
+    }
+
 }

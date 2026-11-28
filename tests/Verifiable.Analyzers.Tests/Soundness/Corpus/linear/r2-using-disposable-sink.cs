@@ -1,6 +1,5 @@
 // Right: the token is IDisposable with a sink Dispose, so a using declaration consumes it once.
 // @expect: proved
-// @known-bug: a using declaration over a token whose Dispose is a [ConsumesObligation] sink is not treated as consuming it (false VER007 never consumed)
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
