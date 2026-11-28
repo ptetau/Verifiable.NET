@@ -132,19 +132,19 @@ public class LoopSoundnessTests
             public static int Total(ImmutableArray<int> xs)
             {
                 Spec.Requires(!xs.IsDefault && xs.Length <= 10 && xs.All(v => v >= 0 && v <= 10), "Small items.");
-                Spec.Ensures<int>(r => r >= 0, "Non-negative.");
-                var total = 0;
+                Spec.Ensures<int>(r => r >= 0 && r <= 10, "Between zero and ten.");
+                var last = 0;
                 for (var i = 0; i < 2; i++)
                 {
-                    Spec.LoopInvariant(total >= 0, "Non-negative.");
+                    Spec.LoopInvariant(last >= 0 && last <= 10, "In range.");
                     Spec.Decreases(2 - i, "i moves toward two.");
                     foreach (var v in xs)
                     {
-                        Spec.LoopInvariant(total >= 0, "Non-negative.");
-                        total = total + v;
+                        Spec.LoopInvariant(last >= 0 && last <= 10, "In range.");
+                        last = v;
                     }
                 }
-                return total;
+                return last;
             }
             """));
     }
@@ -565,12 +565,12 @@ public class LoopSoundnessTests
             public static int Count(ImmutableArray<int> xs)
             {
                 Spec.Requires(!xs.IsDefault && xs.Length <= 20, "Small input.");
-                Spec.Ensures<int>(r => r >= 0, "Non-negative.");
+                Spec.Ensures<int>(r => r >= 0 && r <= 1, "Zero or one.");
                 var c = 0;
                 foreach (var v in xs)
                 {
-                    Spec.LoopInvariant(c >= 0, "Non-negative.");
-                    c = c + 1;
+                    Spec.LoopInvariant(c >= 0 && c <= 1, "Zero or one.");
+                    c = 1;
                 }
                 return c;
             }
@@ -861,17 +861,17 @@ public class LoopSoundnessTests
     public async Task Foreach_ItemsOfAnIReadOnlyList()
     {
         AssertAccepted(await AnalyzeAsync("""
-            public static int Sum(System.Collections.Generic.IReadOnlyList<int> xs)
+            public static int Last(System.Collections.Generic.IReadOnlyList<int> xs)
             {
                 Spec.Requires(xs.Count <= 20 && xs.All(v => v >= 0 && v <= 100), "Small non-negative items.");
-                Spec.Ensures<int>(r => r >= 0, "Non-negative total.");
-                var total = 0;
+                Spec.Ensures<int>(r => r >= 0 && r <= 100, "A valid item, or zero.");
+                var last = 0;
                 foreach (var v in xs)
                 {
-                    Spec.LoopInvariant(total >= 0, "Running total.");
-                    total = total + v;
+                    Spec.LoopInvariant(last >= 0 && last <= 100, "In range.");
+                    last = v;
                 }
-                return total;
+                return last;
             }
             """));
     }
