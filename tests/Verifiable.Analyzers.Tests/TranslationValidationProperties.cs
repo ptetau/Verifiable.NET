@@ -18,6 +18,7 @@ namespace Verifiable.Analyzers.Tests;
 public class TranslationValidationProperties
 {
     private const int Iterations = 40;
+    private const int BitIterations = 30;
     private const int InputsPerProgram = 3;
 
     // No attribute: the default. Overflow is refuted exactly where the CLR's checked run throws.
@@ -46,8 +47,28 @@ public class TranslationValidationProperties
     [Property(Iterations = Iterations, Seed = 7008, ShrinkLimit = 60)]
     public Property UncheckedArithmeticStrings_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Unchecked, strings: true);
 
-    private static Property Agrees(TvType t, TvArith arithmetic, bool strings = false) =>
-        (from program in TvGenerators.Program(t, arithmetic, strings)
+    // Bit programs: ~ & | ^ << >>, casts that wrap through a narrower type, and compound assignments on narrow and
+    // unsigned locals. The pinned inputs are small and edge values, so a wrong width, sign or wrap shows up as a wrong value.
+    [Property(Iterations = BitIterations, Seed = 7009, ShrinkLimit = 60)]
+    public Property BitsInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Default, bits: true);
+
+    [Property(Iterations = BitIterations, Seed = 7010, ShrinkLimit = 60)]
+    public Property BitsLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Default, bits: true);
+
+    [Property(Iterations = BitIterations, Seed = 7011, ShrinkLimit = 60)]
+    public Property CheckedArithmeticBitsInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Checked, bits: true);
+
+    [Property(Iterations = BitIterations, Seed = 7012, ShrinkLimit = 60)]
+    public Property CheckedArithmeticBitsLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Checked, bits: true);
+
+    [Property(Iterations = BitIterations, Seed = 7013, ShrinkLimit = 60)]
+    public Property UncheckedArithmeticBitsInt_AnalyzerAgreesWithClr() => Agrees(TvType.Int, TvArith.Unchecked, bits: true);
+
+    [Property(Iterations = BitIterations, Seed = 7014, ShrinkLimit = 60)]
+    public Property UncheckedArithmeticBitsLong_AnalyzerAgreesWithClr() => Agrees(TvType.Long, TvArith.Unchecked, bits: true);
+
+    private static Property Agrees(TvType t, TvArith arithmetic, bool strings = false, bool bits = false) =>
+        (from program in TvGenerators.Program(t, arithmetic, strings, bits)
          from inputs in TvGenerators.Inputs(t, InputsPerProgram, strings)
          select (program, inputs)).ForAll(c =>
         {

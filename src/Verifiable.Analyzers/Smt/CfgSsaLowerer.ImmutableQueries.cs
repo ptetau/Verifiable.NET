@@ -673,7 +673,7 @@ internal sealed partial class CfgSsaLowerer
 
         var idxTyped = new SmtTypedTerm(idxVar, intType);
         var (pTerm, obligations) = LowerLambdaInQuantifier(idxParam!, predBody!, idxTyped, CombineAnd(gamma, inRange), env, inlineDepth);
-        if (emitObligations || _inQuantifierDepth > 0)
+        if (ChecksThrowingOperations(emitObligations))
         {
             EmitQuantifiedLambdaObligations(idxVar, inRange, obligations, loc, gamma, idxSort);
         }

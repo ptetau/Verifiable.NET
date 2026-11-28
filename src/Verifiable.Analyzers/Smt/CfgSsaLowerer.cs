@@ -745,7 +745,7 @@ internal sealed partial class CfgSsaLowerer
         {
             try
             {
-                var invTerm = LowerExpression(condOp, preGamma, preEnv, emitObligations: false);
+                var invTerm = LowerSpecGoal(condOp, preGamma, preEnv);
                 AddObligation("LoopInvariantEntry", $"{display} on entry", loc, preGamma, invTerm.Term, because);
             }
             catch (ContractLoweringException ex)
@@ -933,7 +933,7 @@ internal sealed partial class CfgSsaLowerer
             {
                 try
                 {
-                    var invTerm = LowerExpression(condOp, edgeGamma, env, emitObligations: false);
+                    var invTerm = LowerSpecGoal(condOp, edgeGamma, env);
                     AddObligation("LoopInvariantStep", $"{display} preservation", loc, edgeGamma, invTerm.Term, because);
                 }
                 catch (ContractLoweringException ex)
@@ -1176,7 +1176,7 @@ internal sealed partial class CfgSsaLowerer
                     effectiveGamma = CombineAnd(gamma, guardTerm.Term);
                 }
 
-                var goal = LowerExpression(ens.BodyExpr, effectiveGamma, ensEnv, emitObligations: false);
+                var goal = LowerSpecGoal(ens.BodyExpr, effectiveGamma, ensEnv);
                 var clauses = ExtractGoalClauses(ens.BodyExpr, effectiveGamma, ensEnv);
                 AddObligation(
                     "Postcondition",
@@ -1496,6 +1496,8 @@ internal sealed partial class CfgSsaLowerer
                 var inner = LowerExpression(conv.Operand, gamma, env, emitObligations, inlineDepth);
                 if (conv.Type is { } target)
                 {
+                    if (TryFoldIntegralConstant(conv, out var foldedConv))
+                        return foldedConv;
                     var convChecked = IsConversionChecked(conv, _compilation);
                     if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
                         _types.TryGetNullableInfo(inner.Type, out _, out var srcId, out var srcType) &&
@@ -1537,6 +1539,8 @@ internal sealed partial class CfgSsaLowerer
 
                     if (inCoalesce && conv.IsImplicit)
                         return ConvertNullableValue(inner, target);
+                    if (TryWidenIntToBitVec(inner, target, out var widened))
+                        return widened;
                     return _translator.ConvertTo(inner, target);
                 }
                 return inner;
@@ -1594,24 +1598,36 @@ internal sealed partial class CfgSsaLowerer
             case ICompoundAssignmentOperation ca:
                 var curTarget = LowerExpression(ca.Target, gamma, env, emitObligations, inlineDepth);
                 var rhsVal = LowerExpression(ca.Value, gamma, env, emitObligations, inlineDepth);
-                var combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation(), emitObligations,
-                    checkOverflow: MustNotOverflow(ca.Syntax, ca.IsChecked));
+                var caChecked = MustNotOverflow(ca.Syntax, ca.IsChecked);
+                if (!TryLowerIntegralUpdate(ca.OperatorKind, ca.Target.Type ?? ca.Type!, curTarget, rhsVal, ca.Value, caChecked, gamma, ca.Syntax.GetLocation(), emitObligations, out var combined))
+                {
+                    combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation(), emitObligations,
+                        checkOverflow: caChecked);
+                }
                 var combinedSsa = BindSsaValue("assign", combined);
                 AssignTarget(ca.Target, combinedSsa, env);
                 return combinedSsa;
 
             case IIncrementOrDecrementOperation inc:
                 var prev = LowerExpression(inc.Target, gamma, env, emitObligations, inlineDepth);
-                var one = new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
                 var binKind = inc.Kind == OperationKind.Increment ? BinaryOperatorKind.Add : BinaryOperatorKind.Subtract;
-                var next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations,
-                    checkOverflow: MustNotOverflow(inc.Syntax, inc.IsChecked));
+                var incChecked = MustNotOverflow(inc.Syntax, inc.IsChecked);
+                if (!TryLowerIntegralUpdate(binKind, inc.Target.Type ?? inc.Type!, prev, null, null, incChecked, gamma, inc.Syntax.GetLocation(), emitObligations, out var next))
+                {
+                    var one = new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
+                    next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations,
+                        checkOverflow: incChecked);
+                }
                 var nextSsa = BindSsaValue("inc", next);
                 AssignTarget(inc.Target, nextSsa, env);
                 return inc.IsPostfix ? prev : nextSsa;
 
             case IUnaryOperation un:
                 var uOp = LowerExpression(un.Operand, gamma, env, emitObligations, inlineDepth);
+                if (TryFoldIntegralConstant(un, out var foldedUnary))
+                    return foldedUnary;
+                if (un.OperatorKind == UnaryOperatorKind.BitwiseNegation)
+                    return LowerBitwiseComplement(uOp, un.Type ?? uOp.Type);
                 if (un.OperatorKind == UnaryOperatorKind.Not)
                     return new SmtTypedTerm($"(not {uOp.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
                 if (un.OperatorKind == UnaryOperatorKind.Minus)
@@ -1651,6 +1667,8 @@ internal sealed partial class CfgSsaLowerer
                 return uOp;
 
             case IBinaryOperation bin:
+                if (!bin.IsLifted && TryFoldIntegralConstant(bin, out var foldedBinary))
+                    return foldedBinary;
                 if (bin.IsLifted)
                     return LowerLiftedComparison(bin, gamma, env, emitObligations, inlineDepth);
                 if (bin.OperatorKind == BinaryOperatorKind.ConditionalAnd)
@@ -1890,6 +1908,11 @@ internal sealed partial class CfgSsaLowerer
         var isBv = ContractExpressionTranslator.IsBitVecSort(sort);
         var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
 
+        if (IsBitwiseOrShift(kind) && TryLowerBitwiseOperator(kind, lTerm, rTerm, sort, IsShift(kind) ? left.Type : unified, resultType, out var bitwise))
+        {
+            return bitwise;
+        }
+
         if (emitObligations && checkOverflow && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
         {
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
@@ -1910,6 +1933,12 @@ internal sealed partial class CfgSsaLowerer
             {
                 EmitIntOverflowObligation(kind.ToString(), exact, range, gamma, loc, lTerm, rTerm);
             }
+
+            // Under [CheckedArithmetic] a value is a bit-vector, which wraps whether or not the overflow was refuted.
+            if (_types.UseBitVec)
+            {
+                return new SmtTypedTerm(WrapIntoRange(exact, range), resultType);
+            }
         }
 
         if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && sort != "Real")
@@ -1919,7 +1948,7 @@ internal sealed partial class CfgSsaLowerer
 
         if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && sort == "Real")
         {
-            if (emitObligations || _inQuantifierDepth > 0)
+            if (ChecksThrowingOperations(emitObligations))
                 EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0.0))");
         }
 
@@ -2218,6 +2247,7 @@ internal sealed partial class CfgSsaLowerer
     {
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
+            AssumeStringLengthBound(receiver, memberName);
             return direct;
         }
 
@@ -2750,11 +2780,15 @@ internal sealed partial class CfgSsaLowerer
         // 8. Math / decimal helpers
         if (containing?.SpecialType is SpecialType.System_Decimal || containing?.ToDisplayString() == "System.Math")
         {
+            if (TryLowerMathWidthIntrinsic(method, argValues, gamma, loc, emitObligations, out var widthResult))
+            {
+                return widthResult;
+            }
             if (method.Name == "Abs" && argValues.Count == 1)
             {
                 var a = _translator.UnwrapRefinedIfApplicable(argValues[0]);
                 var sort = _types.GetSort(a.Type);
-                var zero = sort == "Real" ? "0.0" : _translator.FormatIntLiteral(0, sort == "(_ BitVec 64)" ? 64 : 32);
+                var zero = sort == "Real" ? "0.0" : sort == "Int" ? "0" : _translator.FormatIntLiteral(0, sort == "(_ BitVec 64)" ? 64 : 32);
                 var lt = ContractExpressionTranslator.IsBitVecSort(sort) ? "bvslt" : "<";
                 var neg = ContractExpressionTranslator.IsBitVecSort(sort) ? "bvneg" : "-";
                 if (emitObligations && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
@@ -2768,6 +2802,12 @@ internal sealed partial class CfgSsaLowerer
                     // Math.Abs(MinValue) has no positive counterpart and throws OverflowException.
                     EmitSafetyObligation("Overflow", "Math.Abs(MinValue) throws OverflowException", loc, gamma,
                         $"(=> {InRange(a.Term, absRange)} (not (= {a.Term} {absRange.Min})))");
+                }
+                else if (emitObligations && sort == "Int" && a.Type.SpecialType is SpecialType.System_Int16 or SpecialType.System_SByte &&
+                         TryGetIntegralBounds(a.Type, out var smallMin, out _, out _, out _))
+                {
+                    EmitSafetyObligation("Overflow", "Math.Abs(MinValue) throws OverflowException", loc, gamma,
+                        $"(not (= {a.Term} {CalendarArithmetic.FormatBigInt(smallMin)}))");
                 }
                 return new SmtTypedTerm($"(ite ({lt} {a.Term} {zero}) ({neg} {a.Term}) {a.Term})", method.ReturnType);
             }
@@ -3045,7 +3085,7 @@ internal sealed partial class CfgSsaLowerer
                     effectiveGamma = CombineAnd(gamma, guard);
                 }
 
-                var reqTerm = LowerExpression(req.Condition, effectiveGamma, calleeEnv, emitObligations: false);
+                var reqTerm = LowerSpecGoal(req.Condition, effectiveGamma, calleeEnv);
                 lowered.Add(guard is null ? reqTerm.Term : $"(=> {guard} {reqTerm.Term})");
                 var clauses = ExtractGoalClauses(req.Condition, effectiveGamma, calleeEnv);
                 AddObligation(
@@ -3513,6 +3553,7 @@ internal sealed partial class CfgSsaLowerer
         if (!isFreshFreeSymbol)
         {
             AddAssertion($"(= {name} {value.Term})", "SsaBinding", name, Location.None);
+            PropagateBitVecOrigin(value.Term, name);
         }
         return new SmtTypedTerm(name, value.Type);
     }
@@ -3558,6 +3599,11 @@ internal sealed partial class CfgSsaLowerer
         out SmtTypedTerm converted)
     {
         converted = default!;
+        if (target.TypeKind != TypeKind.Enum && TryLowerRealToIntegral(inner, target, isChecked, gamma, loc, out converted))
+        {
+            return true;
+        }
+
         // Never treat Real (decimal/double/float) as an integral-width destination (preserves enum-to-decimal!).
         if (!TryGetIntegralBounds(inner.Type, out var srcMin, out var srcMax, out _, out _) ||
             !TryGetIntegralBounds(target, out var dstMin, out var dstMax, out var dstBits, out var dstSigned))
@@ -3566,13 +3612,18 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var involvesEnum = inner.Type.TypeKind == TypeKind.Enum || target.TypeKind == TypeKind.Enum;
-        if (!involvesEnum && !isChecked)
+        var canOverflow = srcMin < dstMin || srcMax > dstMax;
+        if (!involvesEnum && !isChecked && !canOverflow)
         {
             return false;
         }
 
+        if (!isChecked && canOverflow && !involvesEnum && TryNarrowBitVector(inner, target, dstBits, dstSigned, out converted))
+        {
+            return true;
+        }
+
         var srcInt = _translator.IntTermForIndex(inner);
-        var canOverflow = srcMin < dstMin || srcMax > dstMax;
 
         if (isChecked && canOverflow)
         {
@@ -3581,21 +3632,11 @@ internal sealed partial class CfgSsaLowerer
         }
 
         string resultInt;
-        if (!isChecked && canOverflow)
+        if ((!isChecked || _types.UseBitVec) && canOverflow)
         {
             // Exact two's-complement wrap modulo 2^dstBits
-            var modulus = BigInteger.One << dstBits;
-            if (!dstSigned)
-            {
-                resultInt = $"(mod {srcInt} {CalendarArithmetic.FormatBigInt(modulus)})";
-            }
-            else
-            {
-                var half = BigInteger.One << (dstBits - 1);
-                var halfStr = CalendarArithmetic.FormatBigInt(half);
-                var modStr = CalendarArithmetic.FormatBigInt(modulus);
-                resultInt = $"(- (mod (+ {srcInt} {halfStr}) {modStr}) {halfStr})";
-            }
+            // A value already in range is left alone, so proofs that never wrap stay cheap.
+            resultInt = WrapIntegerTerm(srcInt, dstMin, dstMax, dstBits);
         }
         else
         {
@@ -3605,8 +3646,8 @@ internal sealed partial class CfgSsaLowerer
         var dstSort = _types.GetSort(target);
         var finalTerm = dstSort switch
         {
-            "(_ BitVec 32)" => $"((_ int2bv 32) {resultInt})",
-            "(_ BitVec 64)" => $"((_ int2bv 64) {resultInt})",
+            "(_ BitVec 32)" => ToBitVec(resultInt, 32, dstMin, dstMax),
+            "(_ BitVec 64)" => ToBitVec(resultInt, 64, dstMin, dstMax),
             _ => resultInt
         };
         converted = new SmtTypedTerm(finalTerm, target);
@@ -4190,6 +4231,7 @@ internal sealed partial class CfgSsaLowerer
 
         if (_rangeAssumed.Add(value.Term))
         {
+            _termBounds[value.Term] = (min, max);
             AddAssertion($"(and (>= {value.Term} {CalendarArithmetic.FormatBigInt(min)}) (<= {value.Term} {CalendarArithmetic.FormatBigInt(max)}))",
                 "TypeRange", $"{value.Type.Name} range", loc);
         }

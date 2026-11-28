@@ -1,7 +1,6 @@
 // (uint)-1 is uint.MaxValue, so the result can be far above 10 even under [CheckedArithmetic].
 // @expect: rejected
 // @witness: Corpus.Arithmetic.UintOfNegative.Reinterpret(-1)
-// @known-bug: Under [CheckedArithmetic], an unchecked (uint) of an int is the signed value (BitVecToInt), not the value modulo 2^32.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

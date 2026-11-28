@@ -1,7 +1,6 @@
 // The postcondition r == x / y throws DivideByZeroException when y is 0, so it is not a true statement.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.ContractDivZero.Quotient(1, 0)
-// @known-bug: Division inside a postcondition has no divide-by-zero obligation (emitObligations is false for contracts), and bvsdiv by 0 is defined in SMT.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

@@ -361,6 +361,16 @@ Wrap-around is allowed only when you say so:
 - The nearest attribute wins: method, then enclosing types, then the assembly.
 - `MinValue / -1`, `MinValue % -1` and `Math.Abs(MinValue)` throw `OverflowException` in every mode, so they are always checked.
 
+### Integer widths, casts and bit operations
+
+The prover gives each integer type the meaning C# gives it:
+
+- `~ & | ^ << >>` (and `>>>`) work on `int`, `uint`, `long`, `ulong` and on enums by their underlying type. A shift count is masked to 5 or 6 bits, `>>` is arithmetic on a signed type and logical on an unsigned one. Under `[CheckedArithmetic]`, `int` and `long` are bit-vectors and use the bit-vector operators directly. Otherwise the operands are converted to a bit-vector of the type's width and back; `x & 0xFF`, `x & 1` and a shift by a constant are plain arithmetic. Facts about the bits of unknown operands (`x ^ y ^ y == x`) can make Z3 answer `unknown` (`VER103`) in that mode; bounding the operands, or `[CheckedArithmetic]`, helps.
+- An unchecked narrowing cast keeps the low bits: `(byte)300` is 44, `(sbyte)200` is -56, `(int)` of a `long` wraps, and `(uint)-1` is `uint.MaxValue`. Inside `checked(...)` the value must fit and the prover checks it. A `decimal` (or `double`) cast to an integer truncates toward zero, and a `decimal` that does not fit throws.
+- `byte`, `sbyte`, `short`, `ushort` and `char` arithmetic is done in `int`, and `b += 1`, `b++` and `b <<= 1` convert the result back to the narrow type, as C# does. In the default mode the conversion must not lose bits (an `Overflow` refutation, like `int` arithmetic); `unchecked(...)` and `[UncheckedArithmetic]` let it wrap.
+- `Math.Clamp` and `Math.Sign` are modelled (`Math.Clamp` throws when `min > max`, so that is checked).
+- A division inside a contract (a `Spec.Ensures`, a callee's `Spec.Requires` at a call, a loop invariant) has the same divisor check as in code, because evaluating the contract at run time throws too.
+
 ---
 
 ## 11. Worked Samples

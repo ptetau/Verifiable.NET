@@ -59,6 +59,33 @@ public sealed record TvCond(TvBool Condition, TvExpr Then, TvExpr Else) : TvExpr
     public override string Render(TvType t) => $"({Condition.Render(t)} ? {Then.Render(t)} : {Else.Render(t)})";
 }
 
+/// <summary><c>~e</c>.</summary>
+public sealed record TvBitNot(TvExpr Operand) : TvExpr
+{
+    public override string Render(TvType t) => $"(~{Operand.Render(t)})";
+}
+
+/// <summary>
+/// <c>l &lt;&lt; n</c> or <c>l &gt;&gt; n</c>. The count of a <c>long</c> program is narrowed to <c>int</c> first, as C#
+/// requires, so a count the program cannot use as is gets masked like any other.
+/// </summary>
+public sealed record TvShift(string Op, TvExpr Left, TvExpr Count) : TvExpr
+{
+    public override string Render(TvType t) =>
+        t == TvType.Int
+            ? $"({Left.Render(t)} {Op} {Count.Render(t)})"
+            : $"({Left.Render(t)} {Op} unchecked((int)({Count.Render(t)})))";
+}
+
+/// <summary>
+/// An unchecked conversion through a narrower integer type and back: <c>unchecked((int)(byte)(e))</c>. It wraps in
+/// both of the CLR runs, so the two agree and the analyzer has no overflow to find.
+/// </summary>
+public sealed record TvCast(string Narrow, TvExpr Operand) : TvExpr
+{
+    public override string Render(TvType t) => $"unchecked(({TvSyntax.TypeName(t)})({Narrow})({Operand.Render(t)}))";
+}
+
 /// <summary>A call to <c>Math.Abs</c>, <c>Math.Min</c> or <c>Math.Max</c>.</summary>
 public sealed record TvMath(string Name, TvExpr A, TvExpr? B) : TvExpr
 {
@@ -155,11 +182,30 @@ public sealed record TvIfReturn(TvBool Condition, TvExpr Value) : TvStmt
 }
 
 /// <summary>
+/// <c>N n = (N)init; n op= (N)operand; T v = (T)n;</c> for a narrow or unsigned type <c>N</c>: a compound assignment
+/// (or <c>++</c>, <c>--</c>) whose result is converted back to <c>N</c>. Where <c>Op</c> is a shift, the operand is the count.
+/// </summary>
+public sealed record TvNarrowStep(string Name, string Narrow, TvExpr Init, string Op, TvExpr Operand, int Count) : TvStmt
+{
+    public override string Render(TvType t)
+    {
+        var n = $"n{Name}";
+        var step = Op switch
+        {
+            "++" or "--" => $"{n}{Op};",
+            "<<" or ">>" => $"{n} {Op}= {Count};",
+            _ => $"{n} {Op}= unchecked(({Narrow})({Operand.Render(t)}));",
+        };
+        return $"{Narrow} {n} = unchecked(({Narrow})({Init.Render(t)})); {step} {TvSyntax.TypeName(t)} {Name} = unchecked(({TvSyntax.TypeName(t)}){n});";
+    }
+}
+
+/// <summary>
 /// A generated method <c>static T M(T x, T y, bool b)</c>, with <c>string s, string t</c> added when
 /// <paramref name="Strings"/> is set: some statements, then a return.
 /// </summary>
 public sealed record TvProgram(
-    TvType Type, TvArith Arithmetic, ImmutableArray<TvStmt> Body, TvExpr Result, bool Strings = false)
+    TvType Type, TvArith Arithmetic, ImmutableArray<TvStmt> Body, TvExpr Result, bool Strings = false, bool Bits = false)
 {
     public string RenderBody(string indent)
     {
@@ -179,7 +225,7 @@ public sealed record TvProgram(
 
     public bool Equals(TvProgram? other) =>
         other is not null && Type == other.Type && Arithmetic == other.Arithmetic &&
-        Strings == other.Strings && Body.SequenceEqual(other.Body) && Result == other.Result;
+        Strings == other.Strings && Bits == other.Bits && Body.SequenceEqual(other.Body) && Result == other.Result;
 
     public override int GetHashCode() => HashCode.Combine(Type, Arithmetic, Body.Length, Result);
 
