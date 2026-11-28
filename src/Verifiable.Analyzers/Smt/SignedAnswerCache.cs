@@ -89,7 +89,10 @@ internal sealed class SignedAnswerCache
                 key = TryLoadTrustedKey(full);
             }
 
-            return key is null ? null : new SignedAnswerCache(full, key);
+            if (key is null) return null;
+
+            SweepStaleTempFiles(full);
+            return new SignedAnswerCache(full, key);
         }
         catch
         {
@@ -163,6 +166,8 @@ internal sealed class SignedAnswerCache
             File.WriteAllLines(temp, lines, Utf8NoBom); // the folder is owner-only, so entries need no chmod of their own
             if (File.Exists(path))
             {
+                // Another writer may have finished first; then there is nothing to replace.
+                if (TryLoad(hash, out _)) return;
                 File.Replace(temp, path, destinationBackupFileName: null);
             }
             else
@@ -178,10 +183,53 @@ internal sealed class SignedAnswerCache
         {
             if (temp is not null)
             {
-                try { if (File.Exists(temp)) File.Delete(temp); } catch { /* best effort */ }
+                DeleteWithRetry(temp);
             }
         }
     }
+
+    /// <summary>
+    /// Deletes a temp file, retrying briefly: on Windows a virus scanner or indexer can hold a newly written
+    /// file open for a moment, and a failed delete would otherwise leave the file behind.
+    /// </summary>
+    private static void DeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (!File.Exists(path)) return;
+                File.Delete(path);
+                return;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            System.Threading.Thread.Sleep(20 * (attempt + 1));
+        }
+    }
+
+    /// <summary>Removes temp files left behind by a crash or a delete that kept failing. Best effort.</summary>
+    private static void SweepStaleTempFiles(string directory)
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow - StaleTempAge;
+            foreach (var temp in Directory.EnumerateFiles(directory, "*.tmp"))
+            {
+                if (File.GetLastWriteTimeUtc(temp) < cutoff)
+                {
+                    DeleteWithRetry(temp);
+                }
+            }
+        }
+        catch
+        {
+            // Sweeping is housekeeping only.
+        }
+    }
+
+    internal static readonly TimeSpan StaleTempAge = TimeSpan.FromHours(1);
 
     /// <summary>Signs an entry body. Exposed for tests that forge entries.</summary>
     internal string Sign(string hash, string[] body)
