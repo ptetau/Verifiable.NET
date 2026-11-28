@@ -1,6 +1,5 @@
 // Exists(0, n + 1, ...) with n = int.MaxValue: n + 1 wraps negative, the range is empty and Exists is false at run time. With unbounded integers the analyzer would think i == n is in range.
 // @expect: rejected
-// @known-bug: Exists/ForAll bounds are modelled with unbounded integers, so an overflowing bound (n + 1 at int.MaxValue) is accepted as a non-empty range
 // @witness: Corpus.Calls.R2QOver.Check(2147483647)
 using Verifiable.Contracts;
 

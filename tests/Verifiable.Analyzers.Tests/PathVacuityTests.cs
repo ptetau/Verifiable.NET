@@ -275,10 +275,10 @@ public class PathVacuityTests
             [Verifiable]
             public static class Cubes
             {
-                public static int M(int x, int y, int z)
+                public static long M(long x, long y, long z)
                 {
-                    Spec.Requires(x * x * x + y * y * y + z * z * z == 42 && x > 1000, "A sum of cubes Z3 cannot settle quickly.");
-                    Spec.Ensures<int>(r => r == x, "Returns x.");
+                    Spec.Requires(x > 1000 && x < 1000000 && y > -1000000 && y < 1000000 && z > -1000000 && z < 1000000 && x * x * x + y * y * y + z * z * z == 42, "A sum of cubes Z3 cannot settle quickly.");
+                    Spec.Ensures<long>(r => r == x, "Returns x.");
                     return x;
                 }
             }

@@ -1,5 +1,4 @@
 // The measure x * 2 wraps to a negative number for x >= 2^30, so "Decreases stays non-negative" is false.
-// @known-bug: Decreases(x * 2) is accepted although x * 2 wraps negative for x >= 2^30 (measure arithmetic is not checked for int overflow)
 // @expect: rejected
 // @witness: Corpus.Control.MeasureWraps.Run(1073741824)
 using Verifiable.Contracts;

@@ -390,6 +390,18 @@ Wrap-around is allowed only when you say so:
 - The nearest attribute wins: method, then enclosing types, then the assembly.
 - `MinValue / -1`, `MinValue % -1` and `Math.Abs(MinValue)` throw `OverflowException` in every mode, so they are always checked.
 
+Contracts follow the same rules. A `Spec.Requires`, `Spec.Ensures`, `Spec.LoopInvariant`, `Spec.Decreases` measure, or the bounds and body of `Spec.ForAll` / `Spec.Exists` is evaluated as ordinary C# at run time, so its `+ - * -x` on `int`, `uint`, `long` and `ulong` is checked like code arithmetic, in the mode of the enclosing method or type:
+
+- Default mode: each such operation must be shown not to overflow, under the conditions where it is evaluated (`a && b` only evaluates `b` when `a` holds, so `x <= 1000 && x + x >= 0` is fine). A `Requires` of the method itself is checked under the clauses before it; a callee's `Requires` is checked at each call; an `Ensures` is checked at each return. A failure is a `VER102` `Overflow` on the contract.
+- `[UncheckedArithmetic]`: the contract wraps like the code, and the prover reasons about the wrapped value.
+- `[CheckedArithmetic]`: bit-vectors, as for code.
+- A quantifier variable `Spec.ForAll(lo, hi, i => ...)` is an `int` in `[lo, hi)`, and its body is checked the same way.
+
+```csharp
+Spec.Requires(x >= 0 && x <= 1000, "Small inputs only.");   // without the bound: VER102 on `x + 1`
+Spec.Ensures<int>(r => r == x + 1, "The successor.");
+```
+
 ### Integer widths, casts and bit operations
 
 The prover gives each integer type the meaning C# gives it:
