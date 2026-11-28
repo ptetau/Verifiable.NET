@@ -485,7 +485,7 @@ public class EqualityModelTests
 
         var unguarded = await Analyze(template.Replace("GUARD", "Spec.Ensures<int>(x => true);"));
         Assert.Contains(unguarded, d => d.Id == "VER102" && d.GetMessage().Contains("ivi"));
-        await AssertClean(template.Replace("GUARD", "Spec.Requires(r.B != 0);"));
+        await AssertClean(template.Replace("GUARD", "Spec.Requires(r.B > 0);"));
 
         await AssertClean("""
             using Verifiable.Contracts;
@@ -499,7 +499,7 @@ public class EqualityModelTests
             [Verifiable]
             public static class Ratios
             {
-                public static int Safe(Ratio r) => r.B != 0 ? r.Quotient : 0;
+                public static int Safe(Ratio r) => r.B > 0 ? r.Quotient : 0;
             }
             """);
     }

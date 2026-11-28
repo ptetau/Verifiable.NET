@@ -112,6 +112,7 @@ public class ValidityBoundaryTests
         {
             public static int Width(Span s)
             {
+                Spec.Requires(s.Lo >= 0, "Small, non-negative spans, so the subtraction cannot overflow.");
                 Spec.Ensures<int>(r => r >= 0, "A width is never negative.");
                 return s.Hi - s.Lo;
             }
