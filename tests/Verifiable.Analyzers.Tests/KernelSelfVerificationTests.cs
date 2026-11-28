@@ -41,12 +41,21 @@ public class KernelSelfVerificationTests
         { "ProofKernel.cs", "return preamble + \"\\n(assert \" + pathCondition + \")\\n(assert (not \" + goal + \"))\\n\";", "return preamble + \"\\n(assert (not \" + goal + \"))\\n\";", "ProofKernel.BuildRefutationQuery" },
         { "ProofKernel.cs", "return \"(assert (! (not \" + goal + \") :named \" + NegatedGoalName + \"))\\n\";", "return \"(assert (! \" + goal + \" :named \" + NegatedGoalName + \"))\\n\";", "ProofKernel.NamedNegatedGoal" },
         { "ProofKernel.cs", "return premiseCheck == SmtStatus.Unsat;", "return premiseCheck != SmtStatus.Sat;", "ProofKernel.PremisesContradict" },
+        { "VacuityKernel.cs", "return prefix + \"\\n(assert \" + context + \")\\n(assert \" + guarantee + \")\\n\";", "return prefix + \"\\n(assert \" + context + \")\\n\";", "VacuityKernel.GuaranteeQuery" },
+        { "VacuityKernel.cs", "return prefix + \"\\n(assert \" + context + \")\\n\";", "return prefix + \"\\n(assert \" + context + \")\\n(assert false)\\n\";", "VacuityKernel.ReachabilityQuery" },
+        { "VacuityKernel.cs", "return withGuarantee == SmtStatus.Unsat;", "return withGuarantee != SmtStatus.Sat;", "VacuityKernel.NeedsReachabilityCheck" },
+        { "VacuityKernel.cs", "if (withGuarantee != SmtStatus.Unsat) return GuaranteeVerdict.Undecided;", "if (withGuarantee != SmtStatus.Unsat) return GuaranteeVerdict.CanHold;", "VacuityKernel.ClassifyGuarantee" },
+        { "VacuityKernel.cs", "if (withoutGuarantee == SmtStatus.Sat) return GuaranteeVerdict.Impossible;", "if (withoutGuarantee != SmtStatus.Unsat) return GuaranteeVerdict.Impossible;", "VacuityKernel.ClassifyGuarantee" },
+        { "VacuityKernel.cs", "return check != SmtStatus.Sat && check != SmtStatus.Unsat;", "return check == SmtStatus.Unknown;", "VacuityKernel.CheckUndecided" },
         { "QueryVerdicts.cs", "if (undecided > 0) return QueryVerdict.Inconclusive;", "", "QueryKernel.Aggregate" },
         { "QueryVerdicts.cs", "if (provedReachable == 0 && provedUnreachable > 0) return QueryVerdict.ProvedVacuously;", "", "QueryKernel.Aggregate" },
         { "ObligationLattice.cs", "if (present == ObligationState.SinkParameter) return ObligationState.SinkParameter;\n        return ObligationState.MaybeLive;", "if (present == ObligationState.SinkParameter) return ObligationState.SinkParameter;\n        return ObligationState.Consumed;", "ObligationLattice.JoinWithUntracked" },
         { "ObligationLattice.cs", "        a == b\n            ? a", "        a == b && a != ObligationState.Live\n            ? a", "LatticeLaws.JoinIsIdempotent" },
         { "ObligationLattice.cs", ": ObligationState.MaybeLive);", ": ObligationState.Consumed);", "ObligationLattice.Join" },
         { "ObligationLattice.cs", "        a == b\n            ? a", "        a == b || b == ObligationState.Consumed\n            ? a", "LatticeLaws.JoinIsCommutative" },
+        { "CheckSelectionKernel.cs", "if (obligationCount > 0) return MethodCheck.Prove;", "if (obligationCount > 1) return MethodCheck.Prove;", "CheckSelectionKernel.Select" },
+        { "CheckSelectionKernel.cs", "return MethodCheck.UnsupportedWarning;", "return MethodCheck.NothingToProve;", "CheckSelectionKernel.Select" },
+        { "CheckSelectionKernel.cs", "if (obligationCount > 0 || knownObligationSource) return MethodCheck.UnsupportedError;", "if (knownObligationSource) return MethodCheck.UnsupportedError;", "CheckSelectionKernel.Select" },
         { "SolverPlumbingKernel.cs", "((char)(text.Length / 65536)).ToString() + ((char)(text.Length % 65536)).ToString() + text", "text", "CacheKeyLaws.FieldThenRestDecodesUniquely" },
         { "SolverPlumbingKernel.cs", "return CacheKeyField(key) + CacheKeyField(expression);", "return CacheKeyField(key) + expression;", "SolverPlumbingKernel.CacheKeyEvalEntry" },
         { "SolverPlumbingKernel.cs", "               CacheKeyField(script) + CacheKeyField(evals);", "               script + CacheKeyField(evals);", "SolverPlumbingKernel.CacheKeyMaterial" },
@@ -71,9 +80,10 @@ public class KernelSelfVerificationTests
     }
 
     /// <summary>
-    /// The analyzer that proves the kernel is compiled from the kernel. A kernel bug that made every query
-    /// unsat would therefore also approve itself. These canaries use the analyzer as built and require it
-    /// to reject contracts that are plainly false, so a blinded prover cannot pass the test suite.
+    /// The analyzer used here, and the one that ships, is compiled from the live kernel. A kernel bug that
+    /// made every query unsat would blind it. (Verifiable.Core itself is proved by the bootstrap analyzer;
+    /// see BootstrapKernelTests.) These canaries use the analyzer as built and require it to reject
+    /// contracts that are plainly false, so a blinded prover cannot pass the test suite.
     /// </summary>
     [Theory]
     [InlineData("public static int F(int x) { Spec.Ensures<int>(r => r > x, \"grows\"); return x; }")]

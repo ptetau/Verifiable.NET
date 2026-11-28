@@ -10,6 +10,10 @@
 
     Verifiable.Analyzers compiles the same kernel sources (excluding Proofs/) into its own DLL, so
     the code that ships is the code that was proved.
+
+    The analyzer that proves this project is Verifiable.Analyzers.Bootstrap: the same analyzer sources
+    built with a frozen, earlier copy of the kernel. A change here is therefore proved by the previous
+    kernel, so a bug that blinds the prover cannot approve itself. See docs/trusted-core.md.
   -->
 
   <PropertyGroup>
@@ -39,7 +43,7 @@
                       PrivateAssets="all"
                       SkipGetTargetFrameworkProperties="true"
                       SetTargetFramework="TargetFramework=netstandard2.0" />
-    <ProjectReference Include="..\Verifiable.Analyzers\Verifiable.Analyzers.csproj"
+    <ProjectReference Include="..\Verifiable.Analyzers.Bootstrap\Verifiable.Analyzers.Bootstrap.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false"
                       PrivateAssets="all"
