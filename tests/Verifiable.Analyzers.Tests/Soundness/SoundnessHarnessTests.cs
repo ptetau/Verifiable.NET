@@ -315,6 +315,30 @@ public class SoundnessHarnessTests
     }
 
     [Fact]
+    public void Postconditions_ThatCallAContractedMethod_CheckItsPrecondition()
+    {
+        var (_, _, outcomes) = CorpusRunner.RunWithoutAnalyzer(Header + """
+                public static int Half(int x)
+                {
+                    Spec.Requires(x % 2 == 0, "even only");
+                    Spec.Ensures<int>(r => r * 2 == x);
+                    return x / 2;
+                }
+
+                public static int Use(int a)
+                {
+                    Spec.Requires(a >= 0 && a <= 100);
+                    Spec.Ensures<int>(r => r == Half(a), "matches Half");
+                    return a / 2;
+                }
+            }
+            """, "H.P.Use(4)", "H.P.Use(3)");
+
+        Assert.IsType<RunOutcome.Held>(outcomes[0]);
+        Assert.Contains("even only", Assert.IsType<RunOutcome.Broken>(outcomes[1]).Reason);
+    }
+
+    [Fact]
     public void EveryCorpusProgram_HasValidDirectives()
     {
         var paths = CorpusProgram.AllRelativePaths().ToList();
