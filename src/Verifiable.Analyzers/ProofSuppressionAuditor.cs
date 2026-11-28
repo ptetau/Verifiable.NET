@@ -30,9 +30,12 @@ public sealed class ProofSuppressionAuditor : DiagnosticAnalyzer
         title: "A proof check was weakened or switched off",
         messageFormat: "{0}",
         category: "Verifiable.Audit",
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    /// <summary>The MSBuild property that turns VER107 into a warning, for a project that weakens a check on purpose.</summary>
+    internal const string AllowWeakenedProofsProperty = "VerifiableAllowWeakenedProofs";
 
     /// <summary>Every ID the kernel guards, in report order. A test checks this matches the kernel.</summary>
     internal static readonly ImmutableArray<string> GuardedIds =
@@ -75,7 +78,13 @@ public sealed class ProofSuppressionAuditor : DiagnosticAnalyzer
                     return;
                 }
 
-                var audit = new Audit(endCtx, verifiableTrees.Keys.ToImmutableHashSet(), pragmas.ToList(), attributes.ToList());
+                endCtx.Options.AnalyzerConfigOptionsProvider.GlobalOptions.TryGetValue(
+                    "build_property." + AllowWeakenedProofsProperty, out var allowWeakened);
+                var severity = allowWeakened == "1" || string.Equals(allowWeakened, "true", StringComparison.OrdinalIgnoreCase)
+                    ? DiagnosticSeverity.Warning
+                    : DiagnosticSeverity.Error;
+
+                var audit = new Audit(endCtx, verifiableTrees.Keys.ToImmutableHashSet(), pragmas.ToList(), attributes.ToList(), severity);
                 audit.Run();
             });
         });
@@ -224,6 +233,7 @@ public sealed class ProofSuppressionAuditor : DiagnosticAnalyzer
         private readonly List<PragmaFinding> _pragmas;
         private readonly List<AttributeFinding> _attributes;
         private readonly bool _allowMissingSolver;
+        private readonly DiagnosticSeverity _severity;
         private readonly SyntaxTreeOptionsProvider? _treeOptions;
         private readonly List<Finding> _findings = new();
 
@@ -231,9 +241,11 @@ public sealed class ProofSuppressionAuditor : DiagnosticAnalyzer
             CompilationAnalysisContext ctx,
             ImmutableHashSet<SyntaxTree> verifiableTrees,
             List<PragmaFinding> pragmas,
-            List<AttributeFinding> attributes)
+            List<AttributeFinding> attributes,
+            DiagnosticSeverity severity)
         {
             _ctx = ctx;
+            _severity = severity;
             _verifiableTrees = verifiableTrees;
             _pragmas = pragmas;
             _attributes = attributes;
@@ -264,7 +276,7 @@ public sealed class ProofSuppressionAuditor : DiagnosticAnalyzer
                     spirit: Spirit,
                     fixHint: finding.Fix,
                     summary: finding.Summary);
-                _ctx.ReportDiagnostic(Diagnostic.Create(ProofCheckWeakened, finding.ReportAt, message));
+                _ctx.ReportDiagnostic(Diagnostic.Create(ProofCheckWeakened, finding.ReportAt, _severity, additionalLocations: null, properties: null, message));
             }
         }
 

@@ -336,7 +336,7 @@ public sealed class QueryTests
                 {
                     public static int AddOffset(int x)
                     {
-                        Spec.Requires(x >= {{p.threshold}}, "Input meets minimum threshold.");
+                        Spec.Requires(x >= {{p.threshold}} && x <= 1000, "Input meets minimum threshold.");
                         return x + {{p.delta}};
                     }
                 }
@@ -536,8 +536,11 @@ public sealed class QueryTests
             [Verifiable]
             public static class PairOps
             {
-                public static PairState BumpFirstOnly(PairState p) =>
-                    p with { First = p.First + 1 };
+                public static PairState BumpFirstOnly(PairState p)
+                {
+                    Spec.Requires(p.First >= -1000 && p.First <= 1000 && p.Second >= -1000 && p.Second <= 1000);
+                    return p with { First = p.First + 1 };
+                }
             }
             """;
 

@@ -26,6 +26,7 @@ internal static class VerifiableSymbolHelpers
     public const string GhostAttr = "Verifiable.Contracts.GhostAttribute";
     public const string PureAxiomAttr = "Verifiable.Contracts.PureAxiomAttribute";
     public const string CheckedArithmeticAttr = "Verifiable.Contracts.CheckedArithmeticAttribute";
+    public const string UncheckedArithmeticAttr = "Verifiable.Contracts.UncheckedArithmeticAttribute";
     public const string NonDefaultAttr = "Verifiable.Contracts.NonDefaultAttribute";
     public const string SpecTypeName = "Verifiable.Contracts.Spec";
 

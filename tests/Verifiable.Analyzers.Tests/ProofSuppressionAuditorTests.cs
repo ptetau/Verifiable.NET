@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -75,9 +76,90 @@ public sealed class ProofSuppressionAuditorTests
         Assert.DoesNotContain(diagnostics, d => d.Id == "VER102");
         var audit = Assert.Single(Audits(diagnostics));
         Assert.Equal(Location.None, audit.Location);
-        Assert.Equal(DiagnosticSeverity.Warning, audit.Severity);
+        Assert.Equal(DiagnosticSeverity.Error, audit.Severity);
         Assert.Contains("VER102", FirstLine(audit));
         Assert.Contains("Remove VER102 from <NoWarn>", FirstLine(audit));
+    }
+
+    // ---- VER107 is an error, unless the project opts into weakened proofs ----
+
+    [Fact]
+    public async Task Audit_IsAnError_ByDefault_ForEveryKindOfWeakening()
+    {
+        var pragma = await RunAsync("#pragma warning disable VER102 // not yet\n" + FailingProof, prove: true);
+        var noWarn = await RunAsync(FailingProof, specific: new Dictionary<string, ReportDiagnostic> { ["VER102"] = ReportDiagnostic.Suppress });
+        var config = await RunAsync(
+            FailingProof,
+            configs: [(".globalconfig", "is_global = true\ndotnet_diagnostic.VER105.severity = none\n")]);
+
+        Assert.All(new[] { pragma, noWarn, config }, diagnostics =>
+            Assert.Equal(DiagnosticSeverity.Error, Assert.Single(Audits(diagnostics)).Severity));
+        Assert.Equal(DiagnosticSeverity.Error, ProofSuppressionAuditor.ProofCheckWeakened.DefaultSeverity);
+    }
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("True")]
+    [InlineData("1")]
+    public async Task VerifiableAllowWeakenedProofs_MakesTheAuditAWarning_ThatIsStillReported(string value)
+    {
+        var diagnostics = await RunAsync(
+            "#pragma warning disable VER102 // not yet\n" + FailingProof,
+            properties: new Dictionary<string, string> { ["VerifiableAllowWeakenedProofs"] = value },
+            prove: true);
+
+        // The weakening still hides the proof failure; the audit stays visible but no longer fails the build.
+        Assert.DoesNotContain(diagnostics, d => d.Id == "VER102");
+        var audit = Assert.Single(Audits(diagnostics));
+        Assert.Equal(DiagnosticSeverity.Warning, audit.Severity);
+        Assert.Contains("`#pragma warning disable VER102` hides VER102", FirstLine(audit));
+    }
+
+    [Theory]
+    [InlineData("false")]
+    [InlineData("0")]
+    [InlineData("")]
+    [InlineData("yes")]
+    public async Task VerifiableAllowWeakenedProofs_OtherValues_KeepTheAuditAnError(string value)
+    {
+        var diagnostics = await RunAsync(
+            "#pragma warning disable VER102 // not yet\n" + FailingProof,
+            properties: new Dictionary<string, string> { ["VerifiableAllowWeakenedProofs"] = value });
+
+        Assert.Equal(DiagnosticSeverity.Error, Assert.Single(Audits(diagnostics)).Severity);
+    }
+
+    [Fact]
+    public async Task VerifiableAllowWeakenedProofs_AppliesToProjectWideWeakeningsToo()
+    {
+        var diagnostics = await RunAsync(
+            FailingProof,
+            specific: new Dictionary<string, ReportDiagnostic> { ["VER102"] = ReportDiagnostic.Suppress },
+            properties: new Dictionary<string, string> { ["VerifiableAllowWeakenedProofs"] = "true" });
+
+        var audit = Assert.Single(Audits(diagnostics));
+        Assert.Equal(DiagnosticSeverity.Warning, audit.Severity);
+        Assert.Equal(Location.None, audit.Location);
+    }
+
+    [Fact]
+    public void BuildProps_ExposeTheOptOutToTheAnalyzer_AndKeepItAWarningUnderWarnAsError()
+    {
+        var props = File.ReadAllText(Path.Combine(FindRepoRoot(), "src", "Verifiable.NET", "build", "Verifiable.NET.props"));
+
+        Assert.Contains("<CompilerVisibleProperty Include=\"VerifiableAllowWeakenedProofs\" />", props, StringComparison.Ordinal);
+        Assert.Contains("WarningsNotAsErrors>$(WarningsNotAsErrors);VER107", props, StringComparison.Ordinal);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Verifiable.NET.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException("Repository root not found.");
     }
 
     [Fact]

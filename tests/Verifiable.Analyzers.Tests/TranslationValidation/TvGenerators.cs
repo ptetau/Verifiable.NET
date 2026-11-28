@@ -48,11 +48,11 @@ internal static class TvGenerators
     public static IGen<IReadOnlyList<TvInput>> Inputs(TvType t, int count, bool strings = false) =>
         Input(t, strings).ListOf().WithCount(count).Select(l => (IReadOnlyList<TvInput>)l.ToList());
 
-    public static IGen<TvProgram> Program(TvType t, bool checkedArithmetic, bool strings = false) =>
+    public static IGen<TvProgram> Program(TvType t, TvArith arithmetic, bool strings = false) =>
         from count in Gen.Int32().Between(0, 3)
         from body in Body(new Scope(t, ["x", "y"], strings), count, 0)
         from result in Expr(new Scope(t, AllVars(body), strings))
-        select new TvProgram(t, checkedArithmetic, body, result, strings);
+        select new TvProgram(t, arithmetic, body, result, strings);
 
     private static string[] AllVars(ImmutableArray<TvStmt> body) =>
         new[] { "x", "y" }.Concat(body.OfType<TvDecl>().Select(d => d.Name)).ToArray();

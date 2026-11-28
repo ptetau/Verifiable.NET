@@ -1,7 +1,6 @@
 // checked(x - y) on uint throws OverflowException when y > x, even though both are small.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.UintCheckedSub.Diff(0u, 1u)
-// @known-bug: checked uint subtraction gets no overflow obligation: uint is an unbounded Int even under [CheckedArithmetic], and EmitBitVecOverflowObligation only covers int and long.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

@@ -151,7 +151,7 @@ public class CallSoundnessTests
     {
         var diags = await Run("""
             using Verifiable.Contracts;
-            [Verifiable] public static class C
+            [Verifiable, UncheckedArithmetic] public static class C
             {
                 private static readonly int K = 5;
                 public static int Zero(int x)

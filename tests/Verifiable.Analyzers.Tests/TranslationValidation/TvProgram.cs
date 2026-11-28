@@ -14,6 +14,19 @@ public enum TvType
     Long
 }
 
+/// <summary>How a generated method's integer arithmetic is declared.</summary>
+public enum TvArith
+{
+    /// <summary>No attribute: the default, where overflow must not happen.</summary>
+    Default,
+
+    /// <summary><c>[CheckedArithmetic]</c>: bit-vector arithmetic, where overflow must not happen.</summary>
+    Checked,
+
+    /// <summary><c>[UncheckedArithmetic]</c>: arithmetic wraps around, as in a default C# build.</summary>
+    Unchecked
+}
+
 /// <summary>An integer-valued expression of a generated method.</summary>
 public abstract record TvExpr
 {
@@ -152,7 +165,7 @@ public sealed record TvIfReturn(TvBool Condition, TvExpr Value) : TvStmt
 /// <paramref name="Strings"/> is set: some statements, then a return.
 /// </summary>
 public sealed record TvProgram(
-    TvType Type, bool CheckedArithmetic, ImmutableArray<TvStmt> Body, TvExpr Result, bool Strings = false)
+    TvType Type, TvArith Arithmetic, ImmutableArray<TvStmt> Body, TvExpr Result, bool Strings = false)
 {
     public string RenderBody(string indent)
     {
@@ -171,13 +184,13 @@ public sealed record TvProgram(
         (Strings ? ", string s, string t)" : ")");
 
     public bool Equals(TvProgram? other) =>
-        other is not null && Type == other.Type && CheckedArithmetic == other.CheckedArithmetic &&
+        other is not null && Type == other.Type && Arithmetic == other.Arithmetic &&
         Strings == other.Strings && Body.SequenceEqual(other.Body) && Result == other.Result;
 
-    public override int GetHashCode() => HashCode.Combine(Type, CheckedArithmetic, Body.Length, Result);
+    public override int GetHashCode() => HashCode.Combine(Type, Arithmetic, Body.Length, Result);
 
     public override string ToString() =>
-        $"{(CheckedArithmetic ? "[CheckedArithmetic] " : "")}{Signature("M")} {{ {RenderBody("").Replace(Environment.NewLine, " ").Trim()} }}";
+        $"{(Arithmetic == TvArith.Default ? "" : $"[{Arithmetic}Arithmetic] ")}{Signature("M")} {{ {RenderBody("").Replace(Environment.NewLine, " ").Trim()} }}";
 }
 
 /// <summary>One set of argument values for a generated method. <c>S</c> and <c>T</c> are used only by string programs.</summary>

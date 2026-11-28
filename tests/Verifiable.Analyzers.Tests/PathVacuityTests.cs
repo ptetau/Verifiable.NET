@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
@@ -306,9 +307,15 @@ public class PathVacuityTests
             }
             """);
 
+        // Which check Z3 gives up on first depends on its search order, which differs between platforms: the check on
+        // the callee guarantee at the call, or the earlier check that all assumptions can hold at once (the
+        // int-range facts on x, y and z make the cubes harder to settle). Either way it is one VER106 warning.
         var undecided = Assert.Single(diags, d => d.Id == "VER106");
-        Assert.Contains("at the call on line", undecided.GetMessage());
-        Assert.Contains("Ax.Hard", undecided.GetMessage());
+        var message = undecided.GetMessage();
+        Assert.True(
+            (message.Contains("at the call on line", StringComparison.Ordinal) && message.Contains("Ax.Hard", StringComparison.Ordinal)) ||
+            message.Contains("whether the method's assumptions can all hold at once", StringComparison.Ordinal),
+            "VER106 should name the undecided check, but said: " + message);
         Assert.DoesNotContain(diags, d => d.Id is "VER105" or "VER102" or "VER103");
     }
 }

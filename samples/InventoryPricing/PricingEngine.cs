@@ -99,8 +99,8 @@ public static class PricingEngine
     public static long CalculateLineSubtotal(PriceCents unitPrice, OrderQuantity quantity)
     {
         Spec.Ensures<long>(
-            result => result >= 0L,
-            "Line subtotals are always non-negative cents.");
+            result => result >= 0L && result <= 1_000_000_000_000L,
+            "Line subtotals are non-negative cents, at most $1,000,000 x 10,000 units.");
 
         return unitPrice.Value * quantity.Value;
     }
@@ -108,8 +108,8 @@ public static class PricingEngine
     public static long ComputeBasisPointsShare(long amountCents, BasisPoints rateBps)
     {
         Spec.Requires(
-            amountCents >= 0L,
-            "Percentage shares apply only to non-negative amounts.");
+            amountCents >= 0L && amountCents <= 922_337_203_685_477L,
+            "Percentage shares apply only to non-negative amounts small enough that amount x 10,000 fits a long.");
         Spec.Ensures<long>(
             result => result >= 0L && result <= amountCents,
             "A basis-point share (0% to 100%) is non-negative and never exceeds the base amount.");
@@ -139,8 +139,8 @@ public static class PricingEngine
         while (i < lines.Count)
         {
             Spec.LoopInvariant(
-                i >= 0 && i <= lines.Count && subtotal >= 0L,
-                "Running subtotal stays non-negative across every line item.");
+                i >= 0 && i <= lines.Count && subtotal >= 0L && subtotal <= i * 1_000_000_000_000L,
+                "Running subtotal stays non-negative and grows by at most one maximum line subtotal per item.");
             Spec.Decreases(lines.Count - i, "Remaining cart lines shrink by one on each iteration.");
 
             var line = lines[i];

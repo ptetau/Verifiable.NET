@@ -2,6 +2,7 @@
   <ItemGroup>
     <CompilerVisibleProperty Include="VerifiableZ3Path" />
     <CompilerVisibleProperty Include="VerifiableAllowMissingZ3" />
+    <CompilerVisibleProperty Include="VerifiableAllowWeakenedProofs" />
     <CompilerVisibleProperty Include="VerifiableAgent" />
     <CompilerVisibleProperty Include="VerifiableClosedEnums" />
     <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
@@ -13,6 +14,14 @@
           Condition="'$(VerifiableAllowMissingZ3)' == 'true' or '$(VerifiableAllowMissingZ3)' == '1'">
     <PropertyGroup>
       <WarningsNotAsErrors>$(WarningsNotAsErrors);VER104</WarningsNotAsErrors>
+    </PropertyGroup>
+  </Target>
+
+  <!-- With VerifiableAllowWeakenedProofs, VER107 is a warning; keep it one under TreatWarningsAsErrors / -warnaserror. -->
+  <Target Name="_VerifiableAllowWeakenedProofs" BeforeTargets="CoreCompile"
+          Condition="'$(VerifiableAllowWeakenedProofs)' == 'true' or '$(VerifiableAllowWeakenedProofs)' == '1'">
+    <PropertyGroup>
+      <WarningsNotAsErrors>$(WarningsNotAsErrors);VER107</WarningsNotAsErrors>
     </PropertyGroup>
   </Target>
 </Project>
