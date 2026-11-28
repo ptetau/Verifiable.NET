@@ -1,6 +1,5 @@
 // Correct: (int)x is safe once x is known to be non-null.
 // @expect: proved
-// @known-bug: false rejection: an explicit (int) cast of an int? keeps the Opt sort, so Z3 reports a sort error (VER103)
 using Verifiable.Contracts;
 
 namespace Corpus.Strings;

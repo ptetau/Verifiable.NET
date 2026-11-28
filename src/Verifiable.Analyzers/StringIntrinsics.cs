@@ -137,6 +137,16 @@ internal static class StringIntrinsics
                 return StringIntrinsicKind.None;
             }
 
+            // StartsWith(string) / EndsWith(string) use the current culture: ICU ignores zero-width and NUL
+            // characters and treats canonically equivalent text as equal, so ordinal prefix/suffix is not a model.
+            if (method.Parameters.Length == 1 &&
+                method.Name is "StartsWith" or "EndsWith" &&
+                method.Parameters[0].Type.SpecialType == SpecialType.System_String)
+            {
+                error = $"'string.{method.Name}(string)' without a StringComparison is culture-sensitive and cannot be proved; pass 'StringComparison.Ordinal'.";
+                return StringIntrinsicKind.None;
+            }
+
             if (method.Parameters.Length == 2)
             {
                 var compArg = FindArgumentForParameter(inv, 1);
