@@ -35,6 +35,11 @@ internal static class Z3SolverRunner
     private const string CoreSentinel = "__VERIFIABLE_CORE_DONE__";
     private const int DefaultTimeoutMs = 2500;
 
+    // Regular-expression constraints are much slower for Z3 than the rest (a Unicode `\d` is a union of 37 ranges), and a
+    // proof that takes about 2 s on a developer machine can run past 2.5 s on a shared CI runner. A longer limit
+    // only turns a spurious "unknown" into the real answer; it cannot make a refuted obligation look proved.
+    private const int RegexTimeoutMs = 10000;
+
     private static readonly ConcurrentDictionary<string, SmtQueryResult> MemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SmtDetailedResult> DetailedMemoryCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, WorkerPool> PoolsByPath = new(StringComparer.OrdinalIgnoreCase);
@@ -151,6 +156,11 @@ internal static class Z3SolverRunner
         if (z3Path is null)
         {
             return new SmtQueryResult(SmtStatus.SolverUnavailable, string.Empty, new Dictionary<string, string>(), "Z3 binary not found.");
+        }
+
+        if (timeoutMs == DefaultTimeoutMs && smtScriptBody.Contains("str.in_re", StringComparison.Ordinal))
+        {
+            timeoutMs = RegexTimeoutMs;
         }
 
         var hashInput = BuildHashInput(Z3Identity(z3Path), string.Empty, timeoutMs, smtScriptBody, satEvalExprs);
