@@ -26,6 +26,7 @@ internal static class VerifiableSymbolHelpers
     public const string GhostAttr = "Verifiable.Contracts.GhostAttribute";
     public const string PureAxiomAttr = "Verifiable.Contracts.PureAxiomAttribute";
     public const string CheckedArithmeticAttr = "Verifiable.Contracts.CheckedArithmeticAttribute";
+    public const string UncheckedArithmeticAttr = "Verifiable.Contracts.UncheckedArithmeticAttribute";
     public const string NonDefaultAttr = "Verifiable.Contracts.NonDefaultAttribute";
     public const string SpecTypeName = "Verifiable.Contracts.Spec";
 
@@ -391,7 +392,14 @@ internal static class VerifiableSymbolHelpers
             return true;
         }
 
-        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.UserDefinedOperator or MethodKind.Conversion)
+        if (method.MethodKind is MethodKind.BuiltinOperator or MethodKind.Conversion)
+        {
+            return true;
+        }
+
+        // An operator someone wrote in this compilation runs unproved code unless its type is [Verifiable] (checked above);
+        // framework operators and the ones the compiler synthesizes for records are trusted.
+        if (method.MethodKind == MethodKind.UserDefinedOperator && (method.IsImplicitlyDeclared || method.DeclaringSyntaxReferences.Length == 0))
         {
             return true;
         }

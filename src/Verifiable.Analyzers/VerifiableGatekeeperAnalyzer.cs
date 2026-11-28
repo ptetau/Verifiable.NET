@@ -415,7 +415,7 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                 }
                 else if (inv.TargetMethod.MethodKind == MethodKind.LocalFunction)
                 {
-                    // Local functions inside the same block are analyzed by this OperationBlockAction.
+                    // The declaration itself is rejected below (VER005_LocalFunction); nothing more to say per call.
                 }
                 else if (IsReflectionSymbol(inv.TargetMethod))
                 {
@@ -459,6 +459,15 @@ public sealed class VerifiableGatekeeperAnalyzer : DiagnosticAnalyzer
                     isCandidate,
                     ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER006_Dynamic"),
                     "dynamic dispatch"));
+                break;
+
+            case ILocalFunctionOperation localFn:
+                context.ReportDiagnostic(VerifiableDescriptors.CreateScoped(
+                    VerifiableDescriptors.DisallowedControlFlow,
+                    op.Syntax.GetLocation(),
+                    isCandidate,
+                    ImmutableDictionary<string, string?>.Empty.Add("FixKind", "VER005_LocalFunction"),
+                    localFn.Symbol.Name));
                 break;
 
             case IAwaitOperation:

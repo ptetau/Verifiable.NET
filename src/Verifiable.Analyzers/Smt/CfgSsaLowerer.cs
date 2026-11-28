@@ -98,9 +98,11 @@ internal sealed partial class CfgSsaLowerer
     private readonly bool _closedEnums;
     private readonly bool _nonDefaultImmutableArrays;
     private readonly SmtTypeSystem _types;
+    private readonly bool _requireNoOverflow;
     private readonly ContractExpressionTranslator _translator;
 
     private readonly List<string> _decls = new();
+    private readonly Dictionary<IFieldSymbol, SmtTypedTerm> _staticReadonlyFields = new(SymbolEqualityComparer.Default);
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
     private readonly List<NamedPremise> _premises = new();
@@ -194,8 +196,8 @@ internal sealed partial class CfgSsaLowerer
         _trackProofPremises = trackProofPremises;
         _closedEnums = closedEnums;
         _nonDefaultImmutableArrays = nonDefaultImmutableArrays;
-        var useBitVec = HasCheckedArithmetic(method);
-        _types = new SmtTypeSystem(useBitVec);
+        _requireNoOverflow = RequiresNoOverflow(method);
+        _types = new SmtTypeSystem(UsesBitVectors(method));
         _translator = new ContractExpressionTranslator(compilation, _types);
     }
 
@@ -1244,6 +1246,8 @@ internal sealed partial class CfgSsaLowerer
 
     private void EmitValueInvariantObligations(SmtTypedTerm value, string gamma, Location loc)
     {
+        if (TryEmitCompoundValidity(value, gamma, loc)) return;
+
         if (SmtTypeSystem.TryGetIsValidMethod(value.Type, out var isValidMethod) &&
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, isValidMethod!, out var paramSym, out var isValidBody))
         {
@@ -1255,7 +1259,7 @@ internal sealed partial class CfgSsaLowerer
                 if (paramSym is not null) valEnv.Vars[paramSym] = unwrapped;
                 var goal = LowerExpression(isValidBody!, gamma, valEnv, emitObligations: false);
                 var clauses = ExtractGoalClauses(isValidBody!, gamma, valEnv);
-                AddObligation(
+                AddValidityObligation(
                     "TypeInvariant",
                     $"{value.Type.Name}.IsValid",
                     loc,
@@ -1289,7 +1293,7 @@ internal sealed partial class CfgSsaLowerer
                 var invEnv = new BlockEnv { ThisOverride = value };
                 var goal = LowerExpression(invBody!, gamma, invEnv, emitObligations: false);
                 var clauses = ExtractGoalClauses(invBody!, gamma, invEnv);
-                AddObligation(
+                AddValidityObligation(
                     "TypeInvariant",
                     $"[Invariant] {value.Type.Name}.{invMember.Name}",
                     loc,
@@ -1310,7 +1314,7 @@ internal sealed partial class CfgSsaLowerer
         if (IsClosedEnum(value.Type, out var enumType, out var enumVals))
         {
             var domainFormula = BuildClosedEnumFormula(value.Term, enumVals);
-            AddObligation("TypeInvariant", $"Closed enum domain for '{enumType!.Name}'", loc, gamma, domainFormula,
+            AddValidityObligation("TypeInvariant", $"Closed enum domain for '{enumType!.Name}'", loc, gamma, domainFormula,
                 $"Values of closed enum '{enumType.Name}' must be one of its declared members.");
             return;
         }
@@ -1319,7 +1323,7 @@ internal sealed partial class CfgSsaLowerer
             IsClosedEnum(optInner!, out var optEnumType, out var optEnumVals))
         {
             var domainFormula = BuildClosedEnumFormula($"(opt-val-{optId} {value.Term})", optEnumVals);
-            AddObligation("TypeInvariant", $"Closed enum domain for '{optEnumType!.Name}'", loc,
+            AddValidityObligation("TypeInvariant", $"Closed enum domain for '{optEnumType!.Name}'", loc,
                 CombineAnd(gamma, $"(not (= {value.Term} opt-none-{optId}))"),
                 domainFormula,
                 $"Values of closed enum '{optEnumType.Name}' must be one of its declared members.");
@@ -1334,7 +1338,7 @@ internal sealed partial class CfgSsaLowerer
                     _types.TryGetSequenceInfo(f.Type, out _, out var fSeqId, out _, out var fIsImmArr) &&
                     fIsImmArr)
                 {
-                    AddObligation(
+                    AddValidityObligation(
                         "TypeInvariant",
                         $"[NonDefault] field '{value.Type.Name}.{f.Name}'",
                         loc,
@@ -1344,7 +1348,7 @@ internal sealed partial class CfgSsaLowerer
                 }
 
                 if (SmtTypeSystem.HasAnyInvariants(f.Type) ||
-                    HasAnyClosedEnum(f.Type) ||
+                    HasAnyClosedEnum(f.Type) || HasValidityRule(f.Type) ||
                     SmtTypeSystem.HasAnyNonDefaultImmutableArray(f.Type, _nonDefaultImmutableArrays))
                 {
                     EmitValueInvariantObligations(new SmtTypedTerm($"({f.AccessorName} {value.Term})", f.Type), gamma, loc);
@@ -1425,6 +1429,16 @@ internal sealed partial class CfgSsaLowerer
         int inlineDepth = 0)
     {
         var result = LowerExpressionCore(op, gamma, env, emitObligations, inlineDepth);
+
+        // A value read from outside the method's own arithmetic is a real C# value of its type. The Math intrinsics
+        // are arithmetic of the method itself (`Math.Abs(int.MinValue)` is out of range, and throws), so their
+        // result must not be assumed to be in range: that would make their overflow check pass by assumption.
+        if (op is IPropertyReferenceOperation or IFieldReferenceOperation or IInvocationOperation or IArrayElementReferenceOperation &&
+            op is not IInvocationOperation { TargetMethod.ContainingType: { Name: "Math", ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } } } &&
+            _inQuantifierDepth == 0 && !IsNumeralTerm(result.Term) && !result.Term.Contains("str.len", StringComparison.Ordinal))
+        {
+            AssumeIntegralRange(result, op.Syntax.GetLocation());
+        }
 
         if (emitObligations &&
             _nonNullTargetSpan is { } targetSpan &&
@@ -1524,6 +1538,28 @@ internal sealed partial class CfgSsaLowerer
                         return directConverted;
                     }
 
+                    if (!SymbolEqualityComparer.Default.Equals(inner.Type, target) &&
+                        _types.TryGetNullableInfo(inner.Type, out _, out var unwrapSrcId, out var unwrapSrcType) &&
+                        !_types.TryGetNullableInfo(target, out _, out _, out _) &&
+                        !conv.Conversion.IsUserDefined)
+                    {
+                        // `(int)x` on an int?: throws InvalidOperationException when x is empty, else the payload converted.
+                        if (!inCoalesce && (emitObligations || _inQuantifierDepth > 0))
+                        {
+                            EmitSafetyObligation("Precondition", $"Nullable must have a value for the cast in '{conv.Syntax}'",
+                                conv.Syntax.GetLocation(), gamma, $"(not (= {inner.Term} opt-none-{unwrapSrcId}))");
+                        }
+                        var unwrapped = new SmtTypedTerm($"(opt-val-{unwrapSrcId} {inner.Term})", unwrapSrcType!);
+                        if (SymbolEqualityComparer.Default.Equals(unwrapSrcType, target))
+                            return unwrapped;
+                        var unwrapNonNullGamma = CombineAnd(gamma, $"(not (= {inner.Term} opt-none-{unwrapSrcId}))");
+                        if (TryLowerIntegralOrEnumConversion(unwrapped, target, convChecked, unwrapNonNullGamma, conv.Syntax.GetLocation(), out var unwrapConverted))
+                            return unwrapConverted;
+                        return inCoalesce && conv.IsImplicit
+                            ? ConvertNullableValue(unwrapped, target)
+                            : _translator.ConvertTo(unwrapped, target);
+                    }
+
                     if (inCoalesce && conv.IsImplicit)
                         return ConvertNullableValue(inner, target);
                     return _translator.ConvertTo(inner, target);
@@ -1583,7 +1619,8 @@ internal sealed partial class CfgSsaLowerer
             case ICompoundAssignmentOperation ca:
                 var curTarget = LowerExpression(ca.Target, gamma, env, emitObligations, inlineDepth);
                 var rhsVal = LowerExpression(ca.Value, gamma, env, emitObligations, inlineDepth);
-                var combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation(), emitObligations);
+                var combined = LowerBinaryOperator(ca.OperatorKind, curTarget, rhsVal, ca.Type!, gamma, ca.Syntax.GetLocation(), emitObligations,
+                    checkOverflow: MustNotOverflow(ca.Syntax, ca.IsChecked));
                 var combinedSsa = BindSsaValue("assign", combined);
                 AssignTarget(ca.Target, combinedSsa, env);
                 return combinedSsa;
@@ -1592,7 +1629,8 @@ internal sealed partial class CfgSsaLowerer
                 var prev = LowerExpression(inc.Target, gamma, env, emitObligations, inlineDepth);
                 var one = new SmtTypedTerm(_translator.FormatIntLiteral(1, inc.Type!.SpecialType == SpecialType.System_Int64 ? 64 : 32), inc.Type);
                 var binKind = inc.Kind == OperationKind.Increment ? BinaryOperatorKind.Add : BinaryOperatorKind.Subtract;
-                var next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations);
+                var next = LowerBinaryOperator(binKind, prev, one, inc.Type, gamma, inc.Syntax.GetLocation(), emitObligations,
+                    checkOverflow: MustNotOverflow(inc.Syntax, inc.IsChecked));
                 var nextSsa = BindSsaValue("inc", next);
                 AssignTarget(inc.Target, nextSsa, env);
                 return inc.IsPostfix ? prev : nextSsa;
@@ -1614,12 +1652,20 @@ internal sealed partial class CfgSsaLowerer
                     var sort = _types.GetSort(uOp.Type);
                     if (_types.UseBitVec && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
                     {
-                        if (emitObligations)
+                        if (emitObligations && MustNotOverflow(un.Syntax, un.IsChecked))
                         {
                             var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
                             EmitSafetyObligation("Overflow", $"Unary negation overflow check on '{un.Syntax}'", un.Syntax.GetLocation(), gamma, $"(not (= {uOp.Term} {minVal}))");
                         }
                         return new SmtTypedTerm($"(bvneg {uOp.Term})", uOp.Type);
+                    }
+                    if (sort == "Int" && TryGetIntegralRange(un.Type ?? uOp.Type, out var negRange))
+                    {
+                        var negated = $"(- {uOp.Term})";
+                        if (!MustNotOverflow(un.Syntax, un.IsChecked))
+                            return new SmtTypedTerm(WrapIntoRange(negated, negRange), un.Type ?? uOp.Type);
+                        if (emitObligations)
+                            EmitIntOverflowObligation("Negate", negated, negRange, gamma, un.Syntax.GetLocation(), uOp.Term);
                     }
                     return new SmtTypedTerm($"(- {uOp.Term})", uOp.Type);
                 }
@@ -1646,7 +1692,14 @@ internal sealed partial class CfgSsaLowerer
                 }
                 var lhs = LowerExpression(bin.LeftOperand, gamma, env, emitObligations, inlineDepth);
                 var rhs = LowerExpression(bin.RightOperand, gamma, env, emitObligations, inlineDepth);
-                return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations);
+                if (bin.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals &&
+                    TryLowerUserEquality(bin, lhs, rhs, gamma, emitObligations, inlineDepth, out var userEq))
+                    return userEq;
+                return LowerBinaryOperator(bin.OperatorKind, lhs, rhs, bin.Type!, gamma, bin.Syntax.GetLocation(), emitObligations,
+                    checkOverflow: MustNotOverflow(bin.Syntax, bin.IsChecked));
+
+            case ITupleBinaryOperation tupleBin:
+                return LowerTupleBinary(tupleBin, gamma, env, emitObligations, inlineDepth);
 
             case IIsNullOperation isNull:
                 var subject = LowerExpression(isNull.Operand, gamma, env, emitObligations, inlineDepth);
@@ -1676,6 +1729,11 @@ internal sealed partial class CfgSsaLowerer
             case IIsPatternOperation isPat:
                 var subj = LowerExpression(isPat.Value, gamma, env, emitObligations, inlineDepth);
                 return LowerPatternOp(subj, isPat.Pattern, gamma, env, emitObligations, inlineDepth);
+
+            case IIsTypeOperation isType:
+                var typeSubject = LowerExpression(isType.ValueOperand, gamma, env, emitObligations, inlineDepth);
+                var typeTest = LowerTypeTest(typeSubject, isType.TypeOperand, isType);
+                return new SmtTypedTerm(isType.IsNegated ? $"(not {typeTest})" : typeTest, _compilation.GetSpecialType(SpecialType.System_Boolean));
 
             case IPropertyReferenceOperation propRef:
                 return LowerPropertyReference(propRef, gamma, env, emitObligations, inlineDepth);
@@ -1825,7 +1883,8 @@ internal sealed partial class CfgSsaLowerer
         ITypeSymbol resultType,
         string gamma,
         Location loc,
-        bool emitObligations = true)
+        bool emitObligations = true,
+        bool checkOverflow = true)
     {
         if (TryLowerCalendarBinaryOperator(kind, left, right, resultType, gamma, loc, out var calRes))
         {
@@ -1857,8 +1916,10 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(left.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(right.Type, viaOperator: false);
             var (lEq, rEq, _) = _translator.UnifyForComparison(left, right);
-            var eq = $"(= {lEq} {rEq})";
+            var eq = SymbolEqualityComparer.Default.Equals(left.Type, right.Type) ? EqualityTerm(lEq, rEq, left.Type) : $"(= {lEq} {rEq})";
             return new SmtTypedTerm(kind == BinaryOperatorKind.Equals ? eq : $"(not {eq})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
@@ -1867,9 +1928,26 @@ internal sealed partial class CfgSsaLowerer
         var isBv = ContractExpressionTranslator.IsBitVecSort(sort);
         var boolType = _compilation.GetSpecialType(SpecialType.System_Boolean);
 
-        if (emitObligations && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
+        if (emitObligations && checkOverflow && isBv && kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
         {
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
+        }
+
+        if (!isBv && sort == "Int" && TryGetIntegralRange(unified, out var range) &&
+            kind is BinaryOperatorKind.Add or BinaryOperatorKind.Subtract or BinaryOperatorKind.Multiply)
+        {
+            var op = kind switch { BinaryOperatorKind.Add => "+", BinaryOperatorKind.Subtract => "-", _ => "*" };
+            var exact = $"({op} {lTerm} {rTerm})";
+            if (!checkOverflow)
+            {
+                // Arithmetic that may wrap: the C# result is the exact result reduced into the type's range.
+                return new SmtTypedTerm(WrapIntoRange(exact, range), resultType);
+            }
+
+            if (emitObligations)
+            {
+                EmitIntOverflowObligation(kind.ToString(), exact, range, gamma, loc, lTerm, rTerm);
+            }
         }
 
         if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && sort != "Real")
@@ -1958,17 +2036,26 @@ internal sealed partial class CfgSsaLowerer
 
             case IRelationalPatternOperation rp:
                 var rVal = LowerExpression(rp.Value, gamma, env, emitObligations, inlineDepth);
+                if (_types.TryGetNullableInfo(subject.Type, out _, out var relOptId, out var relPayloadType))
+                {
+                    // `x is > 5` on an int? holds only when x has a value and the payload satisfies the relation.
+                    var relPayload = new SmtTypedTerm($"(opt-val-{relOptId} {subject.Term})", relPayloadType!);
+                    var relCmp = LowerBinaryOperator(rp.OperatorKind, relPayload, rVal, boolType, gamma, pattern.Syntax.GetLocation(), emitObligations);
+                    return new SmtTypedTerm($"(and (not (= {subject.Term} opt-none-{relOptId})) {relCmp.Term})", boolType);
+                }
                 return LowerBinaryOperator(rp.OperatorKind, subject, rVal, boolType, gamma, pattern.Syntax.GetLocation(), emitObligations);
 
+            case ITypePatternOperation tp:
+                return new SmtTypedTerm(LowerTypeTest(subject, tp.MatchedType, pattern), boolType);
+
             case IDeclarationPatternOperation dp:
-                var notNull = subject.Type.SpecialType == SpecialType.System_String
-                    ? $"(not (= {subject.Term} str-null))"
-                    : (_types.TryGetNullableInfo(subject.Type, out _, out var optId, out _)
-                        ? $"(not (= {subject.Term} opt-none-{optId}))"
-                        : "true");
+                // `is var t` (and a declaration of the subject's own nullable type) matches null; any other
+                // declaration pattern is a type test that null fails.
+                var notNull = dp.MatchesNull ? "true" : LowerTypeTest(subject, dp.MatchedType, pattern);
                 if (dp.DeclaredSymbol is ILocalSymbol locSym)
                 {
-                    var bound = _types.TryGetNullableInfo(subject.Type, out _, out var oId, out var innerT)
+                    var bound = !dp.MatchesNull && _types.TryGetNullableInfo(subject.Type, out _, out var oId, out var innerT) &&
+                                !_types.TryGetNullableInfo(locSym.Type, out _, out _, out _)
                         ? new SmtTypedTerm($"(opt-val-{oId} {subject.Term})", innerT!)
                         : subject;
                     env.Vars[locSym] = bound;
@@ -1982,10 +2069,38 @@ internal sealed partial class CfgSsaLowerer
                 return new SmtTypedTerm("true", boolType);
 
             default:
-                if (!emitObligations)
-                    throw new ContractLoweringException($"Unsupported pattern '{pattern.Kind}' in specification.");
-                return new SmtTypedTerm("true", boolType);
+                // Unmodelled pattern kinds (list, slice, ITuple, ...) must never be assumed to match.
+                throw new ContractLoweringException($"Unsupported pattern '{pattern.Kind}' in '{pattern.Syntax}'.");
         }
+    }
+
+    /// <summary>
+    /// The SMT test for "<paramref name="subject"/> is <paramref name="matched"/>": null never matches a type test,
+    /// a non-null value of the subject's own (underlying) type always does. Anything else is not modelled.
+    /// </summary>
+    private string LowerTypeTest(SmtTypedTerm subject, ITypeSymbol? matched, IOperation pattern)
+    {
+        if (matched is not null)
+        {
+            if (subject.Type.SpecialType == SpecialType.System_String &&
+                matched.SpecialType == SpecialType.System_String)
+            {
+                return $"(not (= {subject.Term} str-null))";
+            }
+            if (_types.TryGetNullableInfo(subject.Type, out _, out var optId, out var payloadType))
+            {
+                var matchedUnderlying = _types.TryGetNullableInfo(matched, out _, out _, out var matchedPayload) ? matchedPayload! : matched;
+                if (SymbolEqualityComparer.Default.Equals(matchedUnderlying, payloadType))
+                    return $"(not (= {subject.Term} opt-none-{optId}))";
+            }
+            else if (SymbolEqualityComparer.Default.Equals(matched, subject.Type))
+            {
+                // A value type, or a modelled reference type (never null in the SMT model).
+                return "true";
+            }
+        }
+
+        throw new ContractLoweringException($"Unsupported type pattern '{pattern.Syntax}' in specification or body.");
     }
 
     private SmtTypedTerm LowerRecursivePattern(
@@ -2029,7 +2144,7 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException($"Unsupported property subpattern member '{sub.Member.Kind}' in specification.");
             }
 
-            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth);
+            var memberTerm = ResolveMemberAccess(target, memberName, emitObligations, inlineDepth, gamma);
             var subPat = LowerPatternOp(memberTerm, sub.Pattern, gamma, env, emitObligations, inlineDepth);
             clauses.Add(subPat.Term);
         }
@@ -2120,7 +2235,19 @@ internal sealed partial class CfgSsaLowerer
             {
                 EmitImmutableArrayNonDefaultObligation(recv, $"ImmutableArray must not be default for '.{prop.Name}'", propRef.Syntax.GetLocation(), gamma);
             }
-            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth);
+            if (emitObligations || _inQuantifierDepth > 0)
+            {
+                if (recv.Type.SpecialType == SpecialType.System_String)
+                {
+                    EmitStringNonNullObligation(recv, $"Receiver must be non-null for '{propRef.Syntax}'", propRef.Syntax.GetLocation(), gamma);
+                }
+                else if (prop.Name == "Value" && _types.TryGetNullableInfo(recv.Type, out _, out var valOptId, out _))
+                {
+                    EmitSafetyObligation("Precondition", $"Nullable must have a value for '{propRef.Syntax}'",
+                        propRef.Syntax.GetLocation(), gamma, $"(not (= {recv.Term} opt-none-{valOptId}))");
+                }
+            }
+            return ResolveMemberAccess(recv, prop.Name, emitObligations, inlineDepth, gamma);
         }
 
         if (!emitObligations)
@@ -2167,17 +2294,35 @@ internal sealed partial class CfgSsaLowerer
             }
             if (!emitObligations)
                 throw new ContractLoweringException($"Unsupported static field '{field.Name}' in specification.");
+            if (field.IsReadOnly && _inQuantifierDepth == 0)
+            {
+                // A static readonly field never changes after its initializer, so every read sees the same unknown value.
+                if (!_staticReadonlyFields.TryGetValue(field, out var cached))
+                {
+                    cached = BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
+                    _staticReadonlyFields[field] = cached;
+                }
+                return cached;
+            }
             return BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
         }
 
         var recv = LowerExpression(fieldRef.Instance, gamma, env, emitObligations, inlineDepth);
-        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth);
+        return ResolveMemberAccess(recv, field.Name, emitObligations, inlineDepth, gamma);
     }
 
-    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth)
+    private SmtTypedTerm ResolveMemberAccess(SmtTypedTerm receiver, string memberName, bool emitObligations, int inlineDepth, string gamma = "true")
     {
         if (_translator.TryTranslateMemberOnReceiver(receiver, memberName) is { } direct)
         {
+            if (memberName == "Length" && receiver.Type.SpecialType == SpecialType.System_String &&
+                _types.GetSort(direct.Type) == "(_ BitVec 32)")
+            {
+                // Under [CheckedArithmetic] the length is a 32-bit vector; a .NET string holds at most 0x3FFFFFDF code
+                // units, so the conversion from Z3's unbounded length never wraps for a real string.
+                AddAssertion($"(or (= {receiver.Term} str-null) (<= (str.len (str-text {receiver.Term})) 1073741791))",
+                    "StringAxiom", "string length bound", Location.None);
+            }
             return direct;
         }
 
@@ -2186,7 +2331,8 @@ internal sealed partial class CfgSsaLowerer
             SmtTypeSystem.TryExtractSingleReturnOperation(_compilation, prop, out _, out var bodyOp))
         {
             var propEnv = new BlockEnv { ThisOverride = receiver };
-            return LowerExpression(bodyOp!, "true", propEnv, emitObligations: false, inlineDepth + 1);
+            // A computed property is user code run at the access: its checks (a division, an index) belong to the caller.
+            return LowerExpression(bodyOp!, gamma, propEnv, emitObligations, inlineDepth + 1);
         }
 
         throw new ContractLoweringException($"Member '{memberName}' not found or unsupported on '{receiver.Type.Name}'.");
@@ -2261,6 +2407,7 @@ internal sealed partial class CfgSsaLowerer
             return new SmtTypedTerm(_types.GetDefaultTerm(targetType), targetType);
         }
 
+        Dictionary<string, SmtTypedTerm>? ctorFields = null;
         if (!InitializerProjection.IsSupportedProjection(objCreate, _types, out var projErr))
         {
             // Keep compatibility with existing constrained-struct/internal constructors when not a custom DTO projection
@@ -2268,16 +2415,31 @@ internal sealed partial class CfgSsaLowerer
             {
                 throw new ContractLoweringException(projErr!);
             }
+            if (UnmodeledConstructionReason(objCreate) is { } unmodeled)
+            {
+                // User code (a constructor body, a property initializer): lower it, or refuse (see CfgSsaLowerer.Equality.cs).
+                ctorFields = LowerSourceConstructor(objCreate, comp!, unmodeled, gamma, env, emitObligations, inlineDepth);
+            }
         }
 
-        var argMap = new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
+        var argMap = ctorFields ?? new Dictionary<string, SmtTypedTerm>(StringComparer.OrdinalIgnoreCase);
+        var ctorArgs = new SmtTypedTerm?[objCreate.Constructor?.Parameters.Length ?? 0];
+        // With an explicit constructor body, LowerSourceConstructor has already bound the fields (and checked the
+        // constructor's Spec.Requires). The arguments are still lowered here so their validity can be checked.
         foreach (var arg in objCreate.Arguments)
         {
             if (arg.Parameter is not null)
             {
                 var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
-                argMap[arg.Parameter.Name] = _translator.ConvertTo(v, arg.Parameter.Type);
+                var converted = _translator.ConvertTo(v, arg.Parameter.Type);
+                if (ctorFields is null) argMap[arg.Parameter.Name] = converted;
+                if (arg.Parameter.Ordinal < ctorArgs.Length) ctorArgs[arg.Parameter.Ordinal] = converted;
             }
+        }
+
+        if (emitObligations)
+        {
+            CheckConstructorCall(objCreate, ctorArgs, gamma, requiresAlreadyChecked: ctorFields is not null);
         }
 
         if (objCreate.Initializer is not null)
@@ -2401,7 +2563,10 @@ internal sealed partial class CfgSsaLowerer
             if (method.Name == "Implies" && inv.Arguments.Length == 2)
             {
                 var ant = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
-                var cons = LowerExpression(GetOrderedArgOp(inv, 1), CombineAnd(gamma, ant.Term), env, emitObligations, inlineDepth);
+                // In code (obligations emitted) C# evaluates both arguments, so the consequent runs under the caller's path
+                // condition; only in a specification is Implies a logical connective guarding its consequent.
+                var consGamma = emitObligations ? gamma : CombineAnd(gamma, ant.Term);
+                var cons = LowerExpression(GetOrderedArgOp(inv, 1), consGamma, env, emitObligations, inlineDepth);
                 return new SmtTypedTerm($"(=> {ant.Term} {cons.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
             }
 
@@ -2723,6 +2888,12 @@ internal sealed partial class CfgSsaLowerer
                     var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
                     EmitSafetyObligation("Overflow", "Math.Abs(MinValue) throws OverflowException", loc, gamma, $"(not (= {a.Term} {minVal}))");
                 }
+                else if (emitObligations && sort == "Int" && a.Type.SpecialType is SpecialType.System_Int32 or SpecialType.System_Int64 && TryGetIntegralRange(a.Type, out var absRange))
+                {
+                    // Math.Abs(MinValue) has no positive counterpart and throws OverflowException.
+                    EmitSafetyObligation("Overflow", "Math.Abs(MinValue) throws OverflowException", loc, gamma,
+                        $"(=> {InRange(a.Term, absRange)} (not (= {a.Term} {absRange.Min})))");
+                }
                 return new SmtTypedTerm($"(ite ({lt} {a.Term} {zero}) ({neg} {a.Term}) {a.Term})", method.ReturnType);
             }
             if (method.Name == "Max" && argValues.Count == 2)
@@ -2748,8 +2919,16 @@ internal sealed partial class CfgSsaLowerer
                 throw new ContractLoweringException(
                     $"Reference equality via Equals on non-record class '{refName}' cannot be modeled as structural SMT equality; compare individual fields instead.");
             }
+            ThrowIfEqualityUnmodeled(recvTerm.Type, viaOperator: false);
+            ThrowIfEqualityUnmodeled(argValues[0].Type, viaOperator: false);
+            if ((emitObligations || _inQuantifierDepth > 0) && IsStringTyped(inv.Instance, recvTerm))
+            {
+                EmitStringNonNullObligation(recvTerm, $"Receiver must be non-null for '{inv.Syntax}'", loc, gamma);
+            }
             var (l, r, _) = _translator.UnifyForComparison(recvTerm, argValues[0]);
-            return new SmtTypedTerm($"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
+            return new SmtTypedTerm(SymbolEqualityComparer.Default.Equals(recvTerm.Type, argValues[0].Type)
+                ? EqualityTerm(l, r, recvTerm.Type)
+                : $"(= {l} {r})", _compilation.GetSpecialType(SpecialType.System_Boolean));
         }
 
         if (!_expandingCalls.Add(method.OriginalDefinition))
@@ -2764,6 +2943,21 @@ internal sealed partial class CfgSsaLowerer
         {
             _expandingCalls.Remove(method.OriginalDefinition);
         }
+    }
+
+    /// <summary>True when the receiver is a C# string, even if it was converted to an interface such as IEquatable&lt;string&gt;.</summary>
+    private static bool IsStringTyped(IOperation? instance, SmtTypedTerm recvTerm)
+    {
+        if (recvTerm.Type.SpecialType == SpecialType.System_String)
+            return true;
+        var cur = instance;
+        while (cur is IConversionOperation conv)
+        {
+            cur = conv.Operand;
+            if (cur.Type?.SpecialType == SpecialType.System_String)
+                return true;
+        }
+        return false;
     }
 
     private SmtTypedTerm LowerHelperCall(IMethodSymbol method, SmtTypedTerm? receiver, IReadOnlyList<SmtTypedTerm> args,
@@ -2809,6 +3003,8 @@ internal sealed partial class CfgSsaLowerer
             }
         }
 
+        EmitArgumentValidityObligations(method, args, gamma, loc);
+
         var calleeRequires = CheckMethodRequires(method, specs, calleeEnv, gamma, loc);
 
         var definitional = VerifiableSymbolHelpers.GetScope(method) == VerificationScope.Verifiable &&
@@ -2816,7 +3012,7 @@ internal sealed partial class CfgSsaLowerer
         SmtTypedTerm? definition = null;
         if ((!implementationCall || definitional) && !method.ReturnsVoid &&
             !VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.PureAxiomAttr) &&
-            HasCheckedArithmetic(method) == _types.UseBitVec &&
+            UsesBitVectors(method) == _types.UseBitVec && RequiresNoOverflow(method) == _requireNoOverflow &&
             !method.IsGenericMethod && method.ContainingType is { IsGenericType: false } &&
             (!method.IsVirtual && !method.IsOverride || method.IsSealed || method.ContainingType.IsSealed) &&
             !method.ReturnsByRef && !method.ReturnsByRefReadonly && method.Parameters.All(p => p.RefKind == RefKind.None) &&
@@ -3022,8 +3218,28 @@ internal sealed partial class CfgSsaLowerer
         return lowered;
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, object> RegexUseCache = new();
+
+    /// <summary>True when the program mentions <c>Regex</c> at all, so that regex-related string assumptions are worth their cost.</summary>
+    private bool CompilationUsesRegex() =>
+        (bool)RegexUseCache.GetValue(_compilation, c =>
+            c.SyntaxTrees.Any(t => t.GetText().ToString().IndexOf("Regex", StringComparison.Ordinal) >= 0));
+
     private void EmitTypeAssumptions(SmtTypedTerm value, Location loc)
     {
+        if (AssumeIntegralRange(value, loc)) return;
+
+        if (value.Type.SpecialType == SpecialType.System_String)
+        {
+            // A .NET string is a sequence of UTF-16 code units, but Z3's characters reach U+2FFFF; without this a
+            // regex over a full-BMP class could be "refuted" by a character no string can hold.
+            if (CompilationUsesRegex())
+            {
+                AddAssertion(RegexModel.BmpStringAssumption(value.Term), "StringAxiom", "string characters are UTF-16 code units", loc);
+            }
+            return;
+        }
+
         if (value.Type.TypeKind == TypeKind.Enum &&
             TryGetIntegralBounds(value.Type, out var eMin, out var eMax, out _, out _))
         {
@@ -3059,11 +3275,14 @@ internal sealed partial class CfgSsaLowerer
         {
             var kSort = _types.GetSort(kType!);
             AddAssertion($"(>= (map_count_{dictId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(<= (map_count_{dictId} {value.Term}) 2147483647)", "CollectionAxiom", $"{value.Type.Name}.Count fits an int", loc);
             AddAssertion($"(= (= (map_count_{dictId} {value.Term}) 0) (= (map_has_{dictId} {value.Term}) ((as const (Array {kSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
-        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out _, out var isImmArr))
+        else if (_types.TryGetSequenceInfo(value.Type, out _, out var seqId, out var seqElemType, out var isImmArr))
         {
             AddAssertion($"(>= (seq_count_{seqId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(<= (seq_count_{seqId} {value.Term}) 2147483647)", "CollectionAxiom", $"{value.Type.Name}.Count fits an int", loc);
+            EmitSequenceElementAssumptions(value, seqId, seqElemType!, guardCond: null, loc);
             if (isImmArr)
             {
                 AddAssertion($"(=> (seq_is_default_{seqId} {value.Term}) (= (seq_count_{seqId} {value.Term}) 0))",
@@ -3079,6 +3298,7 @@ internal sealed partial class CfgSsaLowerer
         {
             var eSort = _types.GetSort(setElem!);
             AddAssertion($"(>= (set_count_{setId} {value.Term}) 0)", "CollectionAxiom", $"{value.Type.Name}.Count >= 0", loc);
+            AddAssertion($"(<= (set_count_{setId} {value.Term}) 2147483647)", "CollectionAxiom", $"{value.Type.Name}.Count fits an int", loc);
             AddAssertion($"(= (= (set_count_{setId} {value.Term}) 0) (= (set_has_{setId} {value.Term}) ((as const (Array {eSort} Bool)) false)))", "CollectionAxiom", $"{value.Type.Name} empty consistency", loc);
         }
 
@@ -3215,7 +3435,14 @@ internal sealed partial class CfgSsaLowerer
             return;
         }
 
-        if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out _, out var elIsImmArr) && elIsImmArr)
+        if (TryEmitNullableOnDemandAssumptions(guardCond, element, loc)) return;
+
+        if (_types.TryGetSequenceInfo(element.Type, out _, out var elSeqId, out var elElemType, out var elIsImmArr))
+        {
+            EmitSequenceElementAssumptions(element, elSeqId, elElemType!, guardCond, loc);
+        }
+
+        if (_types.TryGetSequenceInfo(element.Type, out _, out elSeqId, out _, out elIsImmArr) && elIsImmArr)
         {
             AddAssertion($"(=> {guardCond} (>= (seq_count_{elSeqId} {element.Term}) 0))",
                 "CollectionAxiom", $"{element.Type.Name}.Count >= 0", loc);
@@ -3772,6 +3999,13 @@ internal sealed partial class CfgSsaLowerer
 
         if (cur is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } field })
         {
+            // A static constructor (or another static initializer) can replace the Regex the field was initialized with.
+            if (StaticFieldMayBeReassigned(field))
+            {
+                error = $"Static Regex field '{field.Name}' is assigned (or passed by reference) in a static constructor or initializer, so its initializer's pattern is not necessarily the one used.";
+                return false;
+            }
+
             foreach (var synRef in field.DeclaringSyntaxReferences)
             {
                 var syn = synRef.GetSyntax();
@@ -3803,6 +4037,77 @@ internal sealed partial class CfgSsaLowerer
         return false;
     }
 
+    /// <summary>
+    /// True when anything other than the field's own initializer might store a different value into the static
+    /// readonly <paramref name="field"/>: any use of it in a static constructor of its type, or a write (assignment,
+    /// <c>ref</c>/<c>out</c> argument, address-taking) in another static initializer. A field declared in metadata,
+    /// whose code is not visible, counts as reassignable.
+    /// </summary>
+    private bool StaticFieldMayBeReassigned(IFieldSymbol field)
+    {
+        var type = field.ContainingType;
+        if (type is null || !field.DeclaringSyntaxReferences.Any())
+        {
+            return true;
+        }
+
+        foreach (var syntaxRef in type.DeclaringSyntaxReferences)
+        {
+            var typeSyntax = syntaxRef.GetSyntax();
+            if (!_compilation.SyntaxTrees.Contains(typeSyntax.SyntaxTree))
+            {
+                return true;
+            }
+
+            if (typeSyntax is not TypeDeclarationSyntax typeDecl)
+            {
+                return true;
+            }
+
+            var model = _compilation.GetSemanticModel(typeSyntax.SyntaxTree);
+            foreach (var member in typeDecl.Members)
+            {
+                // Methods cannot assign a readonly field; only the static constructor and initializers can.
+                var isStaticCtor = member is ConstructorDeclarationSyntax ctor && ctor.Modifiers.Any(SyntaxKind.StaticKeyword);
+                if (!isStaticCtor && member is not (FieldDeclarationSyntax or PropertyDeclarationSyntax))
+                {
+                    continue;
+                }
+
+                foreach (var node in member.DescendantNodes().OfType<ExpressionSyntax>())
+                {
+                    if (node is not (IdentifierNameSyntax or MemberAccessExpressionSyntax) ||
+                        !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(node).Symbol, field))
+                    {
+                        continue;
+                    }
+
+                    // The name inside "Type.Field" binds to the same symbol; only the outermost expression counts.
+                    if (node.Parent is MemberAccessExpressionSyntax parentAccess && parentAccess.Name == node)
+                    {
+                        continue;
+                    }
+
+                    if (isStaticCtor || model.GetOperation(node) is not { } op || !IsPlainRead(op))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsPlainRead(IOperation op) => op.Parent switch
+    {
+        IInvocationOperation inv => ReferenceEquals(inv.Instance, op) || inv.Arguments.Any(a => ReferenceEquals(a.Value, op) && a.Parameter?.RefKind == RefKind.None),
+        IPropertyReferenceOperation prop => ReferenceEquals(prop.Instance, op),
+        IFieldReferenceOperation fld => ReferenceEquals(fld.Instance, op),
+        IArgumentOperation arg => arg.Parameter?.RefKind == RefKind.None,
+        _ => false
+    };
+
     private static bool TryExtractImmutableCreateElements(IInvocationOperation inv, out List<IOperation> elements)
     {
         elements = new List<IOperation>();
@@ -3821,6 +4126,11 @@ internal sealed partial class CfgSsaLowerer
 
     private void AddAssertion(string smtFormula, string kind, string label, Location loc, string? reason = null)
     {
+        if (_assertionBinders.Count > 0)
+        {
+            smtFormula = $"(forall ({string.Join(" ", _assertionBinders.Select(b => $"({b} Int)"))}) (! {smtFormula} :pattern ({_assertionPatterns[_assertionPatterns.Count - 1]})))";
+        }
+
         if (!_trackProofPremises)
         {
             _assertions.Add($"(assert {smtFormula})");
@@ -4069,17 +4379,127 @@ internal sealed partial class CfgSsaLowerer
         return $"(and {a} {b})";
     }
 
-    private static bool HasCheckedArithmetic(IMethodSymbol method)
+    /// <summary>
+    /// Whether <c>int</c>/<c>long</c> arithmetic in <paramref name="method"/> must be proved never to overflow. The
+    /// nearest <c>[CheckedArithmetic]</c> or <c>[UncheckedArithmetic]</c> (method, enclosing types, assembly) decides;
+    /// with neither, overflow must not happen, so that code that wraps around is never "proved" by accident.
+    /// </summary>
+    internal static bool RequiresNoOverflow(IMethodSymbol method)
     {
-        if (VerifiableSymbolHelpers.HasAttribute(method, VerifiableSymbolHelpers.CheckedArithmeticAttr))
-            return true;
-        for (var cur = method.ContainingType; cur is not null; cur = cur.ContainingType)
+        for (ISymbol? cur = method; cur is not null; cur = cur.ContainingType)
         {
-            if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.CheckedArithmeticAttr))
-                return true;
+            if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.CheckedArithmeticAttr)) return true;
+            if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.UncheckedArithmeticAttr)) return false;
         }
-        return method.ContainingAssembly is not null &&
-               VerifiableSymbolHelpers.HasAttribute(method.ContainingAssembly, VerifiableSymbolHelpers.CheckedArithmeticAttr);
+
+        if (method.ContainingAssembly is { } assembly)
+        {
+            if (VerifiableSymbolHelpers.HasAttribute(assembly, VerifiableSymbolHelpers.CheckedArithmeticAttr)) return true;
+            if (VerifiableSymbolHelpers.HasAttribute(assembly, VerifiableSymbolHelpers.UncheckedArithmeticAttr)) return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Whether one arithmetic operation must be proved not to overflow. In a C# <c>checked</c> context it always must,
+    /// because it throws. Inside an explicit <c>unchecked</c> expression or block it may wrap. Otherwise the scope's
+    /// rule (<see cref="RequiresNoOverflow"/>) applies.
+    /// </summary>
+    private bool MustNotOverflow(SyntaxNode syntax, bool isCheckedContext)
+    {
+        if (isCheckedContext) return true;
+        foreach (var ancestor in syntax.AncestorsAndSelf())
+        {
+            switch (ancestor)
+            {
+                case CheckedExpressionSyntax e:
+                    return e.IsKind(SyntaxKind.CheckedExpression);
+                case CheckedStatementSyntax st:
+                    return st.IsKind(SyntaxKind.CheckedStatement);
+                case MemberDeclarationSyntax or LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax:
+                    return _requireNoOverflow;
+            }
+        }
+
+        return _requireNoOverflow;
+    }
+
+    private readonly HashSet<string> _rangeAssumed = new(StringComparer.Ordinal);
+
+    private static bool IsNumeralTerm(string term) =>
+        System.Text.RegularExpressions.Regex.IsMatch(term, @"^(\d+|\(- \d+\))$");
+
+    /// <summary>
+    /// Assumes that an input of a C# integer type (a parameter, a loop variable, a field or property read, a call
+    /// result) holds a value of that type. Real values always do; without this, Z3 would pick values no C# integer
+    /// can have, and every overflow check would fail. (A string's <c>Length</c> is a property read, so it is covered too.)
+    /// Returns true when nothing else needs assuming about <paramref name="value"/>.
+    /// </summary>
+    private bool AssumeIntegralRange(SmtTypedTerm value, Location loc)
+    {
+        // Inside a quantifier the term can mention the bound variable, which a top-level assertion cannot.
+        if (_inQuantifierDepth > 0) return false;
+
+        if (value.Type.TypeKind == TypeKind.Enum || _types.GetSort(value.Type) != "Int" ||
+            !TryGetIntegralBounds(value.Type, out var min, out var max, out _, out _))
+        {
+            return false;
+        }
+
+        if (_rangeAssumed.Add(value.Term))
+        {
+            AddAssertion($"(and (>= {value.Term} {CalendarArithmetic.FormatBigInt(min)}) (<= {value.Term} {CalendarArithmetic.FormatBigInt(max)}))",
+                "TypeRange", $"{value.Type.Name} range", loc);
+        }
+        return true;
+    }
+
+    /// <summary>Whether the scope asks for bit-precise arithmetic: the nearest arithmetic attribute is <c>[CheckedArithmetic]</c>.</summary>
+    private static bool UsesBitVectors(IMethodSymbol method)
+    {
+        for (ISymbol? cur = method; cur is not null; cur = cur.ContainingType)
+        {
+            if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.CheckedArithmeticAttr)) return true;
+            if (VerifiableSymbolHelpers.HasAttribute(cur, VerifiableSymbolHelpers.UncheckedArithmeticAttr)) return false;
+        }
+
+        return method.ContainingAssembly is { } assembly &&
+            VerifiableSymbolHelpers.HasAttribute(assembly, VerifiableSymbolHelpers.CheckedArithmeticAttr) &&
+            !VerifiableSymbolHelpers.HasAttribute(assembly, VerifiableSymbolHelpers.UncheckedArithmeticAttr);
+    }
+
+    /// <summary>The value range of a C# integer type whose arithmetic can overflow (<c>int</c>, <c>uint</c>, <c>long</c>, <c>ulong</c>).</summary>
+    internal readonly record struct IntegralRange(string Min, string Max, string Modulus);
+
+    internal static bool TryGetIntegralRange(ITypeSymbol? type, out IntegralRange range)
+    {
+        range = type?.SpecialType switch
+        {
+            SpecialType.System_Int32 => new IntegralRange("(- 2147483648)", "2147483647", "4294967296"),
+            SpecialType.System_UInt32 => new IntegralRange("0", "4294967295", "4294967296"),
+            SpecialType.System_Int64 => new IntegralRange("(- 9223372036854775808)", "9223372036854775807", "18446744073709551616"),
+            SpecialType.System_UInt64 => new IntegralRange("0", "18446744073709551615", "18446744073709551616"),
+            _ => default,
+        };
+        return range.Modulus is not null;
+    }
+
+    private static string InRange(string term, IntegralRange range) => $"(and (<= {range.Min} {term}) (<= {term} {range.Max}))";
+
+    /// <summary>The C# value of <paramref name="exact"/> when it wraps around: reduced modulo 2^n into the type's range.</summary>
+    private static string WrapIntoRange(string exact, IntegralRange range) =>
+        $"(ite {InRange(exact, range)} {exact} (+ (mod (- {exact} {range.Min}) {range.Modulus}) {range.Min}))";
+
+    /// <summary>
+    /// The result of <paramref name="exact"/> must fit the type. Real operands always fit their type, so the check
+    /// may assume they do; that keeps it local and still rules out every overflow a real run could meet.
+    /// </summary>
+    private void EmitIntOverflowObligation(string what, string exact, IntegralRange range, string gamma, Location loc, params string[] operands)
+    {
+        var operandsInRange = string.Join(" ", operands.Select(o => InRange(o, range)));
+        var premise = operands.Length == 1 ? operandsInRange : $"(and {operandsInRange})";
+        EmitSafetyObligation("Overflow", $"Arithmetic overflow check ({what})", loc, gamma, $"(=> {premise} {InRange(exact, range)})");
     }
 
     private static HashSet<(BasicBlock Src, BasicBlock Dst)> FindBackEdges(ControlFlowGraph cfg)

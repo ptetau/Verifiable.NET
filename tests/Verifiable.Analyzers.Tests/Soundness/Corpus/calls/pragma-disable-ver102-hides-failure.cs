@@ -1,7 +1,6 @@
-// A #pragma hides the VER102 of a false postcondition. VER107 reports the pragma, but only as a warning.
+// A #pragma hides the VER102 of a false postcondition. VER107 reports the pragma, and it is an error by default.
 // @expect: rejected
 // @witness: Corpus.Calls.PragmaHidden.Next(3)
-// @known-bug: VER107 has default severity Warning (documented), so a #pragma disabling VER102 lets a false proof build; the corpus does not count a warning as a rejection.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

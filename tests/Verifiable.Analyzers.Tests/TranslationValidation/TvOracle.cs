@@ -119,6 +119,22 @@ internal static class TvOracle
     /// <summary>One pinned copy of the method to verify, with what the CLR did on its inputs.</summary>
     public sealed record Case(TvInput Input, TvOutcome Unchecked, TvOutcome Checked);
 
+    /// <summary>
+    /// Whether the analyzer's value for the method is compared with the CLR's. It is, unless overflow must not happen
+    /// (the default and <c>[CheckedArithmetic]</c>) and the CLR's checked run overflowed in the default mode: the
+    /// analyzer then rejects the method and its integer is exact rather than wrapped, so there is no value to compare.
+    /// Under <c>[CheckedArithmetic]</c> bit-vectors wrap, so the values still agree.
+    /// </summary>
+    private static bool CompareValue(TvProgram program, Case c) =>
+        c.Unchecked.Returned && !ExactIntegersDiverge(program, c);
+
+    /// <summary>
+    /// In the default mode an integer that overflowed stays exact in the analyzer's model, while the CLR's unchecked
+    /// run wrapped it. Past the first overflow the two differ, so only the Overflow refutation itself is compared.
+    /// </summary>
+    private static bool ExactIntegersDiverge(TvProgram program, Case c) =>
+        program.Arithmetic == TvArith.Default && c.Checked.Exception == "OverflowException";
+
     /// <summary>The verification source: one method per case, inputs pinned, result claimed and denied.</summary>
     public static string BuildVerificationSource(TvProgram program, IReadOnlyList<Case> cases)
     {
@@ -128,9 +144,13 @@ internal static class TvOracle
         sb.AppendLine("using Verifiable.Contracts;");
         sb.AppendLine("namespace TvCheck;");
         sb.AppendLine("[Verifiable]");
-        if (program.CheckedArithmetic)
+        if (program.Arithmetic == TvArith.Checked)
         {
             sb.AppendLine("[CheckedArithmetic]");
+        }
+        else if (program.Arithmetic == TvArith.Unchecked)
+        {
+            sb.AppendLine("[UncheckedArithmetic]");
         }
 
         sb.AppendLine("public static class V");
@@ -141,7 +161,7 @@ internal static class TvOracle
             sb.Append("    ").AppendLine(program.Signature($"M{i}"));
             sb.AppendLine("    {");
             sb.Append("        Spec.Requires(").Append(c.Input.RenderPin(program)).AppendLine(", \"pinned inputs\");");
-            if (c.Unchecked.Returned)
+            if (CompareValue(program, c))
             {
                 var lit = TvSyntax.Literal(c.Unchecked.Value!.Value, t);
                 sb.Append("        Spec.Ensures<").Append(TvSyntax.TypeName(t)).Append(">(r => r == ").Append(lit)
@@ -210,12 +230,17 @@ internal static class TvOracle
 
     /// <summary>
     /// The whole differential check for one program. Returns null when the analyzer and the CLR agree, else a
-    /// description of each disagreement. <paramref name="gaps"/> counts inputs that leave the analyzer's model on
-    /// purpose (an overflow without <c>[CheckedArithmetic]</c>, where the analyzer uses unbounded integers).
+    /// description of each disagreement.
     /// </summary>
-    public static string? Check(TvProgram program, IReadOnlyList<TvInput> inputs, out int gaps)
+    /// <remarks>
+    /// What counts as agreement depends on the arithmetic mode. Where overflow must not happen (the default and
+    /// <c>[CheckedArithmetic]</c>), the analyzer must refute an Overflow obligation exactly when the CLR's
+    /// <c>checked</c> run threw. Under <c>[UncheckedArithmetic]</c> integers wrap as in a default C# build, so the
+    /// values must agree even on overflowing inputs, and an Overflow obligation is refuted only where the CLR throws
+    /// even unchecked (<c>MinValue / -1</c>, <c>Math.Abs(MinValue)</c>).
+    /// </remarks>
+    public static string? Check(TvProgram program, IReadOnlyList<TvInput> inputs)
     {
-        gaps = 0;
         var runs = Execute(program, inputs);
         if (runs is null)
         {
@@ -226,12 +251,6 @@ internal static class TvOracle
         for (var i = 0; i < inputs.Count; i++)
         {
             var (u, c) = runs[i];
-            if (!program.CheckedArithmetic && c.Exception == "OverflowException")
-            {
-                gaps++;
-                continue;
-            }
-
             cases.Add(new Case(inputs[i], u, c));
         }
 
@@ -247,18 +266,20 @@ internal static class TvOracle
         {
             var c = cases[i];
             var mine = refutations.Where(r => r.Method == $"M{i}").ToList();
-            var expectDbz = c.Unchecked.Exception == "DivideByZeroException";
-            var expectOverflow = program.CheckedArithmetic && c.Checked.Exception == "OverflowException";
+            var diverge = ExactIntegersDiverge(program, c);
+            var expectDbz = c.Unchecked.Exception == "DivideByZeroException" && !diverge;
+            var overflowFails = program.Arithmetic != TvArith.Unchecked;
+            var expectOverflow = (overflowFails ? c.Checked : c.Unchecked).Exception == "OverflowException";
             var where = $"M{i} ({c.Input}; CLR unchecked {c.Unchecked}, checked {c.Checked})";
 
-            if (c.Unchecked.Returned)
+            if (CompareValue(program, c))
             {
                 if (mine.Any(r => r.Kind == "Postcondition" && r.Reason == PinnedResult))
                     errors.Add($"{where}: the analyzer refuted r == {c.Unchecked.Value}, which the CLR returned.");
                 if (!mine.Any(r => r.Kind == "Postcondition" && r.Reason == WrongResult))
                     errors.Add($"{where}: the analyzer did not refute r != {c.Unchecked.Value}, but the CLR returned it.");
             }
-            else if (c.Unchecked.Exception is not ("DivideByZeroException" or "OverflowException"))
+            else if (!diverge && c.Unchecked.Exception is not (null or "DivideByZeroException" or "OverflowException"))
             {
                 errors.Add($"{where}: unexpected exception.");
             }
@@ -268,14 +289,14 @@ internal static class TvOracle
             if (expectDbz && !dbz)
                 errors.Add($"{where}: the CLR divided by zero, but the analyzer did not refute a DivisionByZero obligation.");
             if (expectOverflow && !overflow)
-                errors.Add($"{where}: checked execution overflowed, but the analyzer did not refute an Overflow obligation.");
+                errors.Add($"{where}: {(overflowFails ? "checked" : "unchecked")} execution overflowed, but the analyzer did not refute an Overflow obligation.");
 
             // After a throw the rest of the method never runs, but the analyzer still checks it: it does not assume
             // that a refuted obligation held. So extra refutations are only wrong when the method returned.
-            if (c.Unchecked.Returned && dbz)
+            if (c.Unchecked.Returned && dbz && !diverge)
                 errors.Add($"{where}: the analyzer refuted a DivisionByZero obligation, but no divisor was zero.");
-            if (c.Unchecked.Returned && overflow && !expectOverflow)
-                errors.Add($"{where}: the analyzer refuted an Overflow obligation, but checked execution did not overflow.");
+            if ((overflowFails ? c.Checked : c.Unchecked).Returned && overflow)
+                errors.Add($"{where}: the analyzer refuted an Overflow obligation, but {(overflowFails ? "checked" : "unchecked")} execution did not overflow.");
 
             foreach (var other in mine.Where(r => r.Kind is not ("Postcondition" or "DivisionByZero" or "Overflow")))
                 errors.Add($"{where}: unexpected refuted {other.Kind} obligation.");

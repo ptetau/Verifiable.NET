@@ -247,7 +247,7 @@ public class RequiresPlacementTests
             {
                 public static void Check(int x) => Spec.Requires(x >= 0, "Checks are only for non-negative inputs.");
 
-                public static int Twice(int x) => x * 2;
+                public static int Twice(int x) => unchecked(x * 2);
 
                 public static int UseCheck()
                 {

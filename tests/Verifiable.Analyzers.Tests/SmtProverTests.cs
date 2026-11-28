@@ -74,7 +74,7 @@ public class SmtProverTests
             {
                 public static int AddFive(int x)
                 {
-                    Spec.Requires(x >= 0);
+                    Spec.Requires(x >= 0 && x <= 1000);
                     Spec.Ensures<int>(result => result >= 10);
                     return x + 5;
                 }
@@ -233,7 +233,7 @@ public class SmtProverTests
             {
                 public static Board AddItem(Board board, int weight)
                 {
-                    Spec.Requires(weight >= 1 && !board.Items.ContainsKey(board.NextId));
+                    Spec.Requires(weight >= 1 && board.ActiveCount <= 1000 && !board.Items.ContainsKey(board.NextId));
                     Spec.Ensures<Board>(result =>
                         result.NextId == board.NextId + 1
                         && result.ActiveCount == board.ActiveCount + 1
@@ -269,14 +269,14 @@ public class SmtProverTests
             {
                 public static int SumUpTwice(int n)
                 {
-                    Spec.Requires(n >= 0);
+                    Spec.Requires(n >= 0 && n <= 1000);
                     Spec.Ensures<int>(result => result >= 0);
 
                     int i = 0;
                     int acc = 0;
                     while (i < n)
                     {
-                        Spec.LoopInvariant(i >= 0 && i <= n && acc >= 0);
+                        Spec.LoopInvariant(i >= 0 && i <= n && acc >= 0 && acc <= 1000 * i);
                         Spec.Decreases(n - i);
                         acc = acc + i;
                         i = i + 1;
@@ -285,7 +285,7 @@ public class SmtProverTests
                     int j = 0;
                     while (j < n)
                     {
-                        Spec.LoopInvariant(j >= 0 && j <= n && acc >= 0);
+                        Spec.LoopInvariant(j >= 0 && j <= n && acc >= 0 && acc <= 1000000 + 1000 * j);
                         Spec.Decreases(n - j);
                         acc = acc + j;
                         j = j + 1;
@@ -363,7 +363,7 @@ public class SmtProverTests
             {
                 public static int Inc(int a)
                 {
-                    Spec.Requires(a >= 1);
+                    Spec.Requires(a >= 1 && a <= 1000);
                     Spec.Ensures<int>(result => result > 10);
                     return a + 1;
                 }
@@ -497,6 +497,7 @@ public class SmtProverTests
             {
                 public static Account Credit(Account acc, PositiveMoney deposit)
                 {
+                    Spec.Requires(acc.Version <= 1000 && acc.TxCount <= 1000);
                     Spec.Ensures<Account>(result => result.Version == acc.Version + 1 && result.Total > acc.Total);
                     var nextVer = PositiveCount.From(acc.Version + 1);
                     var nextTx = NonNegCount.From(acc.TxCount + 1);
