@@ -1,7 +1,6 @@
 // Wrong: CommitAsync is started but its Task is dropped, so the commit may never finish (here it never does).
 // @expect: rejected
 // @no-witness: the dropped Task never completes, but nothing in the program observes that
-// @known-bug: passing a token to an async [ConsumesObligation] method counts as consumed even when the returned Task is discarded and never completes
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

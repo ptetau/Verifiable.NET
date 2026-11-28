@@ -1,7 +1,6 @@
 // Wrong: the token is moved into a tuple, only the int half is used, and the token is never consumed.
 // @expect: rejected
 // @no-witness: a leaked token has no runtime effect
-// @known-bug: a token created inside a tuple literal and stored in a tuple-typed local is never tracked, so its leak is missed
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

@@ -1,7 +1,6 @@
 // Wrong: the token is committed in the try block and again in the finally block, which always runs.
 // @expect: rejected
 // @witness: Corpus.Linear.FinallyAgain.Run()
-// @known-bug: finally regions are never reached by the worklist (GetSuccessors follows only fall-through and conditional edges), so a second commit in finally is not checked
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

@@ -1,6 +1,5 @@
 // Right: Make hands its new token to the caller through an out parameter, and the caller commits it once.
 // @expect: proved
-// @known-bug: an out parameter starts as a live token, so assigning it is an overwrite leak and returning leaks it, and the caller's `out var p` is untracked (consumed before initialized)
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;

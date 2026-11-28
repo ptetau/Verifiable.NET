@@ -1,6 +1,5 @@
 // Right: the local function commits the captured token, and it is called exactly once.
 // @expect: proved
-// @known-bug: a token captured by a local function is untracked inside it (consumed before initialized) and calling the function does not consume it in the caller
 using System;
 using System.Collections.Generic;
 using Verifiable.Contracts;
