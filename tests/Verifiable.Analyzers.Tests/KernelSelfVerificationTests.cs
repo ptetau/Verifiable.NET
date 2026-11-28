@@ -73,9 +73,10 @@ public class KernelSelfVerificationTests
     }
 
     /// <summary>
-    /// The analyzer that proves the kernel is compiled from the kernel. A kernel bug that made every query
-    /// unsat would therefore also approve itself. These canaries use the analyzer as built and require it
-    /// to reject contracts that are plainly false, so a blinded prover cannot pass the test suite.
+    /// The analyzer used here, and the one that ships, is compiled from the live kernel. A kernel bug that
+    /// made every query unsat would blind it. (Verifiable.Core itself is proved by the bootstrap analyzer;
+    /// see BootstrapKernelTests.) These canaries use the analyzer as built and require it to reject
+    /// contracts that are plainly false, so a blinded prover cannot pass the test suite.
     /// </summary>
     [Theory]
     [InlineData("public static int F(int x) { Spec.Ensures<int>(r => r > x, \"grows\"); return x; }")]

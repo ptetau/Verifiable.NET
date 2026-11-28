@@ -70,8 +70,37 @@ jobs:
       - name: Test (GalaxyCheck + Roslyn + SQLite Fault Injection)
         run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
 
+  verify-macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8, 9, 10 & 11
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+            11.0.x
+
+      - name: Install Z3 (macOS)
+        run: bash scripts/install-z3.sh
+
+      - name: Restore
+        run: dotnet restore Verifiable.NET.sln
+
+      - name: Build (Release + Z3 SMT Verification)
+        run: dotnet build Verifiable.NET.sln -c Release --no-restore -m:1
+
+      - name: Test (GalaxyCheck + Roslyn + SQLite Fault Injection)
+        run: dotnet test Verifiable.NET.sln -c Release --no-build --verbosity normal
+
   pack:
-    needs: [verify-linux, verify-windows]
+    needs: [verify-linux, verify-windows, verify-macos]
     runs-on: ubuntu-latest
     container:
       image: mcr.microsoft.com/dotnet/sdk:11.0

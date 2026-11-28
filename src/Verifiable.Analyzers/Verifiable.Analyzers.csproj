@@ -35,6 +35,8 @@
     Verifiable.Core proves with Z3, so what ships is exactly what was proved. Proof-only lemmas and the
     assembly-level [Verifiable] marker stay in Verifiable.Core. The kernel's Spec.* calls bind to
     KernelShim and are stripped from IL, as they are in user code.
+    Verifiable.Analyzers.Bootstrap builds these analyzer sources with a frozen copy of the kernel, and that
+    is what proves Verifiable.Core. Keep its package references and Using items in step with this file.
   -->
   <ItemGroup>
     <Compile Include="..\Verifiable.Core\**\*.cs"
