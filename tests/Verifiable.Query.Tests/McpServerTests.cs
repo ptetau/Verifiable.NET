@@ -98,7 +98,7 @@ public sealed class McpServerTests
         var fileJson = JsonSerializer.Serialize(file);
         var cases = new[]
         {
-            (Tool: "check", Args: $"{{\"file\":[{fileJson}]}}", Cli: new[] { "check", "--file", file, "--format", "json" }),
+            ("check", $"{{\"file\":[{fileJson}]}}", new[] { "check", "--file", file, "--format", "json" }),
             ("one-answer", $"{{\"file\":[{fileJson}],\"target\":\"Rates.Weak\"}}", new[] { "one-answer", "--file", file, "--target", "Rates.Weak", "--format", "json" }),
             ("list", $"{{\"file\":[{fileJson}],\"limit\":1}}", new[] { "list", "--file", file, "--limit", "1", "--format", "json" }),
             ("explain", "{\"rules\":[\"VER102\"]}", new[] { "explain", "VER102", "--format", "json" }),

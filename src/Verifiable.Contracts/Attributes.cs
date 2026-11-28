@@ -263,3 +263,13 @@ public sealed class MigrationAttribute : Attribute
     /// </summary>
     public string? Clause { get; set; }
 }
+
+/// <summary>
+/// Declares the effects a domain can ask the outer shell to perform (requirement R10), as the methods of
+/// a partial interface: <c>[Effects] public partial interface IBookingEffects { void SendConfirmation(string email); }</c>.
+/// A generator turns it into a closed union of effect values (<c>BookingEffect.SendConfirmation</c>) that
+/// pure code returns, and a <c>Handle</c> dispatcher. The shell implements the interface, so an unhandled
+/// effect is a compile error.
+/// </summary>
+[AttributeUsage(AttributeTargets.Interface, AllowMultiple = false, Inherited = false)]
+public sealed class EffectsAttribute : Attribute;

@@ -262,6 +262,40 @@ verifiable-query check --project App.csproj --target "LedgerEngine,LedgerState" 
 - `--timeout <ms>` sets the per-obligation solver timeout (default 2500). A timeout is `VER103`, status `undecided` (exit `2`), and the diagnostic names the `symbol`, the `obligation` kind (`Postcondition`, `Overflow`, `LoopInvariantStep`, ...), the `contract` and its `line`, so the agent can split that one step or add a helper.
 - Measured on `samples/AccountingApp` (4 cores): one method is 71 proof queries against 398 for the project. Warm, it takes about 0.7 s in-process and about 3.3 s as a fresh process, most of which is .NET and compiler start-up. The time target is open question 7.
 
+### Effects for the outer shell (`[Effects]`)
+
+"The system sends ..." sentences need a pattern that keeps the domain pure (requirement R10). Declare the effects once:
+
+```csharp
+[Effects]
+public partial interface IBookingEffects
+{
+    void SendConfirmation(string email, int bookingId);
+    void ChargeCard(int bookingId, decimal amount);
+}
+```
+
+- The generator emits a closed union `BookingEffect` (one sealed record per effect, e.g. `BookingEffect.ChargeCard(BookingId, Amount)`), factories `BookingEffects.ChargeCard(...)` for verified code to call (the prover does not lower constructors of derived records, so use the factories rather than `new`), and `BookingEffectDispatch.Handle` / `HandleAll` for the shell.
+- Pure code returns effects as values, e.g. `ImmutableList<BookingEffect>`. The shell implements `IBookingEffects`, so a missing handler — including for a newly added effect — is a compile error (`CS0535`).
+- Effects must be `void`, non-generic, without `ref`/`out`, with distinct names, on a non-nested partial interface; otherwise `VER208`.
+
+### Model-versus-database tests (`DomainModel`)
+
+The repository code is not proved; it is trusted because random command sequences run against both the pure model and the database, with crashes and duplicates injected (requirement R11). `Verifiable.Testing.DomainModel<TDb, TState>` does this for any domain:
+
+```csharp
+new DomainModel<TodoSqliteSystem, TodoBoard>()
+    .Command("Add",
+        _ => from title in VerifiableGen.NonEmptyString(40) from cmd in VerifiableGen.NonEmptyGuid() select (title, cmd),
+        (board, a) => TodoEngine.Add(board, TodoTitle.From(a.title), now).Board,        // the pure model
+        (db, a) => PrepareCommit(db, a))                                                // returns the commit to run
+    .Command("Delete", board => board.Items.IsEmpty ? null : /* args from the state */, ..., ...)
+    .Property(() => new TodoSqliteSystem(), TodoBoard.CreateEmpty(), db => db.LoadBoard(), db => db.Harness, SameBoard);
+```
+
+- Each command gives an argument generator for the current state (or `null` when it does not apply), the pure transition, and the commit. GalaxyCheck builds the sequences; each commit runs under a generated fault (none, duplicate delivery, crash before commit, crash after commit), and after every step the database read back must equal the model. A crash before commit must change nothing; the others must leave exactly one effect.
+- `tests/Verifiable.Samples.Tests/DomainModelTests.cs` runs the TodoApp this way, and checks that a model that forgets deletes is caught.
+
 ### MCP server (`mcp`)
 
 Some agent hosts call tools more reliably than shell commands (requirement R17). `verifiable-query mcp` serves every command except `build` as a Model Context Protocol tool over stdio (newline-delimited JSON-RPC 2.0, protocol `2025-06-18`):

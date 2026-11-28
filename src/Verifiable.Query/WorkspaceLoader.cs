@@ -161,7 +161,8 @@ internal static class WorkspaceLoader
                 new InboundPortGenerator().AsSourceGenerator(),
                 new MapToGenerator().AsSourceGenerator(),
                 new ContractMetadataGenerator().AsSourceGenerator(),
-                new DatedRulesGenerator().AsSourceGenerator()
+                new DatedRulesGenerator().AsSourceGenerator(),
+                new EffectsGenerator().AsSourceGenerator()
             ],
             additionalTexts: ValueTables(projectOrDirPath, explicitFiles),
             parseOptions: DefaultParseOptions);

@@ -156,6 +156,10 @@ internal static class RuleCatalog
             "Versions of a dated rule must be interchangeable, and only one may start on a given day.",
             "Give each version a distinct date and the same signature, set `Rule = \"Name\"`, and put them in a static partial class.",
             null, null),
+        ["VER208"] = new(
+            "Effects are requests the domain hands to the shell. Each needs a name of its own and plain inputs, and the domain must not wait on a result, or it would be doing I/O itself.",
+            "Declare the effects as void, non-generic methods with distinct names on a non-nested partial interface marked [Effects].",
+            null, null),
         ["VER301"] = new(
             "One long contract is hard to read and gives one vague failure. Separate clauses fail separately and say which part broke.",
             "Split the conjunction into several Spec calls (the code fix does this).",
