@@ -191,6 +191,7 @@ public class CrossAssemblyContractTests
             {
                 public static decimal NonNegativeSpan(MoneyRange range, PositiveQty qty)
                 {
+                    Spec.Requires(range.Min > -1000000m && range.Max < 1000000m, "Bounded, so the span cannot overflow decimal.");
                     Spec.Ensures<decimal>(r => r >= 0m && qty >= 1);
                     return range.Span;
                 }
@@ -202,8 +203,11 @@ public class CrossAssemblyContractTests
                     return amount >= range.Min && amount <= range.Max;
                 }
 
-                public static MoneyRange Widen(MoneyRange range) =>
-                    new MoneyRange(range.Min - 1m, range.Max + 1m);
+                public static MoneyRange Widen(MoneyRange range)
+                {
+                    Spec.Requires(range.Min > -1000000m && range.Max < 1000000m, "Bounded, so widening cannot overflow decimal.");
+                    return new MoneyRange(range.Min - 1m, range.Max + 1m);
+                }
             }
             """;
 

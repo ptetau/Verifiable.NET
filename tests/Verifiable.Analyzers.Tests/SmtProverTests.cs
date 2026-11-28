@@ -483,7 +483,7 @@ public class SmtProverTests
             public readonly partial record struct NonNegCount { public static bool IsValid(int v) => v >= 0; }
 
             [TypeAlias<decimal>]
-            public readonly partial record struct PositiveMoney { public static bool IsValid(decimal v) => v > 0m; }
+            public readonly partial record struct PositiveMoney { public static bool IsValid(decimal v) => v > 0m && v <= 1000000m; }
 
             [Verifiable]
             public readonly record struct Account(PositiveCount Version, NonNegCount TxCount, decimal Total)
@@ -497,7 +497,7 @@ public class SmtProverTests
             {
                 public static Account Credit(Account acc, PositiveMoney deposit)
                 {
-                    Spec.Requires(acc.Version <= 1000 && acc.TxCount <= 1000);
+                    Spec.Requires(acc.Version <= 1000 && acc.TxCount <= 1000 && acc.Total <= 1000000m);
                     Spec.Ensures<Account>(result => result.Version == acc.Version + 1 && result.Total > acc.Total);
                     var nextVer = PositiveCount.From(acc.Version + 1);
                     var nextTx = NonNegCount.From(acc.TxCount + 1);
@@ -561,7 +561,7 @@ public class SmtProverTests
             {
                 public static decimal Withdraw(decimal balance, decimal amount)
                 {
-                    Spec.Requires(amount > 0m, "Withdrawal amounts must be positive.");
+                    Spec.Requires(amount > 0m && amount <= 1000m && balance >= -1000m && balance <= 1000m, "Withdrawal amounts must be positive; values are bounded so decimal cannot overflow.");
                     Spec.Ensures<decimal>(result => result >= 0m, "Vault accounts do not allow overdrafts.");
                     return balance - amount;
                 }

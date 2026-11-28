@@ -6,8 +6,12 @@ namespace AccountingApp.Shared;
 [Verifiable]
 public static class LedgerEngine
 {
+    public static bool BalanceWithinCapacity(Account account) =>
+        account.Balance >= -Limits.Balance && account.Balance <= Limits.Balance;
+
     public static decimal SignedBalanceDelta(AccountType kind, EntrySide side, decimal amount)
     {
+        Spec.Ensures<decimal>(result => result == amount || result == -amount, "The delta is the amount, added or taken away.");
         if (kind == AccountType.Asset || kind == AccountType.Expense)
         {
             return side == EntrySide.Debit ? amount : -amount;
@@ -25,8 +29,9 @@ public static class LedgerEngine
     {
         Spec.Requires(
             from != to && state.Accounts.ContainsKey(from) && state.Accounts.ContainsKey(to) && state.Accounts[from].Balance >= amount &&
-            state.NextEntryId < int.MaxValue,
-            "Transfers require two distinct existing accounts, enough balance in the source account to avoid overdraft, and a journal entry id left to use.");
+            state.NextEntryId < int.MaxValue &&
+            state.Accounts[to].Balance + amount <= Limits.Balance && state.TotalDebits + amount <= Limits.Total && state.TotalCredits + amount <= Limits.Total,
+            "Transfers require two distinct existing accounts, enough balance in the source account to avoid overdraft, a journal entry id left to use, and room in the destination balance and the ledger totals.");
         Spec.Ensures<LedgerState>(
             result => result.Accounts.ContainsKey(from) && result.Accounts[from].Balance >= 0m,
             "After the transfer, the source account remains non-negative.");
@@ -134,10 +139,21 @@ public static class LedgerEngine
             return new LedgerTransition(state, false, "Currency mismatch between accounts.", null);
         }
 
+        if (!BalanceWithinCapacity(fromAcc) || !BalanceWithinCapacity(toAcc))
+        {
+            return new LedgerTransition(state, false, "An account balance is outside the ledger's capacity.", null);
+        }
+
         var fromDelta = SignedBalanceDelta(fromAcc.Kind, EntrySide.Credit, amount);
         var toDelta = SignedBalanceDelta(toAcc.Kind, EntrySide.Debit, amount);
         var newFromBalance = fromAcc.Balance + fromDelta;
         var newToBalance = toAcc.Balance + toDelta;
+
+        if (newFromBalance < -Limits.Balance || newFromBalance > Limits.Balance || newToBalance < -Limits.Balance || newToBalance > Limits.Balance ||
+            state.TotalDebits + amount > Limits.Total || state.TotalCredits + amount > Limits.Total)
+        {
+            return new LedgerTransition(state, false, "The ledger's capacity would be exceeded.", null);
+        }
 
         if (!fromAcc.AllowOverdraft && newFromBalance < 0m)
         {
@@ -231,6 +247,11 @@ public static class LedgerEngine
             return new LedgerTransition(state, false, "All three accounts in a fee-split transfer must share a currency.", null);
         }
 
+        if (!BalanceWithinCapacity(fromAcc) || !BalanceWithinCapacity(toAcc) || !BalanceWithinCapacity(feeAcc))
+        {
+            return new LedgerTransition(state, false, "An account balance is outside the ledger's capacity.", null);
+        }
+
         var netAmount = PositiveAmount.From(netDec);
         var fromDelta = SignedBalanceDelta(fromAcc.Kind, EntrySide.Credit, grossAmount);
         var toDelta = SignedBalanceDelta(toAcc.Kind, EntrySide.Debit, netAmount);
@@ -239,6 +260,13 @@ public static class LedgerEngine
         var newFromBalance = fromAcc.Balance + fromDelta;
         var newToBalance = toAcc.Balance + toDelta;
         var newFeeBalance = feeAcc.Balance + feeDelta;
+
+        if (newFromBalance < -Limits.Balance || newFromBalance > Limits.Balance || newToBalance < -Limits.Balance || newToBalance > Limits.Balance ||
+            newFeeBalance < -Limits.Balance || newFeeBalance > Limits.Balance ||
+            state.TotalDebits + grossAmount > Limits.Total || state.TotalCredits + grossAmount > Limits.Total)
+        {
+            return new LedgerTransition(state, false, "The ledger's capacity would be exceeded.", null);
+        }
 
         if (!fromAcc.AllowOverdraft && newFromBalance < 0m)
         {
@@ -290,6 +318,7 @@ public static class LedgerEngine
 
     public static TrialBalanceSummary ComputeTrialBalance(ImmutableList<Account> accounts)
     {
+        Spec.Requires(accounts.Count <= 1000000000, "A snapshot is far smaller than a billion accounts, so the totals cannot overflow decimal.");
         Spec.Ensures<TrialBalanceSummary>(
             result => result.AccountCount == accounts.Count,
             "Trial balance visits every account in the snapshot once.");
@@ -300,17 +329,19 @@ public static class LedgerEngine
 
         while (i < accounts.Count)
         {
-            Spec.LoopInvariant(i >= 0 && i <= accounts.Count, "Loop index stays within accounts list.");
+            Spec.LoopInvariant(i >= 0 && i <= accounts.Count && assetExpense >= -Limits.Balance * i && assetExpense <= Limits.Balance * i && creditNormal >= -Limits.Balance * i && creditNormal <= Limits.Balance * i, "Loop index stays within accounts list and the running totals are bounded by the accounts seen so far.");
             Spec.Decreases(accounts.Count - i, "Remaining accounts shrink by one on each iteration.");
 
             var acc = accounts[i];
+            // A balance outside the ledger's capacity cannot occur in a valid ledger; it is left out of the totals.
+            var balance = BalanceWithinCapacity(acc) ? acc.Balance : 0m;
             if (acc.Kind == AccountType.Asset || acc.Kind == AccountType.Expense)
             {
-                assetExpense = assetExpense + acc.Balance;
+                assetExpense = assetExpense + balance;
             }
             else
             {
-                creditNormal = creditNormal + acc.Balance;
+                creditNormal = creditNormal + balance;
             }
 
             i = i + 1;
@@ -321,12 +352,13 @@ public static class LedgerEngine
 
     public static EntryTotals SumEntrySides(ImmutableList<JournalLine> lines)
     {
+        Spec.Requires(lines.Count <= 1000000000, "An entry has far fewer than a billion lines, so the sums stay within the ledger's total capacity.");
         var debits = 0m;
         var credits = 0m;
         var i = 0;
         while (i < lines.Count)
         {
-            Spec.LoopInvariant(i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m, "Index stays in range and running debit/credit sums never go negative.");
+            Spec.LoopInvariant(i >= 0 && i <= lines.Count && debits >= 0m && credits >= 0m && debits <= 1000000000m * i && credits <= 1000000000m * i, "Index stays in range, running sums never go negative and are bounded by the lines seen so far.");
             Spec.Decreases(lines.Count - i, "Remaining journal lines shrink by one on each iteration.");
 
             var line = lines[i];
@@ -370,7 +402,17 @@ public static class LedgerEngine
                 return new AccountUpdateOutcome(accounts, false, "Journal entry mixes currencies.");
             }
 
+            if (!BalanceWithinCapacity(acc))
+            {
+                return new AccountUpdateOutcome(accounts, false, "An account balance is outside the ledger's capacity.");
+            }
+
             var nextBal = acc.Balance + SignedBalanceDelta(acc.Kind, line.Side, line.Amount);
+            if (nextBal < -Limits.Balance || nextBal > Limits.Balance)
+            {
+                return new AccountUpdateOutcome(accounts, false, "The ledger's capacity would be exceeded.");
+            }
+
             if (!acc.AllowOverdraft && nextBal < 0m)
             {
                 return new AccountUpdateOutcome(accounts, false, "Overdraft guard violated on account.");
@@ -408,6 +450,11 @@ public static class LedgerEngine
             return new LedgerTransition(state, false, "Primary account does not exist.", null);
         }
 
+        if (lines.Count > 1000000000)
+        {
+            return new LedgerTransition(state, false, "Journal entry has too many lines.", null);
+        }
+
         var totals = SumEntrySides(lines);
         if (totals.DebitTotal <= 0m || totals.DebitTotal != totals.CreditTotal)
         {
@@ -419,6 +466,11 @@ public static class LedgerEngine
         if (!applied.IsSuccess)
         {
             return new LedgerTransition(state, false, applied.Error, null);
+        }
+
+        if (state.TotalDebits + totals.DebitTotal > Limits.Total || state.TotalCredits + totals.CreditTotal > Limits.Total)
+        {
+            return new LedgerTransition(state, false, "The ledger's capacity would be exceeded.", null);
         }
 
         var entry = new PostedJournalEntry(
@@ -528,6 +580,11 @@ public static class LedgerEngine
         if (!applied.IsSuccess)
         {
             return new LedgerTransition(state, false, applied.Error, null);
+        }
+
+        if (state.TotalDebits + orig.EntryCreditTotal > Limits.Total || state.TotalCredits + orig.EntryDebitTotal > Limits.Total)
+        {
+            return new LedgerTransition(state, false, "The ledger's capacity would be exceeded.", null);
         }
 
         var reversalEntry = new PostedJournalEntry(

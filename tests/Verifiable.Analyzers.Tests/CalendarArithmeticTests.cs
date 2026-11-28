@@ -24,7 +24,7 @@ public class CalendarArithmeticTests
 
                 public static bool SumPreservesTwoDecimalPlaces(decimal a, decimal b)
                 {
-                    Spec.Requires(HasTwoDecimalPlaces(a) && HasTwoDecimalPlaces(b));
+                    Spec.Requires(HasTwoDecimalPlaces(a) && HasTwoDecimalPlaces(b) && a >= -1000000m && a <= 1000000m && b >= -1000000m && b <= 1000000m);
                     Spec.Ensures<bool>(r => r);
                     return HasTwoDecimalPlaces(a + b);
                 }
