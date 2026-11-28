@@ -14,7 +14,7 @@ namespace Verifiable.Analyzers.Tests;
 /// src/Verifiable.Core and then break the kernel on purpose, one rule at a time, to show each proof
 /// actually rejects the bug it exists to catch.
 /// </summary>
-public class KernelSelfVerificationTests
+public partial class KernelSelfVerificationTests
 {
     private static readonly string KernelDirectory = Path.Combine(FindRepoRoot(), "src", "Verifiable.Core");
 
