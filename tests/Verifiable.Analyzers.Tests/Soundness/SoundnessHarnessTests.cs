@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using Xunit;
 
@@ -195,6 +196,122 @@ public class SoundnessHarnessTests
 
         Assert.Empty(failures);
         Assert.IsType<RunOutcome.Held>(outcomes.Single());
+    }
+
+    [Fact]
+    public void Decreases_IsCheckedEvenWhenTheInvariantComesFirst()
+    {
+        var (failures, _, _) = CorpusRunner.RunWithoutAnalyzer(Header + """
+                public static int Stuck(int n)
+                {
+                    Spec.Requires(n >= 1 && n <= 50);
+                    Spec.Ensures<int>(r => r >= 0);
+                    var i = 0;
+                    while (i < n)
+                    {
+                        Spec.LoopInvariant(i >= 0, "counts up");
+                        Spec.Decreases(n, "n is fixed, so this never goes down");
+                        i++;
+                    }
+                    return i;
+                }
+            }
+            """);
+
+        Assert.Contains(failures, f => f.Contains("instead of going down"));
+    }
+
+    [Fact]
+    public void Decreases_InANestedLoop_StartsAfreshOnEachOuterIteration()
+    {
+        var (failures, notes, _) = CorpusRunner.RunWithoutAnalyzer(Header + """
+                public static int Grid(int n)
+                {
+                    Spec.Requires(n >= 0 && n <= 10);
+                    Spec.Ensures<int>(r => r == n * n);
+                    var total = 0;
+                    for (var i = 0; i < n; i++)
+                    {
+                        Spec.LoopInvariant(total == i * n, "rows so far");
+                        var j = 0;
+                        while (j < n)
+                        {
+                            Spec.LoopInvariant(j <= n, "inner bound");
+                            Spec.Decreases(n - j, "inner count goes down");
+                            total++;
+                            j++;
+                        }
+                    }
+                    return total;
+                }
+            }
+            """);
+
+        Assert.Empty(failures);
+        Assert.Contains(notes, n => n.Contains("runs held"));
+    }
+
+    [Fact]
+    public void RunawayRecursion_IsReported_InsteadOfCrashingTheRun()
+    {
+        var (failures, _, outcomes) = CorpusRunner.RunWithoutAnalyzer(Header + """
+                public static int Spin(int x)
+                {
+                    Spec.Ensures<int>(r => r > x);
+                    return Spin(x);
+                }
+            }
+            """, "H.P.Spin(1)");
+
+        Assert.Contains("recursed more than", Assert.IsType<RunOutcome.Broken>(outcomes.Single()).Reason);
+        Assert.Contains(failures, f => f.Contains("recursed more than"));
+    }
+
+    [Fact]
+    public void Postconditions_SeeParameterValuesOnEntry()
+    {
+        var (failures, _, _) = CorpusRunner.RunWithoutAnalyzer(Header + """
+                public static int CountDown(int x)
+                {
+                    Spec.Requires(x >= 0 && x <= 100);
+                    Spec.Ensures<int>(r => r == x, "returns the input");
+                    var r0 = x;
+                    while (x > 0)
+                    {
+                        Spec.Decreases(x);
+                        x--;
+                    }
+                    return r0;
+                }
+            }
+            """);
+
+        Assert.Empty(failures);
+    }
+
+    [Fact]
+    public void RunsThroughARejectedCallee_AreSetAside()
+    {
+        const string source = Header + """
+                public static int Wrong(int x)
+                {
+                    Spec.Ensures<int>(r => r > x, "grows");
+                    return x;
+                }
+
+                public static int Caller(int x)
+                {
+                    Spec.Ensures<int>(r => r > x, "relies on Wrong");
+                    return Wrong(x);
+                }
+            }
+            """;
+
+        var (failures, _, _) = CorpusRunner.RunWithoutAnalyzer(source, new HashSet<string> { "P.Wrong(int)" });
+        Assert.Empty(failures);
+
+        var (unflagged, _, _) = CorpusRunner.RunWithoutAnalyzer(source);
+        Assert.Equal(2, unflagged.Count);
     }
 
     [Fact]

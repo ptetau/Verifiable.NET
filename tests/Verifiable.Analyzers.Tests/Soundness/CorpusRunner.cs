@@ -129,7 +129,12 @@ internal static class CorpusRunner
     /// Runs only the runtime half: every method in a <c>[Verifiable]</c> scope is treated as accepted and run on
     /// random inputs. Used to test the harness itself.
     /// </summary>
-    internal static (List<string> Failures, List<string> Notes, List<RunOutcome> Witnesses) RunWithoutAnalyzer(string source, params string[] witnesses)
+    internal static (List<string> Failures, List<string> Notes, List<RunOutcome> Witnesses) RunWithoutAnalyzer(string source, params string[] witnesses) =>
+        RunWithoutAnalyzer(source, new HashSet<string>(), witnesses);
+
+    /// <inheritdoc cref="RunWithoutAnalyzer(string, string[])"/>
+    /// <param name="rejectedMethods">Method keys to treat as rejected by the analyzer.</param>
+    internal static (List<string> Failures, List<string> Notes, List<RunOutcome> Witnesses) RunWithoutAnalyzer(string source, HashSet<string> rejectedMethods, params string[] witnesses)
     {
         var runtime = RuntimeBuild.Create(source, witnesses, out var errors)
             ?? throw new System.InvalidOperationException(string.Join("\n", errors));
@@ -138,7 +143,7 @@ internal static class CorpusRunner
             var failures = new List<string>();
             var notes = new List<string>();
             var outcomes = Enumerable.Range(0, witnesses.Length).Select(runtime.RunWitness).ToList();
-            runtime.CrossCheck(new HashSet<string>(), failures, notes);
+            runtime.CrossCheck(rejectedMethods, failures, notes);
             return (failures, notes, outcomes);
         }
         finally
@@ -354,7 +359,17 @@ internal static class CorpusRunner
                         foreach (var input in inputs)
                         {
                             if (clock.Elapsed > CrossCheckBudget) break;
-                            switch (Invoke(method, input))
+                            var outcome = Invoke(method, input);
+
+                            // A run through a method the analyzer already rejected may fail because of that method,
+                            // as the analyzer checks each method against its callees' contracts, not their code.
+                            if (RuntimeSpec.Entered.Any(flagged.Contains))
+                            {
+                                discarded++;
+                                continue;
+                            }
+
+                            switch (outcome)
                             {
                                 case RunOutcome.Broken b:
                                     return ($"{key} was accepted, but {Describe(symbol, input)} {b.Reason}", held, discarded);
@@ -378,7 +393,7 @@ internal static class CorpusRunner
                 }
                 else
                 {
-                    notes.Add($"{key}: {result.Held} runs held, {result.Discarded} inputs failed the preconditions.");
+                    notes.Add($"{key}: {result.Held} runs held, {result.Discarded} set aside (preconditions not met, or the run went through a rejected method).");
                 }
             }
         }
@@ -491,16 +506,43 @@ internal static class CorpusRunner
 
     /// <summary>
     /// Turns <c>Spec.*</c> contract calls into <see cref="RuntimeSpec"/> calls, and opens a <see cref="RuntimeSpec"/>
-    /// frame at the start of each method that has contracts.
+    /// frame at the start of every method body.
     /// </summary>
     private sealed class ContractRewriter : CSharpSyntaxRewriter
     {
+        private const string EntryPrefix = "__entry_";
+
         public override SyntaxNode? VisitInvocationExpression(InvocationExpressionSyntax node)
         {
             var visited = (InvocationExpressionSyntax)base.VisitInvocationExpression(node)!;
-            if (!IsContractCall(node, out _)) return visited;
+            if (!IsContractCall(node, out var name)) return visited;
             var access = (MemberAccessExpressionSyntax)visited.Expression;
-            return visited.WithExpression(access.WithExpression(ParseExpression(RuntimeSpecType)));
+            visited = visited.WithExpression(access.WithExpression(ParseExpression(RuntimeSpecType)));
+
+            if (name is "LoopInvariant" or "Decreases")
+            {
+                // Tell the runtime which loop this is, so loops nested inside it can start afresh.
+                var loop = node.Ancestors().FirstOrDefault(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax);
+                var (start, end) = loop is null ? (-1, -1) : (loop.SpanStart, loop.Span.End);
+                visited = visited.AddArgumentListArguments(
+                    Argument(NameColon("loopStart"), default, LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(start))),
+                    Argument(NameColon("loopEnd"), default, LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(end))));
+            }
+            else if (name is "Ensures" or "EnsuresWhen")
+            {
+                // A postcondition talks about the parameters' values on entry, so it reads the copies made then.
+                var parameters = EnclosingParameters(node);
+                if (parameters.Count > 0)
+                {
+                    var args = visited.ArgumentList.Arguments;
+                    var renamed = args.Select(a => a.Expression is LambdaExpressionSyntax lambda
+                        ? a.WithExpression((ExpressionSyntax)new EntryRenamer(parameters, LambdaParameters(lambda)).Visit(lambda))
+                        : a);
+                    visited = visited.WithArgumentList(visited.ArgumentList.WithArguments(SeparatedList(renamed)));
+                }
+            }
+
+            return visited;
         }
 
         public override SyntaxNode? VisitExpressionStatement(ExpressionStatementSyntax node)
@@ -519,9 +561,13 @@ internal static class CorpusRunner
 
         public override SyntaxNode? VisitMethodDeclaration(MethodDeclarationSyntax node)
         {
-            var hasContracts = HasOwnContracts(node);
+            var key = MethodKey(node);
+            var parameters = SnapshotParameters(node.ParameterList);
             var visited = (MethodDeclarationSyntax)base.VisitMethodDeclaration(node)!;
-            if (!hasContracts) return visited;
+
+            // Generators read some members in their written shape (a TypeAlias's `IsValid(...) => ...`), so an
+            // expression-bodied member without contracts is left as it is, without a frame.
+            if (visited.ExpressionBody is not null && !HasOwnContracts(node)) return visited;
 
             if (visited.ExpressionBody is { } arrow)
             {
@@ -530,30 +576,103 @@ internal static class CorpusRunner
                 visited = visited.WithExpressionBody(null).WithSemicolonToken(default).WithBody(Block(statement));
             }
 
-            return visited.Body is null ? visited : visited.WithBody(WithFrame(visited.Body));
+            return visited.Body is null ? visited : visited.WithBody(WithFrame(visited.Body, key, parameters));
         }
 
         public override SyntaxNode? VisitConstructorDeclaration(ConstructorDeclarationSyntax node)
         {
-            var hasContracts = HasOwnContracts(node);
+            var key = MethodKey(node);
+            var parameters = SnapshotParameters(node.ParameterList);
             var visited = (ConstructorDeclarationSyntax)base.VisitConstructorDeclaration(node)!;
-            return hasContracts && visited.Body is not null ? visited.WithBody(WithFrame(visited.Body)) : visited;
+            return visited.Body is not null ? visited.WithBody(WithFrame(visited.Body, key, parameters)) : visited;
         }
 
         public override SyntaxNode? VisitLocalFunctionStatement(LocalFunctionStatementSyntax node)
         {
-            var hasContracts = HasOwnContracts(node);
+            var owner = node.Ancestors().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault();
+            var key = (owner is null ? "" : MethodKey(owner)) + "/local:" + node.Identifier.Text;
+            var parameters = SnapshotParameters(node.ParameterList);
             var visited = (LocalFunctionStatementSyntax)base.VisitLocalFunctionStatement(node)!;
-            return hasContracts && visited.Body is not null ? visited.WithBody(WithFrame(visited.Body)) : visited;
-        }
+            if (visited.ExpressionBody is { } arrow)
+            {
+                var isVoid = visited.ReturnType is PredefinedTypeSyntax p && p.Keyword.IsKind(SyntaxKind.VoidKeyword);
+                StatementSyntax statement = isVoid ? ExpressionStatement(arrow.Expression) : ReturnStatement(arrow.Expression);
+                visited = visited.WithExpressionBody(null).WithSemicolonToken(default).WithBody(Block(statement));
+            }
 
-        private static BlockSyntax WithFrame(BlockSyntax body) =>
-            body.WithStatements(body.Statements.Insert(0, ParseStatement($"using var __soundnessFrame = {RuntimeSpecType}.Enter();\n")));
+            return visited.Body is not null ? visited.WithBody(WithFrame(visited.Body, key, parameters)) : visited;
+        }
 
         /// <summary>Whether the member has contract calls of its own, not counting those inside nested local functions.</summary>
         private static bool HasOwnContracts(SyntaxNode member) =>
             member.DescendantNodes(n => n == member || n is not LocalFunctionStatementSyntax)
                 .OfType<InvocationExpressionSyntax>()
                 .Any(i => IsContractCall(i, out _));
+
+        private static BlockSyntax WithFrame(BlockSyntax body, string key, IReadOnlyList<string> parameters)
+        {
+            var literal = LiteralExpression(SyntaxKind.StringLiteralExpression, Literal(key)).ToFullString();
+            var prologue = new List<StatementSyntax>
+            {
+                ParseStatement($"using var __soundnessFrame = {RuntimeSpecType}.Enter({literal});\n"),
+            };
+            prologue.AddRange(parameters.Select(p => ParseStatement($"var {EntryPrefix}{p} = {p};\n")));
+            return body.WithStatements(body.Statements.InsertRange(0, prologue));
+        }
+
+        /// <summary>Parameters that can be copied on entry: not <c>ref</c>, <c>out</c> or <c>in</c>, and not by-ref-like.</summary>
+        private static IReadOnlyList<string> SnapshotParameters(ParameterListSyntax list) =>
+            list.Parameters
+                .Where(p => p.Modifiers.Count == 0 && p.Type is not null && !p.Type.ToString().Contains("Span<", StringComparison.Ordinal))
+                .Select(p => p.Identifier.Text)
+                .ToList();
+
+        private static HashSet<string> EnclosingParameters(SyntaxNode node)
+        {
+            var member = node.Ancestors().FirstOrDefault(a => a is BaseMethodDeclarationSyntax or LocalFunctionStatementSyntax);
+            var list = member switch
+            {
+                BaseMethodDeclarationSyntax m => m.ParameterList,
+                LocalFunctionStatementSyntax l => l.ParameterList,
+                _ => null,
+            };
+            return list is null ? new HashSet<string>() : new HashSet<string>(SnapshotParameters(list), StringComparer.Ordinal);
+        }
+
+        private static HashSet<string> LambdaParameters(LambdaExpressionSyntax lambda) => lambda switch
+        {
+            SimpleLambdaExpressionSyntax s => new HashSet<string>(StringComparer.Ordinal) { s.Parameter.Identifier.Text },
+            ParenthesizedLambdaExpressionSyntax p => new HashSet<string>(p.ParameterList.Parameters.Select(x => x.Identifier.Text), StringComparer.Ordinal),
+            _ => new HashSet<string>(),
+        };
+
+        /// <summary>Points a postcondition's references to method parameters at their entry copies.</summary>
+        private sealed class EntryRenamer(HashSet<string> parameters, HashSet<string> shadowed) : CSharpSyntaxRewriter
+        {
+            public override SyntaxNode? VisitIdentifierName(IdentifierNameSyntax node)
+            {
+                var name = node.Identifier.Text;
+                if (!parameters.Contains(name) || shadowed.Contains(name)) return node;
+                if (node.Parent is MemberAccessExpressionSyntax ma && ma.Name == node) return node;
+                if (node.Parent is NameColonSyntax or NameEqualsSyntax) return node;
+                return node.WithIdentifier(Identifier(EntryPrefix + name).WithTriviaFrom(node.Identifier));
+            }
+
+            // A nested lambda's own parameters hide the method's.
+            public override SyntaxNode? VisitSimpleLambdaExpression(SimpleLambdaExpressionSyntax node) =>
+                new EntryRenamer(parameters, new HashSet<string>(shadowed.Append(node.Parameter.Identifier.Text))).VisitLambdaBody(node);
+
+            public override SyntaxNode? VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node) =>
+                new EntryRenamer(parameters, new HashSet<string>(shadowed.Concat(node.ParameterList.Parameters.Select(p => p.Identifier.Text)))).VisitLambdaBody(node);
+
+            private SyntaxNode? VisitLambdaBody(LambdaExpressionSyntax lambda) => lambda switch
+            {
+                SimpleLambdaExpressionSyntax s when s.ExpressionBody is { } e => s.WithExpressionBody((ExpressionSyntax)Visit(e)),
+                SimpleLambdaExpressionSyntax s when s.Block is { } b => s.WithBlock((BlockSyntax)Visit(b)),
+                ParenthesizedLambdaExpressionSyntax p when p.ExpressionBody is { } e => p.WithExpressionBody((ExpressionSyntax)Visit(e)),
+                ParenthesizedLambdaExpressionSyntax p when p.Block is { } b => p.WithBlock((BlockSyntax)Visit(b)),
+                _ => lambda,
+            };
+        }
     }
 }
