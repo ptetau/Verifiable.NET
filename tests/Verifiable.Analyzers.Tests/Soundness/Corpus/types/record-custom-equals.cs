@@ -1,7 +1,6 @@
 // The record overrides Equals to compare only A, so two records that differ in B are ==.
 // @expect: rejected
 // @witness: Corpus.Types.CustomEquals.Differ(1)
-// @known-bug: Record == is lowered as structural SMT equality, ignoring a user-defined Equals(Pair?).
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

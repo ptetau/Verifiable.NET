@@ -1,7 +1,6 @@
 // The loop in the local function Count moves i, so the invariant i == 0 is false on the second pass.
 // @expect: rejected
 // @witness: Corpus.Control.LocalLoop.Run(2)
-// @known-bug: Local function bodies are never lowered, so their loop invariants (and Spec.Ensures) are not checked at all.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

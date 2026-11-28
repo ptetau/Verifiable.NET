@@ -1,7 +1,6 @@
 // The constructor clamps negative input to 0, so new Clamped(n).N is not n when n < 0.
 // @expect: rejected
 // @witness: Corpus.Types.ExplicitCtor.Get(-5)
-// @known-bug: Object creation binds fields to constructor arguments by case-insensitive name and ignores the constructor body.
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

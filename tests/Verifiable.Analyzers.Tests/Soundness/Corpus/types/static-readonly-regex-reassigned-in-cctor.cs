@@ -1,7 +1,6 @@
 // The static constructor replaces the Regex in the static readonly field, so the initializer's pattern is not the one used.
 // @expect: rejected
 // @witness: Corpus.Types.RegexField.IsDigits("abc")
-// @known-bug: A static readonly Regex field is modelled from its initializer's pattern, ignoring a static constructor that reassigns it.
 using System.Text.RegularExpressions;
 using Verifiable.Contracts;
 

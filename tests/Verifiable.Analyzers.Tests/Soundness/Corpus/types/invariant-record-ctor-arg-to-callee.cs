@@ -1,7 +1,6 @@
 // new Span(5, 1) breaks Span's [Invariant] Lo <= Hi, yet it is passed to a callee that relies on it.
 // @expect: rejected
 // @witness: Corpus.Types.SpanArg.Caller(5, 1)
-// @known-bug: Call sites never check a callee parameter's [Invariant], so new Span(5, 1) is passed to a callee that assumes Lo <= Hi.
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

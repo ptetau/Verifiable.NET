@@ -1,6 +1,6 @@
 // The local function's parameter x shadows the outer x, so Twice(x + 1) is 2 * (x + 1).
 // @expect: proved
-// @known-bug: False rejection: a call to a local function gets a fresh, unconstrained result (its expression body is never used), so even Twice(x + 1) == 2 * x + 2 cannot be proved.
+// @known-bug: False rejection by design: local functions are not allowed in [Verifiable] code (VER005), so this correct program is rejected until local functions are modelled.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

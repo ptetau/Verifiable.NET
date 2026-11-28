@@ -582,7 +582,7 @@ internal sealed class SmtTypeSystem
             }
 
             var model = compilation.GetSemanticModel(syn.SyntaxTree);
-            if (syn is MethodDeclarationSyntax md)
+            if (syn is BaseMethodDeclarationSyntax md && (md is MethodDeclarationSyntax || md is OperatorDeclarationSyntax))
             {
                 if (md.ExpressionBody is { } arrow &&
                     model.GetOperation(arrow) is IBlockOperation arrowBlock)

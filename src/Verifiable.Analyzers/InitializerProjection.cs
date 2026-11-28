@@ -272,7 +272,7 @@ internal static class InitializerProjection
         return false;
     }
 
-    private static bool HasNonDefaultMemberInitializer(INamedTypeSymbol type, string memberName)
+    internal static bool HasNonDefaultMemberInitializer(INamedTypeSymbol type, string memberName)
     {
         for (var cur = type;
              cur is not null && cur.SpecialType != SpecialType.System_Object && cur.SpecialType != SpecialType.System_ValueType;
