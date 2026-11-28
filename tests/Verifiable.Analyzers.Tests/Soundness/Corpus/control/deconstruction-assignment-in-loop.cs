@@ -1,7 +1,6 @@
 // A tuple deconstruction inside the loop changes a, so after n iterations a == n, not 0.
 // @expect: rejected
 // @witness: Corpus.Control.DeconstructLoop.Run(1)
-// @known-bug: Variables written by a deconstruction assignment inside a loop are not havocked at the loop head, so they keep their pre-loop value after the loop.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

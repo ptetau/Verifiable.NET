@@ -523,6 +523,11 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
     private static Diagnostic UnsupportedContractError(IMethodSymbol method, (string Contract, Location Location, string Error) err)
     {
+        if (err.Error.StartsWith(CfgSsaLowerer.RuleMarker, StringComparison.Ordinal))
+        {
+            return LoweringRuleError(method, err);
+        }
+
         var elmErr = ElmDiagnosticFormatter.Format(
             "UNSUPPORTED CONTRACT",
             err.Location,
@@ -533,12 +538,35 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         return Diagnostic.Create(VerifiableDescriptors.InvalidContractExpression, err.Location, elmErr);
     }
 
+    /// <summary>A rule of the lowerer about loops or recursion (see <c>CfgSsaLowerer.Loops.cs</c>): headline, why, fix.</summary>
+    private static Diagnostic LoweringRuleError(IMethodSymbol method, (string Contract, Location Location, string Error) err)
+    {
+        var lines = err.Error.Substring(CfgSsaLowerer.RuleMarker.Length).Split('\n');
+        var headline = lines[0];
+        var why = lines.Length > 1 && lines[1].StartsWith("Why: ", StringComparison.Ordinal) ? lines[1].Substring(5) : null;
+        var fix = lines.Length > 2 && lines[2].StartsWith("Fix: ", StringComparison.Ordinal) ? lines[2] : null;
+        var elm = ElmDiagnosticFormatter.Format(
+            "UNSUPPORTED CONTRACT",
+            err.Location,
+            headline,
+            explanation: why,
+            fixHint: fix,
+            summary: $"{OneLine(headline)} {(fix is null ? string.Empty : OneLine(fix))}".TrimEnd());
+        return Diagnostic.Create(VerifiableDescriptors.InvalidContractExpression, err.Location, elm);
+    }
+
     /// <summary>
     /// A method with no contracts whose code cannot be translated. It may still hide an obligation (a division,
     /// a callee precondition), so it is reported instead of passing as proved, but only as a warning.
     /// </summary>
     private static Diagnostic UncheckedMethodWarning(IMethodSymbol method, (string Contract, Location Location, string Error) err)
     {
+        if (err.Error.StartsWith(CfgSsaLowerer.RuleMarker, StringComparison.Ordinal))
+        {
+            // Only the headline: the rest of a rule's text is written for an error on a method that has contracts.
+            err = (err.Contract, err.Location, err.Error.Substring(CfgSsaLowerer.RuleMarker.Length).Split('\n')[0]);
+        }
+
         var display = $"{method.ContainingType?.Name}.{method.Name}";
         var elm = ElmDiagnosticFormatter.Format(
             "METHOD NOT CHECKED",
@@ -812,6 +840,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         "LoopInvariantStep" => "loop invariant preservation",
         "LoopDecreasesEntry" => "loop termination measure on entry",
         "LoopDecreasesStep" => "loop termination decrease check",
+        "RecursionDecreases" => "recursion termination check",
+        "SwitchExpressionException" => "switch expression coverage check",
         _ => "contract obligation"
     };
 
@@ -825,6 +855,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         "LoopInvariantEntry" => "Fix: Ensure Spec.LoopInvariant(...) holds immediately before entering the loop.",
         "LoopInvariantStep" => "Fix: Strengthen Spec.LoopInvariant(...) or update the loop body so the invariant is preserved on every iteration.",
         "LoopDecreasesEntry" or "LoopDecreasesStep" => "Fix: Ensure Spec.Decreases(...) stays non-negative and strictly decreases on every iteration.",
+        "RecursionDecreases" => "Fix: Make the Spec.Decreases(...) measure of the method non-negative and strictly smaller at every recursive call, or guard the call so it cannot happen when it is not.",
+        "SwitchExpressionException" => "Fix: Add an arm for the missing values (a `_ => ...` arm, or one that handles each case) so the switch expression cannot throw SwitchExpressionException.",
         _ => "Fix: Strengthen preconditions or fix the implementation so the contract holds on all paths."
     };
 

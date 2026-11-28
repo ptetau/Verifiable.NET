@@ -1,7 +1,6 @@
 // k is bumped by the if condition on every pass, so after n passes k == n, not 0.
 // @expect: rejected
 // @witness: Corpus.Control.BodyConditionIncrement.Run(2)
-// @known-bug: Variables assigned inside an if condition in a loop body (a body block's branch value) are not havocked at the loop head.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

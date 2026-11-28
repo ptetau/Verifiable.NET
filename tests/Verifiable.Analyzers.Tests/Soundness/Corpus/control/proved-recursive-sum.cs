@@ -1,4 +1,4 @@
-// Sum(n) = 0 + 1 + ... + n; the recursion goes down by one and stops at zero.
+// Sum(n) = 0 + 1 + ... + n; the recursion goes down by one and stops at zero, which Decreases says.
 // @expect: proved
 using Verifiable.Contracts;
 
@@ -11,6 +11,7 @@ public static class RecursiveSum
     {
         Spec.Requires(n >= 0 && n <= 200, "Small non-negative input.");
         Spec.Ensures<int>(r => 2 * r == n * (n + 1), "Triangle number.");
+        Spec.Decreases(n, "n goes down by one at each call.");
         if (n == 0)
         {
             return 0;

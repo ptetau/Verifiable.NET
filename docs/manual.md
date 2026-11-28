@@ -153,6 +153,26 @@ Z3 checks four facts automatically:
 3. `Decreases` starts `>= 0`.
 4. `Decreases` stays `>= 0` and strictly drops on every iteration.
 
+**The rules.**
+- `Spec.LoopInvariant` and `Spec.Decreases` are the first statements of the loop body, before any other statement. They are checked where the loop is entered and at the top of every pass, so one written further down would not mean what it says; it is a `VER101` error.
+- Every `while`, `do` and `for` loop needs a `Spec.Decreases`. Without it nothing shows the loop ends, and a proof about what follows it would hold without ever being used. A `foreach` over a finite collection ends on its own and needs none.
+- Loops can be nested. Each loop has its own invariant and measure; an inner loop runs all its passes on every pass of the outer one.
+- `foreach` over an `ImmutableArray<T>`, `ImmutableList<T>` or `IReadOnlyList<T>` hands out the items of the sequence, so facts about them from `Spec.Requires` (for example `xs.All(...)`) hold for each item. The loop does not know which item it is on.
+
+### Recursion
+
+A method that calls itself, or that is part of a cycle of `[Verifiable]` methods that call each other, needs a termination measure at the top of each of them: `Spec.Decreases(measure, because)`, a non-negative `int` or `long` expression over the parameters. At every recursive call the measure of the callee must be `>= 0` and smaller than the caller's measure on entry. A recursive method without one is a `VER101` error; a measure that does not go down is a `VER102` proof failure. Without this, a method that never returns would prove any postcondition.
+
+```csharp
+public static int Sum(int n)
+{
+    Spec.Requires(n >= 0 && n <= 200, "Small non-negative input.");
+    Spec.Ensures<int>(r => 2 * r == n * (n + 1), "Triangle number.");
+    Spec.Decreases(n, "n goes down by one at each call.");
+    return n == 0 ? 0 : n + Sum(n - 1);
+}
+```
+
 ---
 
 ### Writing contracts with helpers
@@ -326,7 +346,7 @@ Nearest attribute wins: a method `[Unverifiable]` overrides a class `[Verifiable
 | `VER005` | `DISALLOWED CONTROL FLOW` | Unannotated `while`/`foreach`, `async`/`await`, `throw`, `try/catch`, `lock`, or `goto`. Annotate `while` loops with `Spec.LoopInvariant` + `Spec.Decreases`; use `Result<T, TError>` instead of exceptions. |
 | `VER006` | `UNVERIFIED CALL` | Called an unverified external method, reflection, or `dynamic`. Mark deterministic helpers `[Verifiable]` / `[PureAxiom]`, or move I/O to the outer shell. |
 | `VER007` | `UNCONSUMED OBLIGATION` | Dropped, overwrote, discarded, or double-consumed a `[MustConsume]` token. Route it to `[ConsumesObligation]`, return it, or call `Obligation.Discard(...)`. |
-| `VER101` | `UNSUPPORTED CONTRACT` / `METHOD NOT CHECKED` | Contract or code could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type or `Spec.LoopInvariant` placed outside a loop). Rewrite with supported pure expressions. In a `[Verifiable]` method with no contracts and no obligation found, it is a warning, so the method does not look proved; mark it `[Unverifiable]` if it needs no proof. A `Spec.Requires` / `Spec.RequiresWhen` that is not in the method's leading contract block (inside a branch, loop, lambda or local function, or after an ordinary statement) is also `VER101`: it is not a precondition, so move it to the top of the method, or use `Spec.RequiresWhen(condition, requirement, because)` or an `if` guard in callers. |
+| `VER101` | `UNSUPPORTED CONTRACT` / `METHOD NOT CHECKED` | Contract or code could not be lowered to SMT (for example mismatched `Spec.Ensures<T>` return type, `Spec.LoopInvariant` placed outside a loop or below another loop-body statement, a `while`/`do`/`for` loop with no `Spec.Decreases`, or a recursive method with no `Spec.Decreases`). Rewrite with supported pure expressions. In a `[Verifiable]` method with no contracts and no obligation found, it is a warning, so the method does not look proved; mark it `[Unverifiable]` if it needs no proof. A `Spec.Requires` / `Spec.RequiresWhen` that is not in the method's leading contract block (inside a branch, loop, lambda or local function, or after an ordinary statement) is also `VER101`: it is not a precondition, so move it to the top of the method, or use `Spec.RequiresWhen(condition, requirement, because)` or an `if` guard in callers. |
 | `VER102` | `PROOF FAILED` | Z3 proved a contract can be violated and produced a counterexample plus your `because`/`description` spirit text. Strengthen `Spec.Requires` or fix the bug. |
 | `VER103` | `SOLVER COULD NOT DECIDE` | Z3 returned `unknown` or timed out. Simplify non-linear arithmetic, add loop invariants, or split helper lemmas. |
 | `VER104` | `Z3 SOLVER NOT FOUND` | Z3 binary missing (`scripts/install-z3.ps1` / `scripts/install-z3.sh`), so no proof was checked. Build error by default, because unchecked code must not pass as verified. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` (downgrades it to a warning). |
