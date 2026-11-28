@@ -18,7 +18,11 @@ internal sealed record SmtCompositeInfo(
     string SortName,
     string ConstructorName,
     IReadOnlyList<SmtFieldInfo> Fields,
-    ITypeSymbol Symbol);
+    ITypeSymbol Symbol)
+{
+    /// <summary>The sort each field was declared with. A field whose type was still being declared (a cycle) is <c>Int</c>.</summary>
+    public IReadOnlyList<string> FieldSorts { get; init; } = Array.Empty<string>();
+}
 
 internal sealed class SmtTypeSystem
 {
@@ -31,6 +35,7 @@ internal sealed class SmtTypeSystem
     private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol ElemType)> _setTypes = new(SymbolEqualityComparer.Default);
     private readonly Dictionary<ITypeSymbol, (string SortName, ITypeSymbol InnerType)> _optTypes = new(SymbolEqualityComparer.Default);
     private readonly HashSet<ITypeSymbol> _inProgress = new(SymbolEqualityComparer.Default);
+    private readonly HashSet<string> _defaultInProgress = new(StringComparer.Ordinal);
     private readonly List<string> _declarations = new();
     private bool _declaredDateTimeOffset;
     private int _typeCounter;
@@ -157,6 +162,10 @@ internal sealed class SmtTypeSystem
             }
         }
 
+        // A delegate is opaque code: its Method/Target fields lead back to delegate types, so it is never unfolded.
+        if (type.TypeKind == TypeKind.Delegate)
+            return Cache(type, "Int");
+
         if (type is INamedTypeSymbol composite)
         {
             if (_inProgress.Contains(composite))
@@ -174,9 +183,11 @@ internal sealed class SmtTypeSystem
 
                 var fields = ExtractStoredFields(composite, dtSort);
                 var fieldDecls = new StringBuilder();
+                var fieldSorts = new List<string>();
                 foreach (var f in fields)
                 {
                     var fSort = GetSort(f.Type);
+                    fieldSorts.Add(fSort);
                     fieldDecls.Append($" ({f.AccessorName} {fSort})");
                 }
 
@@ -189,7 +200,7 @@ internal sealed class SmtTypeSystem
                     _declarations.Add($"(declare-datatype {dtSort} (({ctorName}{fieldDecls})))");
                 }
 
-                var info = new SmtCompositeInfo(dtSort, ctorName, fields, composite);
+                var info = new SmtCompositeInfo(dtSort, ctorName, fields, composite) { FieldSorts = fieldSorts };
                 _compositesBySort[dtSort] = info;
                 return Cache(type, dtSort);
             }
@@ -354,8 +365,25 @@ internal sealed class SmtTypeSystem
                 return comp.ConstructorName;
             }
 
-            var args = string.Join(" ", comp.Fields.Select(f => GetDefaultTerm(f.Type)));
-            return $"({comp.ConstructorName} {args})";
+            // Cycle guard: a type that reaches itself through its fields has Int-sorted back edges (see GetSort), so those
+            // take "0"; the visited set is a second line of defence against any other way of looping.
+            if (!_defaultInProgress.Add(sort))
+            {
+                return "0";
+            }
+
+            try
+            {
+                var args = string.Join(" ", comp.Fields.Select((f, i) =>
+                    i < comp.FieldSorts.Count && comp.FieldSorts[i] == "Int" && GetSort(f.Type) != "Int"
+                        ? "0"
+                        : GetDefaultTerm(f.Type)));
+                return $"({comp.ConstructorName} {args})";
+            }
+            finally
+            {
+                _defaultInProgress.Remove(sort);
+            }
         }
 
         return "0";
