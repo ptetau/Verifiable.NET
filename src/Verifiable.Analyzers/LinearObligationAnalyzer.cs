@@ -149,7 +149,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             {
                 if (VerifiableSymbolHelpers.IsMustConsumeType(p.Type))
                 {
-                    entryState[p] = isSinkMethod ? ObligationState.SinkParameter : ObligationState.Live;
+                    entryState[p] = LinearTransfer.Entry(isSinkMethod);
                 }
             }
         }
@@ -163,11 +163,21 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         var worklist = new Queue<BasicBlock>();
         worklist.Enqueue(entryBlock);
 
-        // Phase 1: Fixed-point dataflow convergence
-        var iterations = 0;
-        const int maxIterations = 2000;
-        while (worklist.Count > 0 && iterations++ < maxIterations)
+        // Phase 1: Fixed-point dataflow convergence.
+        // This always finishes, so it has no fixed cap (a cap could stop a large method early and silently
+        // drop its diagnostics). An incoming state only rises (LatticeLaws.JoinIsAnUpperBound), and each token
+        // in it appears once and then rises at most twice (TransferLaws.JoinThatChangesAStateRaisesItsRank and
+        // RankIsBounded). So a block is queued at most 1 + 3 * tokens times. Going past that bound means this
+        // argument is wrong, which is reported as an analyzer failure rather than a silent pass.
+        var trackedTokens = new HashSet<ISymbol>(entryState.Keys, SymbolEqualityComparer.Default);
+        long visits = 0;
+        while (worklist.Count > 0)
         {
+            if (++visits > 1 + (long)cfg.Blocks.Length * (1 + 3L * trackedTokens.Count))
+            {
+                throw new InvalidOperationException("The VER007 analysis did not converge within its proved bound.");
+            }
+
             var block = worklist.Dequeue();
             if (!inStates.TryGetValue(block, out var inState))
             {
@@ -194,6 +204,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 if (!inStates.TryGetValue(succ, out var oldIn) || !DictionariesEqual(oldIn, merged))
                 {
                     inStates[succ] = merged;
+                    trackedTokens.UnionWith(merged.Keys);
                     worklist.Enqueue(succ);
                 }
             }
@@ -298,9 +309,10 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
         foreach (var kv in postState)
         {
-            if (kv.Value is ObligationState.Live or ObligationState.MaybeLive)
+            var exitEvent = LinearTransfer.ExitEvent(kv.Value);
+            if (exitEvent != TransferEvent.Ok)
             {
-                var isPartialBranch = kv.Value == ObligationState.MaybeLive;
+                var isPartialBranch = exitEvent == TransferEvent.PartialLeak;
                 var detail = isPartialBranch
                     ? "may not be consumed on all execution paths before returning"
                     : "was never consumed before returning from this method";
@@ -459,7 +471,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             {
                 if (TryGetTrackedSymbol(rhs, out var movedSym) && state.TryGetValue(movedSym!, out var curSt))
                 {
-                    if (curSt is ObligationState.Live or ObligationState.MaybeLive)
+                    if (LinearTransfer.DiscardEvent(curSt) == TransferEvent.DiscardedLive)
                     {
                         var originLoc = movedSym!.Locations.FirstOrDefault();
                         diagnostics?.Add(new LinearDiag(
@@ -471,8 +483,8 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                             linearType!.Name,
                             "was explicitly discarded with `_` without being consumed",
                             $"Pass `{movedSym.Name}` to a `[ConsumesObligation]` method, or document intentional cancellation with `Obligation.Discard({movedSym.Name}, \"reason\")`."));
-                        state[movedSym] = ObligationState.Consumed;
                     }
+                    state[movedSym!] = LinearTransfer.Discard(curSt);
                 }
                 else
                 {
@@ -560,7 +572,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
 
             if (state.TryGetValue(srcSym!, out var srcState))
             {
-                if (srcState == ObligationState.Consumed)
+                if (ConsumeTracked(srcSym!, srcState, rhs.Syntax.GetLocation(), state, consumedSites) == TransferEvent.DoubleConsume)
                 {
                     consumedSites.TryGetValue(srcSym!, out var priorLoc);
                     diagnostics?.Add(new LinearDiag(
@@ -572,14 +584,6 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                         GetTypeName(srcSym!),
                         "was already consumed before assignment",
                         $"Remove the duplicate use of `{srcSym.Name}`, or create a fresh `{GetTypeName(srcSym)}` token."));
-                }
-                else if (srcState != ObligationState.SinkParameter)
-                {
-                    state[srcSym!] = ObligationState.Consumed;
-                    if (!consumedSites.ContainsKey(srcSym!))
-                    {
-                        consumedSites[srcSym!] = rhs.Syntax.GetLocation();
-                    }
                 }
             }
         }
@@ -597,7 +601,8 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
         ImmutableDictionary<ISymbol, ObligationState>.Builder state,
         List<LinearDiag>? diagnostics)
     {
-        if (state.TryGetValue(targetSym, out var existing) && existing is ObligationState.Live or ObligationState.MaybeLive)
+        var hadState = state.TryGetValue(targetSym, out var existing);
+        if (hadState && LinearTransfer.OverwriteEvent(existing) == TransferEvent.LeakOnOverwrite)
         {
             var prevLoc = targetSym.Locations.FirstOrDefault();
             diagnostics?.Add(new LinearDiag(
@@ -611,7 +616,8 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                 $"Consume or discard the previous `{targetSym.Name}` before reassigning it."));
         }
 
-        state[targetSym] = ObligationState.Live;
+        // A variable with no state yet simply starts holding a live token.
+        state[targetSym] = hadState ? LinearTransfer.Overwrite(existing) : ObligationState.Live;
     }
 
     private static void WalkNonAssigningReads(
@@ -656,7 +662,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                     {
                         if (state.TryGetValue(argSym!, out var cur))
                         {
-                            if (cur == ObligationState.Consumed)
+                            if (ConsumeTracked(argSym!, cur, arg.Syntax.GetLocation(), state, consumedSites) == TransferEvent.DoubleConsume)
                             {
                                 consumedSites.TryGetValue(argSym!, out var priorLoc);
                                 diagnostics?.Add(new LinearDiag(
@@ -668,14 +674,6 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                                     GetTypeName(argSym!),
                                     "was consumed more than once",
                                     $"Remove this duplicate consumption of `{argSym.Name}` so the obligation is discharged exactly once."));
-                            }
-                            else if (cur != ObligationState.SinkParameter)
-                            {
-                                state[argSym!] = ObligationState.Consumed;
-                                if (!consumedSites.ContainsKey(argSym!))
-                                {
-                                    consumedSites[argSym!] = arg.Syntax.GetLocation();
-                                }
                             }
                         }
                         else
@@ -711,7 +709,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
             if (!returnOwnedExpressions.Contains(unwrappedOp) &&
                 !consumedExpressions.Contains(unwrappedOp) &&
                 state.TryGetValue(sym!, out var cur) &&
-                cur == ObligationState.Consumed)
+                LinearTransfer.ReadEvent(cur) == TransferEvent.UseAfterConsume)
             {
                 consumedSites.TryGetValue(sym!, out var priorLoc);
                 diagnostics?.Add(new LinearDiag(
@@ -784,7 +782,7 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
     {
         if (state.TryGetValue(sym, out var cur))
         {
-            if (cur == ObligationState.Consumed)
+            if (ConsumeTracked(sym, cur, expr.Syntax.GetLocation(), state, consumedSites) == TransferEvent.DoubleConsume)
             {
                 consumedSites.TryGetValue(sym, out var priorLoc);
                 diagnostics?.Add(new LinearDiag(
@@ -797,16 +795,28 @@ public sealed class LinearObligationAnalyzer : DiagnosticAnalyzer
                     "was already consumed before being returned",
                     $"Either return `{sym.Name}` to transfer ownership to the caller, or consume it locally—not both."));
             }
-            else if (cur != ObligationState.SinkParameter)
-            {
-                state[sym] = ObligationState.Consumed;
-                if (!consumedSites.ContainsKey(sym))
-                {
-                    consumedSites[sym] = expr.Syntax.GetLocation();
-                }
-            }
         }
         returnOwnedExpressions.Add(expr);
+    }
+
+    /// <summary>
+    /// Applies the kernel's consume rule (<see cref="LinearTransfer.Consume"/>) to a tracked token and returns
+    /// what it reports. The first place a token is consumed is remembered for later double-consumption messages.
+    /// </summary>
+    private static TransferEvent ConsumeTracked(
+        ISymbol sym,
+        ObligationState current,
+        Location site,
+        ImmutableDictionary<ISymbol, ObligationState>.Builder state,
+        Dictionary<ISymbol, Location> consumedSites)
+    {
+        var next = LinearTransfer.Consume(current);
+        if (next != current && !consumedSites.ContainsKey(sym))
+        {
+            consumedSites[sym] = site;
+        }
+        state[sym] = next;
+        return LinearTransfer.ConsumeEvent(current);
     }
 
     private static IOperation UnwrapConversion(IOperation op)
