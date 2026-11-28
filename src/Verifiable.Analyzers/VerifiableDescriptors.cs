@@ -158,6 +158,30 @@ internal static class VerifiableDescriptors
         isEnabledByDefault: true,
         customTags: WellKnownDiagnosticTags.CompilationEnd);
 
+    public static readonly DiagnosticDescriptor InvalidMigration = new(
+        id: "VER112",
+        title: "Migration cannot be proved total",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor MigrationDropsUnnamedField = new(
+        id: "VER113",
+        title: "Migration drops a field without naming it",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor MigrationDropsListIsWrong = new(
+        id: "VER114",
+        title: "Migration Drops list names a field that is read or does not exist",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor ClauseNotImplemented = new(
         id: "VER401",
         title: "Spec clause has no code",

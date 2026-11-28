@@ -94,6 +94,7 @@ internal static class ElmCheckEngine
             new ClauseCoverageAnalyzer(),
             new HoleAnalyzer(),
             new ContractLockAnalyzer(),
+            new MigrationAnalyzer(),
             new VerifiableNullabilitySuppressor());
 
         var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path, scope, timeoutMs);

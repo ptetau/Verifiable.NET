@@ -118,6 +118,24 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Proved migrations (`[Migration]`)
+
+`[MapTo]` handles one-to-one projections. Splitting a type, or merging two, needs a mapping that cannot silently drop a case (requirement R8):
+
+```csharp
+[Verifiable]
+public static class Migrations
+{
+    [Migration(Drops = new[] { "stay.Notes", "guest.Name" })]
+    public static NewStay Merge(OldStay stay, OldGuest guest) =>
+        new NewStay(stay.Nights > 14 ? 14 : stay.Nights, guest.Age >= 18 ? stay.Guests : 1);
+}
+```
+
+- The prover assumes every invariant of the old values and checks every invariant of the new one, so a mapping that breaks a new invariant fails as `VER102` (`obligation: TypeInvariant`) with an old value as the counterexample.
+- A migration must be static, in `[Verifiable]` code, and return the new type for every input — not nullable, not `Result` — or it is `VER112`.
+- Every stored field of an old type (record parameters and auto-properties) must be read or named in `Drops` (`"Field"`, or `"parameter.Field"` in a merge); one that is neither is `VER113`. A `Drops` entry that does not exist, or that the mapping reads, is `VER114`.
+
 ### Dated rules and value tables (`*.values.csv`, `[EffectiveFrom]`)
 
 Prices, limits and plan tiers change over time (requirement R6). Keeping them in tables keyed by a "from" date turns most changes into table edits (this implements the CSV option of open question 5).

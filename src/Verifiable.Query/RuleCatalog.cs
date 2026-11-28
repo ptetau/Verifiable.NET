@@ -113,6 +113,19 @@ internal static class RuleCatalog
             "Strengthen the postcondition until it fixes one result, send the gap back to Resolve, or mark the method [AnyValidResult(\"why\")].",
             "public static int Fee(int nights)\n{\n    Spec.Ensures<int>(r => r >= nights * 90 && r <= nights * 100, \"Within the band.\");\n    return nights * 100;\n}",
             "public static int Fee(int nights)\n{\n    Spec.Ensures<int>(r => r == nights * 100, \"A night costs 100.\");\n    return nights * 100;\n}"),
+        ["VER112"] = new(
+            "A migration must give every valid old value a new value, or some old records would be lost; the prover can only show that for a static, verified mapping that always returns.",
+            "Make the migration static, keep it in [Verifiable] code, and return the new type itself (not nullable, not Result).",
+            null, null),
+        ["VER113"] = new(
+            "A field the mapping never reads is lost in the new type. Losing data must be a decision, not an accident.",
+            "Map the field to the new type, or name it: [Migration(Drops = new[] { \"Notes\" })].",
+            "[Verifiable]\npublic static class Migrations\n{\n    [Migration]\n    public static NewStay Migrate(OldStay old) => new NewStay(old.Nights);\n}\n\npublic sealed record OldStay(int Nights, string Notes);\npublic sealed record NewStay(int Nights);",
+            "[Verifiable]\npublic static class Migrations\n{\n    [Migration(Drops = new[] { \"Notes\" })]\n    public static NewStay Migrate(OldStay old) => new NewStay(old.Nights);\n}\n\npublic sealed record OldStay(int Nights, string Notes);\npublic sealed record NewStay(int Nights);"),
+        ["VER114"] = new(
+            "A Drops entry for a field that is read, or does not exist, means the list no longer says what is lost.",
+            "Remove the entry, or fix its name (`parameter.Field` when the migration merges several types).",
+            null, null),
         ["VER201"] = new(
             "The generator can only make a safe constrained type from a readonly partial record struct.",
             "Declare it as `public readonly partial record struct Name { public static bool IsValid(T value) => ...; }`.",

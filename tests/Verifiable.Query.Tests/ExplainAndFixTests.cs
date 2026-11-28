@@ -78,6 +78,7 @@ public sealed class ExplainAndFixTests
     [InlineData("VER105", true)]
     [InlineData("VER108", true)]
     [InlineData("VER111", true)]
+    [InlineData("VER113", false)]
     public void WorkedExamples_TriggerTheirRuleBeforeAndNotAfter(string id, bool wrapInClass)
     {
         var rule = RuleCatalog.All().Single(r => r.Id == id);

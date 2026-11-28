@@ -243,3 +243,23 @@ public sealed class EffectiveFromAttribute(string date) : Attribute
     /// </summary>
     public string? Clause { get; set; }
 }
+
+/// <summary>
+/// Marks a mapping from old types to a new one (requirement R8), such as splitting a type or merging two.
+/// The method must be static, verified, and return a value for every input (no nullable or <c>Result</c>
+/// return), so the prover shows that every valid old value maps to a value that keeps every new invariant.
+/// A field of an old type that the mapping does not read must be named in <see cref="Drops"/>.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class MigrationAttribute : Attribute
+{
+    /// <summary>
+    /// Gets or sets the old fields the mapping deliberately drops, as <c>"Field"</c> or <c>"parameter.Field"</c>.
+    /// </summary>
+    public string[] Drops { get; set; } = [];
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this migration comes from.
+    /// </summary>
+    public string? Clause { get; set; }
+}
