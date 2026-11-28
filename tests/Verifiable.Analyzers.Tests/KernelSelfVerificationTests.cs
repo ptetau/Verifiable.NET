@@ -56,6 +56,10 @@ public partial class KernelSelfVerificationTests
         { "CheckSelectionKernel.cs", "if (obligationCount > 0) return MethodCheck.Prove;", "if (obligationCount > 1) return MethodCheck.Prove;", "CheckSelectionKernel.Select" },
         { "CheckSelectionKernel.cs", "return MethodCheck.UnsupportedWarning;", "return MethodCheck.NothingToProve;", "CheckSelectionKernel.Select" },
         { "CheckSelectionKernel.cs", "if (obligationCount > 0 || knownObligationSource) return MethodCheck.UnsupportedError;", "if (knownObligationSource) return MethodCheck.UnsupportedError;", "CheckSelectionKernel.Select" },
+        { "SolverPlumbingKernel.cs", "((char)(text.Length / 65536)).ToString() + ((char)(text.Length % 65536)).ToString() + text", "text", "CacheKeyLaws.FieldThenRestDecodesUniquely" },
+        { "SolverPlumbingKernel.cs", "return CacheKeyField(key) + CacheKeyField(expression);", "return CacheKeyField(key) + expression;", "SolverPlumbingKernel.CacheKeyEvalEntry" },
+        { "SolverPlumbingKernel.cs", "               CacheKeyField(script) + CacheKeyField(evals);", "               script + CacheKeyField(evals);", "SolverPlumbingKernel.CacheKeyMaterial" },
+        { "SolverPlumbingKernel.cs", "return \"(assert (! \" + formula + \" :named \" + name + \"))\\n\";", "return \"(assert false)\\n(assert (! \" + formula + \" :named \" + name + \"))\\n\";", "SolverPlumbingKernel.NamedAssertion" },
     };
 
     [Theory]
