@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/data.v1.schema.json",
+  "title": "verifiable-query data result: existing rows checked against current rules",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "type",
+    "rows",
+    "failedRows",
+    "rules"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "refuted when any row fails."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "type": {
+      "type": "string"
+    },
+    "rows": {
+      "type": "integer"
+    },
+    "failedRows": {
+      "type": "integer"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "kind",
+          "clause",
+          "reason",
+          "failures",
+          "samples"
+        ],
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "isValid",
+              "invariant",
+              "conversion"
+            ]
+          },
+          "clause": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failures": {
+            "type": "integer",
+            "description": "Rows that fail this rule."
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "row",
+                "values"
+              ],
+              "properties": {
+                "row": {
+                  "type": "integer",
+                  "description": "1-based, not counting a CSV header."
+                },
+                "values": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "maxItems": 5
+          }
+        }
+      }
+    }
+  }
+}

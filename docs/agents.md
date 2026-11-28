@@ -118,6 +118,20 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Check data against current rules (`data`)
+
+Before a narrowing change ships, find out how many records fail and which rule they fail (requirement R9).
+
+```bash
+verifiable-query data --project App.csproj --type Booking --rows bookings.csv --format json
+verifiable-query data --project App.csproj --type Booking --sql "select * from bookings" --connection "Data Source=app.db" --format json
+verifiable-query data --project App.csproj --type Nights --rows nights.json --format json
+```
+
+- The project is compiled in memory and its real `IsValid` and `[Invariant]` code runs, so the check is exactly what the code enforces.
+- Rows come from CSV (header row; quoted fields), a JSON array (of objects, or of plain values for a constrained type), or a SQLite query. A record is built from the columns matching its constructor's parameters (case-insensitive); constrained-type columns are checked with their own `IsValid`. A row's invariants are checked only once its fields are valid.
+- The result (schema `data@1`) gives `rows`, `failedRows`, and per rule: `kind` (`isValid`, `invariant`, `conversion`), `clause`, `reason`, `failures` and up to five sample rows. Exit `1` when any row fails.
+
 ### Change impact between builds (`impact`)
 
 After a spec change, people need to know what broke and why (requirement R7).

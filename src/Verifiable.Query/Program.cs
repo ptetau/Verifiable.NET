@@ -28,6 +28,7 @@ public static class Program
           verifiable-query fix --project <path> [--rule <id>] [--target <symbols>] [--apply]
           verifiable-query explain [<rule id>...]
           verifiable-query describe
+          verifiable-query data --project <path> --type <TypeName> (--rows <file.csv|.json> | --sql <query> --connection <cs>)
           verifiable-query impact --old <export.json> (--new <export.json> | --project <path>)
           verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
@@ -46,6 +47,7 @@ public static class Program
           fix               Run the code fixes from the command line and return JSON text edits (--apply writes them).
           explain           Explain a rule: why it exists, how to fix it, and an example.
           describe          List every command, its options and its output schema.
+          data              Run the current IsValid rules and invariants over existing rows; count failures by rule and clause.
           impact            Compare two contract exports: widened / narrowed / changed, and the proofs each change breaks.
           export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
@@ -71,6 +73,8 @@ public static class Program
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
           --holes           With `pack`, one pack per hole.
+          --rows <file>     With `data`, rows as CSV (with a header) or a JSON array.
+          --sql <query>     With `data`, read rows from SQLite (with --connection).
           --old <file>      With `impact`, the export from before the change.
           --new <file>      With `impact`, the export from after (or pass the new sources).
           --rule <id>       With `fix`, only fixes for this rule.
@@ -100,7 +104,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe", "impact"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe", "impact", "data"];
 
     /// <summary>
     /// CLI entry point.
@@ -213,6 +217,9 @@ public static class Program
         var allHoles = false;
         var oneAnswerCheck = false;
         string? ruleFilter = null;
+        string? rowsPath = null;
+        string? sqlQuery = null;
+        string? connection = null;
         string? oldExport = null;
         string? newExport = null;
         var applyFixes = false;
@@ -311,6 +318,15 @@ public static class Program
                     break;
                 case "--rule":
                     ruleFilter = NextVal();
+                    break;
+                case "--rows":
+                    rowsPath = NextVal();
+                    break;
+                case "--sql":
+                    sqlQuery = NextVal();
+                    break;
+                case "--connection":
+                    connection = NextVal();
                     break;
                 case "--old":
                     oldExport = NextVal();
@@ -553,6 +569,56 @@ public static class Program
                 return ResolveExitCode(QueryOutcomeStatus.Error);
             }
             manifestClauses = mc;
+        }
+
+        if (command == "data")
+        {
+            string? dataError = null;
+            List<DataRow>? rows = null;
+            if (string.IsNullOrWhiteSpace(typeName)) dataError = "`data` needs `--type <TypeName>`: the constrained type or record the rows hold.";
+            else if (rowsPath is null && sqlQuery is null) dataError = "`data` needs `--rows <file.csv|file.json>` or `--sql <query> --connection <sqlite connection string>`.";
+            else
+            {
+                try
+                {
+                    rows = rowsPath is not null
+                        ? (!File.Exists(rowsPath) ? throw new FileNotFoundException($"Rows file not found: `{rowsPath}`.")
+                            : rowsPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? DataCheck.ReadJson(File.ReadAllText(rowsPath)) : DataCheck.ReadCsv(File.ReadAllText(rowsPath)))
+                        : DataCheck.ReadSql(connection ?? throw new ArgumentException("`--sql` needs `--connection`."), sqlQuery!);
+                }
+                catch (Exception ex) when (ex is IOException or FormatException or System.Text.Json.JsonException or ArgumentException or Microsoft.Data.Sqlite.SqliteException or InvalidOperationException)
+                {
+                    dataError = ex.Message;
+                }
+            }
+
+            System.Reflection.Assembly? assembly = null;
+            if (dataError is null)
+            {
+                (assembly, dataError) = DataCheck.Load(loadResult.Compilation);
+            }
+
+            DataReport? dataReport = null;
+            if (dataError is null)
+            {
+                try { dataReport = DataCheck.Check(assembly!, typeName!, rows!); }
+                catch (ArgumentException ex) { dataError = ex.Message; }
+            }
+
+            if (dataError is not null)
+            {
+                var dErr = new QueryReport(command, string.Empty, null, null, typeName, QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "CANNOT CHECK DATA", dataError, Location.None,
+                    "Example: verifiable-query data --project App.csproj --type Booking --rows bookings.csv --format json");
+                WriteOutput(command, dErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+
+            stdout.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                ? DataCheck.ToJson(dataReport!, indented: true)
+                : $"{dataReport!.FailedRows} of {dataReport.Rows} {dataReport.Type} rows fail." +
+                  string.Concat(dataReport.Rules.Select(r => $"\n  {r.Count,6}  {r.Rule}{(r.Clause is null ? string.Empty : $" ({r.Clause})")}{(r.Reason is null ? string.Empty : $": {r.Reason}")}")));
+            return dataReport!.FailedRows > 0 ? 1 : 0;
         }
 
         if (command == "fix")
