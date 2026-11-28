@@ -906,7 +906,7 @@ public sealed class QueryTests
             using var doc = JsonDocument.Parse(stdout);
             var root = doc.RootElement;
             var clauses = root.GetProperty("clauses").EnumerateArray().ToList();
-            Assert.Equal(["C1", "C2", "C3"], clauses.Select(c => c.GetProperty("id").GetString()).ToArray());
+            Assert.Equal(["C1", "C2", "C3"], clauses.Select(c => c.GetProperty("id").GetString()!).ToArray());
             Assert.Equal("Never double booked.", clauses[2].GetProperty("text").GetString());
             Assert.Empty(clauses[2].GetProperty("constructs").EnumerateArray());
 
@@ -919,7 +919,7 @@ public sealed class QueryTests
 
             var unknown = Assert.Single(root.GetProperty("unknownClauses").EnumerateArray());
             Assert.Equal("C9", unknown.GetProperty("id").GetString());
-            Assert.Equal(["C3"], root.GetProperty("uncoveredClauses").EnumerateArray().Select(e => e.GetString()).ToArray());
+            Assert.Equal(["C3"], root.GetProperty("uncoveredClauses").EnumerateArray().Select(e => e.GetString()!).ToArray());
             var without = Assert.Single(root.GetProperty("constructsWithoutClause").EnumerateArray());
             Assert.Equal("Bookings.Schedule.Twice(int)", without.GetProperty("symbol").GetString());
 
