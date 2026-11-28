@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The stage-0 prover for the trusted kernel.
+
+    This is the analyzer from src/Verifiable.Analyzers compiled with a frozen, earlier copy of the
+    kernel (Kernel/) instead of the live one in src/Verifiable.Core. Verifiable.Core is proved by this
+    analyzer, so a change to the live kernel is checked by the previous kernel, not by itself. A bug that
+    blinds the live kernel's prover therefore cannot approve itself.
+
+    The frozen copy changes only through scripts/promote-bootstrap-kernel.sh (or .ps1). This project is
+    never packed or shipped: the analyzer that ships is src/Verifiable.Analyzers, which holds the live kernel.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Verifiable.Analyzers.Bootstrap</AssemblyName>
+    <RootNamespace>Verifiable.Analyzers</RootNamespace>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    The analyzer sources are linked from src/Verifiable.Analyzers, without its link to the live kernel.
+    The frozen kernel in Kernel/ is picked up by the default Compile glob. As in Verifiable.Analyzers, the
+    kernel's Spec.* calls bind to KernelShim and are stripped from IL.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Verifiable.Analyzers\**\*.cs"
+             Exclude="..\Verifiable.Analyzers\obj\**;..\Verifiable.Analyzers\bin\**"
+             Link="Analyzer\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Using Include="Verifiable.Analyzers.KernelShim.Spec" Alias="Spec" />
+    <Using Include="Verifiable.Analyzers.KernelShim.VerifiableAttribute" Alias="VerifiableAttribute" />
+  </ItemGroup>
+
+  <!--
+    Kernel files that exist only in the live kernel (a new rule nobody has promoted yet) are compiled in
+    as they are, so analyzer code that calls a new rule still builds. Every file that has a frozen copy
+    uses the frozen copy, so a change to an existing rule is still proved by the earlier version.
+  -->
+  <ItemGroup>
+    <_VerifiableFrozenKernel Include="Kernel\**\*.cs" />
+    <_VerifiableLiveKernel Include="..\Verifiable.Core\**\*.cs"
+                           Exclude="..\Verifiable.Core\AssemblyInfo.cs;..\Verifiable.Core\Proofs\**;..\Verifiable.Core\obj\**;..\Verifiable.Core\bin\**" />
+    <_VerifiableLiveKernelNew Include="@(_VerifiableLiveKernel)"
+                              Exclude="@(_VerifiableFrozenKernel->'..\Verifiable.Core\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Compile Include="@(_VerifiableLiveKernelNew)" Link="LiveKernelOnly\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

@@ -169,7 +169,8 @@ internal static class AnalyzerTestHarness
 
         foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
         {
-            if (!asm.IsDynamic && !string.IsNullOrEmpty(asm.Location))
+            // The stage-0 analyzer loaded by BootstrapKernelTests repeats the analyzer's type names; test inputs never reference it.
+            if (!asm.IsDynamic && !string.IsNullOrEmpty(asm.Location) && asm.GetName().Name != BootstrapKernelTests.AssemblyName)
             {
                 AddRef(asm.Location);
             }
