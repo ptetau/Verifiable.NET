@@ -39,8 +39,20 @@ internal static class RegexModel
         "(str.to_re \"\\u{205f}\") " +
         "(str.to_re \"\\u{3000}\"))";
 
+    private const string AsciiDigitClassRegex = "(re.range \"0\" \"9\")";
+
+    private const string AsciiWordClassRegex =
+        "(re.union (re.range \"0\" \"9\") (re.range \"A\" \"Z\") (re.range \"a\" \"z\") (str.to_re \"_\"))";
+
+    private static readonly string UnicodeDigitClassRegex = Parser.RangesToSmt(RegexUnicodeTables.DigitRanges);
+    private static readonly string UnicodeWordClassRegex = Parser.RangesToSmt(RegexUnicodeTables.WordRanges);
+
     public const string AsciiWhitespaceCharRegex =
         "(re.union (re.range \"\\u{9}\" \"\\u{d}\") (str.to_re \" \"))";
+
+    /// <summary>A null string, or one whose characters are all UTF-16 code units (U+0000..U+FFFF).</summary>
+    public static string BmpStringAssumption(string term) =>
+        $"(or (= {term} str-null) (str.in_re (str-text {term}) (re.* (re.range \"\\u{{0}}\" \"\\u{{ffff}}\"))))";
 
     public static bool TryTranslate(string pattern, int options, out string smtRegex, out string? error)
     {
@@ -50,6 +62,14 @@ internal static class RegexModel
         if ((options & ~SupportedOptionsMask) != 0)
         {
             error = $"Unsupported RegexOptions flags (0x{options:X}); supported flags are None, Compiled, CultureInvariant, ExplicitCapture, Singleline, ECMAScript, and NonBacktracking.";
+            return false;
+        }
+
+        // The Regex constructor throws ArgumentOutOfRangeException for these, so there is no regex to model.
+        if ((options & OptECMAScript) != 0 &&
+            (options & (OptSingleline | OptExplicitCapture | OptNonBacktracking)) != 0)
+        {
+            error = $"RegexOptions.ECMAScript may only be combined with IgnoreCase, Multiline, Compiled and CultureInvariant; .NET throws ArgumentOutOfRangeException for the options 0x{options:X}.";
             return false;
         }
 
@@ -571,7 +591,9 @@ internal static class RegexModel
                 case 'v': return '\v';
                 case 'a': return '\a';
                 case 'e': return '\u001B';
-                case '0': return '\0';
+                case '0':
+                    _pos--; // the first octal digit belongs to the number
+                    return ParseOctalChar();
                 case 'x':
                     return ParseHexChar(2);
                 case 'u':
@@ -581,9 +603,36 @@ internal static class RegexModel
                     {
                         throw new RegexTranslationException($"Unsupported escape '\\{esc}' in regex '{_p}'.");
                     }
+                    if (!_ecmaScript && IsEscapedWordCharError(esc))
+                    {
+                        // .NET: "Unrecognized escape sequence" (RegexParseException). Under ECMAScript the escape is literal.
+                        throw new RegexTranslationException($"Unrecognized escape sequence '\\{esc}' in regex '{_p}': .NET does not allow escaping a word character.");
+                    }
                     return esc;
             }
         }
+
+        /// <summary>
+        /// .NET's octal escape: up to three octal digits (the first is the one at the current position), the value
+        /// truncated to a byte. Under ECMAScript it stops once the value reaches 0x20.
+        /// </summary>
+        private char ParseOctalChar()
+        {
+            var value = 0;
+            for (var count = 0; count < 3 && _pos < _p.Length && _p[_pos] >= '0' && _p[_pos] <= '7'; count++)
+            {
+                value = value * 8 + (_p[_pos] - '0');
+                _pos++;
+                if (_ecmaScript && value >= 0x20)
+                {
+                    break;
+                }
+            }
+            return (char)(value & 0xFF);
+        }
+
+        private static bool IsEscapedWordCharError(char ch) =>
+            ch == '\u200C' || ch == '\u200D' || InRanges(RegexUnicodeTables.WordRanges, ch);
 
         private char ParseHexChar(int digits)
         {
@@ -593,19 +642,54 @@ internal static class RegexModel
             }
 
             var hex = _p.Substring(_pos, digits);
-            if (!int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var code))
+            var code = 0;
+            foreach (var h in hex)
             {
-                throw new RegexTranslationException($"Invalid hex escape '{hex}' in regex '{_p}'.");
+                var v = h is >= '0' and <= '9' ? h - '0'
+                    : h is >= 'a' and <= 'f' ? h - 'a' + 10
+                    : h is >= 'A' and <= 'F' ? h - 'A' + 10
+                    : -1;
+                if (v < 0)
+                {
+                    throw new RegexTranslationException($"Invalid hex escape '{hex}' in regex '{_p}'.");
+                }
+                code = code * 16 + v;
             }
             _pos += digits;
             return (char)code;
         }
 
+        // Without ECMAScript, .NET's \d is every Unicode Nd digit and \w every letter, nonspacing mark, Nd digit and
+        // connector punctuation; they are modelled from fixed tables (see RegexUnicodeTables).
         private string DigitClass() =>
-            "(re.range \"0\" \"9\")";
+            _ecmaScript ? AsciiDigitClassRegex : UnicodeDigitClassRegex;
 
         private string WordClass() =>
-            "(re.union (re.range \"0\" \"9\") (re.range \"A\" \"Z\") (re.range \"a\" \"z\") (str.to_re \"_\"))";
+            _ecmaScript ? AsciiWordClassRegex : UnicodeWordClassRegex;
+
+        private static bool InRanges(int[] ranges, char ch)
+        {
+            for (var i = 0; i < ranges.Length; i += 2)
+            {
+                if (ch >= ranges[i] && ch <= ranges[i + 1])
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal static string RangesToSmt(int[] ranges)
+        {
+            var parts = new List<string>();
+            for (var i = 0; i < ranges.Length; i += 2)
+            {
+                parts.Add(ranges[i] == ranges[i + 1]
+                    ? $"(str.to_re \"\\u{{{ranges[i]:x}}}\")"
+                    : $"(re.range \"\\u{{{ranges[i]:x}}}\" \"\\u{{{ranges[i + 1]:x}}}\")");
+            }
+            return CombineUnion(parts);
+        }
 
         private string SpaceClass() =>
             _ecmaScript ? AsciiWhitespaceCharRegex : WhitespaceCharRegex;
