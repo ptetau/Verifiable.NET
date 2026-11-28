@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/one-answer.v1.schema.json",
+  "title": "verifiable-query one-answer result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "methods",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "refuted while an unmarked method is open; undecided while one is inconclusive."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "verdict",
+          "anyValidResult",
+          "anyValidReason",
+          "clauses",
+          "counterexample",
+          "note",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "fixed",
+              "open",
+              "inconclusive"
+            ]
+          },
+          "anyValidResult": {
+            "type": "boolean",
+            "description": "The method is marked [AnyValidResult], so open is acceptable."
+          },
+          "anyValidReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clauses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "counterexample": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "open only: {input:{param:value}, result1, result2}."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    }
+  }
+}

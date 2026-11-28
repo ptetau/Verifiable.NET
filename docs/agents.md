@@ -118,6 +118,20 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Does the contract fix one answer? (`one-answer`)
+
+A weak contract lets the LLM return any of several answers and still pass its proof (requirement R5). For each method, Z3 looks for one input with two different results that both meet every postcondition:
+
+```bash
+verifiable-query one-answer --project App.csproj [--target T.M] [--lock generated.contracts.lock.json] --format json
+```
+
+- Each method (schema `one-answer@1`) is `fixed` (any body that passes is correct), `open` with `counterexample: {input, result1, result2}`, or `inconclusive` with a `note` (solver unknown, results that cannot be compared with `==`, an unsupported contract). A method with no postcondition is `open`.
+- Mark a method `[AnyValidResult("why")]` when more than one answer really is fine; it may then be open.
+- Exit `1` while an unmarked method is open, `2` while one is inconclusive.
+- `check --one-answer` reports each unmarked open method as `VER111` (an error). With `--lock`, only locked (generated) methods are checked. It runs in the CLI, not in `dotnet build`: on the samples it takes 4–10 s per project, so CI is the natural place (open question 4).
+- How: a probe with the method's parameters, two candidate results, its preconditions and both postconditions is added to the method's own type and proved by the ordinary prover, so the answer is only as trusted as any other proof.
+
 ### Contract export (`export`)
 
 Every contract, constrained type and invariant, as data (requirement R2). The round trip back to ACE, SQL `CHECK` constraints, UI messages and change impact read this instead of C#.

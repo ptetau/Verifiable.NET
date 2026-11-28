@@ -24,6 +24,7 @@ public static class Program
           verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query pack --project <path> (--target <symbols> | --clause <ids> | --holes) [--max-tokens <n>]
+          verifiable-query one-answer --project <path> [--target <symbols>] [--lock <file>]
           verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
@@ -37,6 +38,7 @@ public static class Program
           clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
           holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
           pack              Everything an agent needs to fill one method: contracts, clause text, types, helpers, callers.
+          one-answer        Report whether each method's contract fixes one answer: fixed, open (with an example), or inconclusive.
           export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
@@ -61,6 +63,7 @@ public static class Program
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
           --holes           With `pack`, one pack per hole.
+          --one-answer      With `check`, report each unmarked method whose contract allows two answers as VER111.
           --max-tokens <n>  With `pack`, drop the least relevant parts until each pack fits; dropped parts are listed.
           --out <file>      With `lock` or `export`, where to write the file (`export` writes every entry, unpaged).
           --clause <ids>    With `check`, prove only the symbols that carry these clauses (comma-separated).
@@ -85,7 +88,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer"];
 
     /// <summary>
     /// CLI entry point.
@@ -166,6 +169,7 @@ public static class Program
         string? lockPath = null;
         int? maxTokens = null;
         var allHoles = false;
+        var oneAnswerCheck = false;
         string? outPath = null;
         var timeoutGiven = false;
         var stats = false;
@@ -255,6 +259,9 @@ public static class Program
                     break;
                 case "--holes":
                     allHoles = true;
+                    break;
+                case "--one-answer":
+                    oneAnswerCheck = true;
                     break;
                 case "--max-tokens":
                     var mtText = NextVal();
@@ -427,6 +434,45 @@ public static class Program
             manifestClauses = mc;
         }
 
+        if (command == "one-answer")
+        {
+            var candidates = OneAnswer.Candidates(loadResult.Compilation);
+            if (!string.IsNullOrWhiteSpace(target))
+            {
+                var wanted = target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
+                candidates = candidates.Where(m => ElmCheckEngine.SymbolInScope(ContextPacks.Name(m), wanted)).ToList();
+            }
+            if (lockPath is not null)
+            {
+                // Generated code only: the methods a contract lock covers.
+                var (lockText, lockOk) = File.Exists(lockPath) ? (File.ReadAllText(lockPath), true) : (string.Empty, false);
+                if (!lockOk || !Verifiable.Analyzers.ContractLock.TryParse(lockText, out var lockEntries, out _))
+                {
+                    var lErr2 = new QueryReport(command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                        Array.Empty<MethodQueryResult>(), "BAD CONTRACT LOCK", $"Could not read the contract lock `{lockPath}`.", Location.None,
+                        "Regenerate it with `verifiable-query lock --out <name>.contracts.lock.json`.");
+                    WriteOutput(command, lErr2, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                    return ResolveExitCode(QueryOutcomeStatus.Error);
+                }
+                var locked = new HashSet<string>(lockEntries.Select(e => e.Symbol.Split('(')[0]), StringComparer.Ordinal);
+                candidates = candidates.Where(m => locked.Contains(ContextPacks.Name(m))).ToList();
+            }
+
+            var answers = OneAnswer.Run(loadResult.Compilation, candidates, z3Path, timeoutGiven ? timeoutMs.Value : null);
+            var answersJson = OneAnswer.ToJson(answers, indented: format.Equals("json", StringComparison.OrdinalIgnoreCase), limit, offset);
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase)) stdout.WriteLine(answersJson);
+            else
+            {
+                foreach (var a in answers)
+                {
+                    stdout.WriteLine($"{OneAnswer.Word(a.Verdict).ToUpperInvariant(),-12} {a.Symbol}{(a.AnyValidResult ? "  [AnyValidResult]" : string.Empty)}{(a.Note is null ? string.Empty : "  -- " + a.Note)}");
+                    if (a.CounterexampleJson is not null) stdout.WriteLine($"             {a.CounterexampleJson}");
+                }
+                if (agentMode) stdout.WriteLine($"<verifiable-one-answer-result>{OneAnswer.ToJson(answers, false, limit, offset)}</verifiable-one-answer-result>");
+            }
+            return (int)OneAnswer.Outcome(answers);
+        }
+
         if (command == "export")
         {
             var exported = ContractExport.Collect(loadResult.Compilation);
@@ -594,6 +640,32 @@ public static class Program
             var checkReport = ElmCheckEngine.CheckCompilation(
                 loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings,
                 scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest, lockPath);
+            if (oneAnswerCheck && checkReport.Diagnostics.All(d => !d.RuleId.StartsWith("CS", StringComparison.Ordinal)))
+            {
+                var oaCandidates = OneAnswer.Candidates(loadResult.Compilation);
+                if (scope is not null) oaCandidates = oaCandidates.Where(m => ElmCheckEngine.SymbolInScope(ContextPacks.Name(m), scope)).ToList();
+                if (lockPath is not null && File.Exists(lockPath) &&
+                    Verifiable.Analyzers.ContractLock.TryParse(File.ReadAllText(lockPath), out var oaLocks, out _))
+                {
+                    var locked = new HashSet<string>(oaLocks.Select(e => e.Symbol.Split('(')[0]), StringComparer.Ordinal);
+                    oaCandidates = oaCandidates.Where(m => locked.Contains(ContextPacks.Name(m))).ToList();
+                }
+
+                var open = OneAnswer.Run(loadResult.Compilation, oaCandidates, z3Path, timeoutGiven ? timeoutMs.Value : null)
+                    .Where(a => a.Verdict == OneAnswerVerdict.Open && !a.AnyValidResult)
+                    .Select(a => new PresentedDiagnostic(
+                        "VER111", "error", a.File, a.Line, 1,
+                        $"The contract of `{a.Symbol}` does not fix one answer{(a.CounterexampleJson is null ? string.Empty : ": " + a.CounterexampleJson)}{(a.Note is null ? string.Empty : ". " + a.Note)}",
+                        $"-- CONTRACT ALLOWS MORE THAN ONE ANSWER --------------------- {a.File}\n\nThe contract of `{a.Symbol}` lets two different results pass for the same input, so a body can pass its proof and still be wrong.\n\nFix: Strengthen the postcondition until it fixes one result, send the gap back to Resolve as a question, or mark the method [AnyValidResult(\"why\")].",
+                        new DiagnosticFacts(a.Symbol, a.Clauses.Count == 0 ? null : string.Join(",", a.Clauses), "OneAnswer", null, null, a.CounterexampleJson,
+                            "Strengthen the postcondition until it fixes one result, send the gap back to Resolve as a question, or mark the method [AnyValidResult(\"why\")].")))
+                    .ToList();
+                if (open.Count > 0)
+                {
+                    checkReport = checkReport with { ErrorCount = checkReport.ErrorCount + open.Count, Diagnostics = checkReport.Diagnostics.Concat(open).ToList() };
+                }
+            }
+
             if (stats)
             {
                 var after = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();

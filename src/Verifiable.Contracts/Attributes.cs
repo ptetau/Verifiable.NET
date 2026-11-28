@@ -203,3 +203,17 @@ public sealed class VerifiableContractMetadataAttribute(
     /// </summary>
     public string? Description { get; } = description;
 }
+
+/// <summary>
+/// Records that a method's contract deliberately allows more than one result (requirement R5), so the
+/// one-answer check does not report it as open. Say why: <c>[AnyValidResult("Any free slot will do.")]</c>.
+/// </summary>
+/// <param name="reason">Why more than one answer is acceptable.</param>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class AnyValidResultAttribute(string reason) : Attribute
+{
+    /// <summary>
+    /// Gets why more than one answer is acceptable.
+    /// </summary>
+    public string Reason { get; } = reason;
+}
