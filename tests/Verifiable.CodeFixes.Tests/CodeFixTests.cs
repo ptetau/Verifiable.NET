@@ -302,7 +302,9 @@ public class CodeFixTests
     public Property ExceptionToUnion_EliminatesVER005AcrossVariedNamesAndMessages() =>
         (from methodName in Gen.Element(new[] { "Validate", "Parse", "Check", "Compute" })
          from msg in Gen.String().WithLengthBetween(3, 20)
-         select (methodName, msg: msg.Replace("\"", "").Replace("\\", ""))).ForAll(x =>
+         // The message goes inside a regular C# string literal, so drop what cannot appear there unescaped:
+         // quotes, backslashes and line breaks (a raw CR or LF is a "newline in constant" compile error).
+         select (methodName, msg: new string(msg.Where(c => c is not ('"' or '\\' or '\r' or '\n' or '\u0085' or '\u2028' or '\u2029')).ToArray()))).ForAll(x =>
         {
             var safeMsg = string.IsNullOrEmpty(x.msg) ? "err" : x.msg;
             var src = $$"""
