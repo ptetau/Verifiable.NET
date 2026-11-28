@@ -140,6 +140,25 @@ internal static class Z3SolverRunner
 
     private const string EvalSentinel = "__VERIFIABLE_EVAL_DONE__";
 
+    /// <summary>How long past Z3's own <c>:timeout</c> a worker may stay silent before it is declared stalled.</summary>
+    private const int DefaultHardWaitExtraMs = 10000;
+
+    /// <summary>Text that starts the error of a stalled worker; <see cref="WorkerPool"/> retries on it.</summary>
+    private const string StallMessagePrefix = "Z3 exceeded wall-clock timeout";
+
+    /// <summary>
+    /// Test seam: on the current thread, a shorter silence limit for a worker. Queries run on the calling thread, so
+    /// this does not affect tests running in parallel.
+    /// </summary>
+    [ThreadStatic] internal static int? HardWaitExtraMsOverride;
+
+    /// <summary>Test seam: runs one query on the solver at <paramref name="z3Path"/>, with no discovery and no caches.</summary>
+    internal static SmtQueryResult RunUncached(string z3Path, string smtScriptBody, int timeoutMs)
+    {
+        var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
+        return pool.RunQuery(smtScriptBody, ComputeSha256(smtScriptBody), timeoutMs);
+    }
+
     public static SmtQueryResult Execute(
         string smtScriptBody,
         string? msbuildZ3Path = null,
@@ -519,12 +538,38 @@ internal static class Z3SolverRunner
             return new SmtQueryResult(detailed.Status, detailed.QueryHash, detailed.Model, detailed.ErrorMessage);
         }
 
+        /// <summary>
+        /// Runs a query. A worker that stops answering for far longer than Z3's own time limit has stalled (the
+        /// process, not the problem): the query is tried once more on a fresh worker. Asking again cannot change a
+        /// definite answer, so this only turns a stall into the real result.
+        /// </summary>
         public SmtDetailedResult RunDetailedQuery(
             string scriptBody,
             string hash,
             int timeoutMs,
             bool produceUnsatCore,
             IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs = null)
+        {
+            var result = RunDetailedQueryOnce(scriptBody, hash, timeoutMs, produceUnsatCore, satEvalExprs);
+            if (IsStall(result))
+            {
+                result = RunDetailedQueryOnce(scriptBody, hash, timeoutMs, produceUnsatCore, satEvalExprs);
+            }
+
+            return result;
+        }
+
+        private static bool IsStall(SmtDetailedResult result) =>
+            result.Status == SmtStatus.Unknown &&
+            result.ErrorMessage is { } message &&
+            message.StartsWith(StallMessagePrefix, StringComparison.Ordinal);
+
+        private SmtDetailedResult RunDetailedQueryOnce(
+            string scriptBody,
+            string hash,
+            int timeoutMs,
+            bool produceUnsatCore,
+            IReadOnlyList<(string Key, string SmtExpr)>? satEvalExprs)
         {
             _semaphore.Wait();
             Z3Worker? worker = null;
@@ -655,12 +700,12 @@ internal static class Z3SolverRunner
             _stdin.WriteLine($"(echo \"{doneSentinel}\")");
             _stdin.Flush();
 
-            var hardWaitMs = timeoutMs + 10000;
+            var hardWaitMs = timeoutMs + (HardWaitExtraMsOverride ?? DefaultHardWaitExtraMs);
             var checkOutput = ReadUntilSentinel(doneSentinel, hardWaitMs, out var timedOut);
             if (timedOut)
             {
                 shouldRecycle = true;
-                return new SmtDetailedResult(SmtStatus.Unknown, hash, new Dictionary<string, string>(), Array.Empty<string>(), $"Z3 exceeded wall-clock timeout ({hardWaitMs}ms).");
+                return new SmtDetailedResult(SmtStatus.Unknown, hash, new Dictionary<string, string>(), Array.Empty<string>(), $"{StallMessagePrefix} ({hardWaitMs}ms).");
             }
 
             var status = ParseStatus(checkOutput, out var errorLine);
