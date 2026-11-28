@@ -32,6 +32,11 @@ public sealed class InvariantAttribute(string? description = null) : Attribute
     /// Gets an optional human-readable explanation of the spirit of this invariant.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>
@@ -99,6 +104,11 @@ public sealed class TypeAliasAttribute<TUnderlying>(string? description = null) 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>
@@ -112,6 +122,11 @@ public sealed class RefinedAttribute<TUnderlying>(string? description = null) : 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule comes from (e.g. <c>"C1"</c>), used for traceability and coverage.
+    /// </summary>
+    public string? Clause { get; set; }
 }
 
 /// <summary>

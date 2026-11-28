@@ -82,6 +82,25 @@ Every command follows one output contract (requirement R12):
 - **No colour for agents.** JSON never has ANSI escapes, and neither does Elm output under `VERIFIABLE_AGENT=1`, whatever `--color` says.
 - `--format elm` + `VERIFIABLE_AGENT=1` appends the same JSON on one line inside `<verifiable-query-result>`, `<verifiable-check-result>` or `<verifiable-symbols>` tags.
 
+### Clause IDs and coverage (`clauses`)
+
+Every contract and rule can carry the ID of the spec clause it came from (requirement R1):
+
+```csharp
+[TypeAlias<decimal>("Prices are never negative", Clause = "C1")]
+public readonly partial record struct Price { public static bool IsValid(decimal v) => v >= 0m; }
+
+Spec.Requires(start >= 0, "Times are in range.", clause: "C2");
+Spec.Ensures<int>(r => r > 0, "A booking ends after it starts", clause: "C2");
+[Invariant("A booking ends after it starts", Clause = "C2")] public bool EndsAfterStart => End > Start;
+```
+
+- Every `Spec.*` contract takes an optional `clause` argument; `[TypeAlias]`, `[Refined]` and `[Invariant]` take `Clause =`. The ID must be a string literal.
+- Put the spec's clause manifest next to the project as `*.clauses.json` (or set `VerifiableClauseManifest`), shaped `{"clauses":[{"id":"C1","text":"..."}]}`. The build then fails on a clause no code carries (`VER401`) or on code naming a clause the spec lacks (`VER403`), and warns on a contract or rule with no clause (`VER402`). A manifest it cannot read is `VER404`. With no manifest these rules are silent.
+- Every diagnostic's `clause` field is filled from the contract it is about. A check with no contract of its own (an overflow, say) takes the clause when all the method's contracts share one.
+- `verifiable-query clauses --project App.csproj [--clauses spec.clauses.json] --format json` maps each clause to the contracts and rules that carry it, with `missing`, `unknownClauses` and `withoutClause` lists (schema `clauses@1`). It exits `1` when a clause is missing or unknown.
+- `verifiable-query check --clause C2` proves only the symbols that carry clause `C2`, and `check --clauses <file>` runs the coverage rules in-process.
+
 ### Fast, scoped checks (`check --target`)
 
 The fill loop checks one method many times, so `check` can prove just what an agent is working on (requirement R14):

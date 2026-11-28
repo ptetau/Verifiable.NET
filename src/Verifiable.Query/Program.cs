@@ -21,6 +21,7 @@ public static class Program
           verifiable-query check --project <path> | --file <path> | --stdin | --sarif <build.sarif> [options]
           verifiable-query build <project-or-sln> [options] [-- <extra dotnet build args>]
           verifiable-query list --project <path> [options]
+          verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
         Commands:
@@ -29,6 +30,7 @@ public static class Program
           check             Compile & run all Verifiable analyzers + Z3 (or present a SARIF 2.1 log) with full Elm formatting.
           build             Run `dotnet build` with SARIF capture and present CS*/VER* diagnostics in Elm format.
           list              List queryable [Verifiable] methods, [Invariant] members, and [TypeAlias<T>] types.
+          clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
         Options:
@@ -48,6 +50,8 @@ public static class Program
           --color <mode>    ANSI terminal colors: `auto` (default), `always`, or `never` (honors `NO_COLOR`).
           --no-warnings     Hide warnings in `check` / `build` output.
           --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000; `check` default: 2500).
+          --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
+          --clause <ids>    With `check`, prove only the symbols that carry these clauses (comma-separated).
           --stats           With `check`, add timing and proof-cache counts (not byte-stable).
           --z3 <path>       Explicit path to z3 / z3.exe executable.
           --verbose         Include internal SSA trace steps in proof core output.
@@ -69,7 +73,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses"];
 
     /// <summary>
     /// CLI entry point.
@@ -143,6 +147,8 @@ public static class Program
         var verbose = false;
         var extraBuildArgs = new List<string>();
         var positionalBuildTarget = (string?)null;
+        string? clauseManifest = null;
+        string? clauseFilter = null;
         var timeoutGiven = false;
         var stats = false;
         var limit = AgentOutput.DefaultLimit;
@@ -219,6 +225,12 @@ public static class Program
                 case "--verbose":
                 case "-v":
                     verbose = true;
+                    break;
+                case "--clauses":
+                    clauseManifest = NextVal();
+                    break;
+                case "--clause":
+                    clauseFilter = NextVal();
                     break;
                 case "--stats":
                     stats = true;
@@ -360,9 +372,56 @@ public static class Program
             return ResolveExitCode(QueryOutcomeStatus.Error);
         }
 
+        List<Verifiable.Analyzers.SpecClause>? manifestClauses = null;
+        if (clauseManifest is not null)
+        {
+            var (mc, mErr) = ClauseReport.ReadManifest(clauseManifest);
+            if (mErr is not null)
+            {
+                var cmErr = new QueryReport(
+                    command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "BAD CLAUSE MANIFEST", mErr, Location.None,
+                    "Pass a file shaped {\"clauses\":[{\"id\":\"C1\",\"text\":\"...\"}]}.");
+                WriteOutput(command, cmErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+            manifestClauses = mc;
+        }
+
+        if (command == "clauses")
+        {
+            var (clauseOutcome, clauseJson) = ClauseReport.Build(loadResult.Compilation, manifestClauses, indented: format.Equals("json", StringComparison.OrdinalIgnoreCase), limit, offset);
+            if (format.Equals("json", StringComparison.OrdinalIgnoreCase)) stdout.WriteLine(clauseJson);
+            else
+            {
+                stdout.WriteLine(clauseOutcome == AgentOutcome.Proved ? "-- CLAUSES COVERED --" : "-- CLAUSES NOT COVERED --");
+                stdout.WriteLine();
+                stdout.WriteLine("Run with `--format json` for the full map of clauses to symbols and contracts.");
+                if (agentMode) stdout.WriteLine($"<verifiable-clauses-result>{ClauseReport.Build(loadResult.Compilation, manifestClauses, false, limit, offset).Json}</verifiable-clauses-result>");
+            }
+            return (int)clauseOutcome;
+        }
+
         if (command == "check")
         {
             IReadOnlyList<string>? scope = null;
+            if (!string.IsNullOrWhiteSpace(clauseFilter))
+            {
+                var wanted = clauseFilter!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(c => c.Trim()).ToList();
+                var symbols = ClauseReport.SymbolsFor(loadResult.Compilation, wanted);
+                if (symbols.Count == 0)
+                {
+                    var clErr = new QueryReport(
+                        command, string.Empty, null, null, clauseFilter, QueryOutcomeStatus.Error,
+                        Array.Empty<MethodQueryResult>(), "UNKNOWN CLAUSE",
+                        $"No contract, type alias or invariant carries clause `{clauseFilter}`.", Location.None,
+                        "Run `verifiable-query clauses --format json` to see which clauses the code carries.");
+                    WriteOutput(command, clErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                    return ResolveExitCode(QueryOutcomeStatus.Error);
+                }
+                target = string.IsNullOrWhiteSpace(target) ? string.Join(",", symbols) : target + "," + string.Join(",", symbols);
+            }
+
             if (!string.IsNullOrWhiteSpace(target))
             {
                 scope = target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
@@ -385,7 +444,7 @@ public static class Program
             var before = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();
             var checkReport = ElmCheckEngine.CheckCompilation(
                 loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings,
-                scope, timeoutGiven ? timeoutMs.Value : null);
+                scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest);
             if (stats)
             {
                 var after = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();

@@ -27,7 +27,7 @@ internal sealed record DiagnosticFacts(
     /// Builds facts from a diagnostic's properties where the analyzer supplied them, and from the
     /// sections of its Elm text otherwise.
     /// </summary>
-    public static DiagnosticFacts From(IReadOnlyDictionary<string, string?>? properties, string elmText, string? symbol)
+    public static DiagnosticFacts From(IReadOnlyDictionary<string, string?>? properties, string elmText, string? symbol, string? clause = null)
     {
         var parsed = ParseElm(elmText);
         string? Prop(string key) =>
@@ -35,7 +35,7 @@ internal sealed record DiagnosticFacts(
 
         return new DiagnosticFacts(
             Symbol: Prop("Symbol") ?? symbol,
-            Clause: Prop("Clause"),
+            Clause: Prop("Clause") ?? clause,
             Obligation: Prop("ObligationKind"),
             Contract: Prop("Contract") ?? parsed.Contract,
             Reason: Prop("Reason") ?? parsed.Reason,

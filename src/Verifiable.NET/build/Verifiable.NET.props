@@ -7,6 +7,17 @@
     <CompilerVisibleProperty Include="VerifiableClosedEnums" />
     <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
     <CompilerVisibleProperty Include="VerifiableMaxSpecClauses" />
+    <CompilerVisibleProperty Include="VerifiableScope" />
+    <CompilerVisibleProperty Include="VerifiableZ3TimeoutMs" />
+  </ItemGroup>
+
+  <!-- R1: a spec clause manifest next to the project (*.clauses.json) turns on the clause drift gate
+       (VER401-VER404). Set VerifiableClauseManifest to use a file somewhere else. -->
+  <ItemGroup Condition="'$(VerifiableClauseManifest)' == ''">
+    <AdditionalFiles Include="$(MSBuildProjectDirectory)/*.clauses.json" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(VerifiableClauseManifest)' != ''">
+    <AdditionalFiles Include="$(VerifiableClauseManifest)" />
   </ItemGroup>
 
   <!-- With VerifiableAllowMissingZ3, VER104 is a warning; keep it one under TreatWarningsAsErrors / -warnaserror. -->

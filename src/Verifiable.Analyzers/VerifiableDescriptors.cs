@@ -10,6 +10,7 @@ internal static class VerifiableDescriptors
     private const string LinearCategory = "Verifiable.LinearTypes";
     private const string SmtCategory = "Verifiable.SMT";
     private const string SpecQualityCategory = "Verifiable.SpecQuality";
+    private const string ClauseCategory = "Verifiable.Clauses";
 
     public static readonly DiagnosticDescriptor HeapAliasingOrMutableState = new(
         id: "VER001",
@@ -130,6 +131,42 @@ internal static class VerifiableDescriptors
         category: SpecQualityCategory,
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor ClauseNotImplemented = new(
+        id: "VER401",
+        title: "Spec clause has no code",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor ConstructWithoutClause = new(
+        id: "VER402",
+        title: "Contract or rule names no spec clause",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor UnknownClause = new(
+        id: "VER403",
+        title: "Contract or rule names a clause the spec does not have",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor InvalidClauseManifest = new(
+        id: "VER404",
+        title: "Clause manifest cannot be read",
+        messageFormat: "{0}",
+        category: ClauseCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     public static Diagnostic CreateScoped(
         DiagnosticDescriptor descriptor,

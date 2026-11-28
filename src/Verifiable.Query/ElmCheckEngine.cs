@@ -26,7 +26,8 @@ internal static class ElmCheckEngine
         string? z3Path,
         bool includeWarnings = true,
         IReadOnlyList<string>? scope = null,
-        int? timeoutMs = null)
+        int? timeoutMs = null,
+        string? clauseManifestPath = null)
     {
         if (compilationErrors.Count > 0)
         {
@@ -53,10 +54,14 @@ internal static class ElmCheckEngine
             new SpecQualityAnalyzer(),
             new VerifiableSmtAnalyzer(),
             new ProofSuppressionAuditor(),
+            new ClauseCoverageAnalyzer(),
             new VerifiableNullabilitySuppressor());
 
         var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path, scope, timeoutMs);
-        var analyzerOptions = new AnalyzerOptions(ImmutableArray<AdditionalText>.Empty, configProvider);
+        var additional = clauseManifestPath is null
+            ? ImmutableArray<AdditionalText>.Empty
+            : ImmutableArray.Create<AdditionalText>(new FileText(clauseManifestPath));
+        var analyzerOptions = new AnalyzerOptions(additional, configProvider);
         var withAnalyzersOptions = new CompilationWithAnalyzersOptions(
             analyzerOptions,
             onAnalyzerException: null,
@@ -118,7 +123,7 @@ internal static class ElmCheckEngine
                 var summary = normalized.Substring(0, bannerIdx).Trim();
                 var elmBody = normalized.Substring(bannerIdx + 1);
                 presented.Add(new PresentedDiagnostic(d.Id, severity, file, line, col, summary, elmBody,
-                    DiagnosticFacts.From(d.Properties, elmBody, DiagnosticFacts.EnclosingSymbol(compilation, d.Location))));
+                    DiagnosticFacts.From(d.Properties, elmBody, DiagnosticFacts.EnclosingSymbol(compilation, d.Location), ClauseIds.ForLocation(d.Location))));
             }
             else if (d.Id.StartsWith("CS", StringComparison.OrdinalIgnoreCase))
             {
@@ -135,7 +140,7 @@ internal static class ElmCheckEngine
                 var bannerIdx = normalized.IndexOf("\n-- ", StringComparison.Ordinal);
                 var elmBody = bannerIdx >= 0 ? normalized.Substring(bannerIdx + 1) : normalized;
                 presented.Add(new PresentedDiagnostic(d.Id, severity, file, line, col, FirstLine(rawMsg), elmBody,
-                    DiagnosticFacts.From(d.Properties, elmBody, DiagnosticFacts.EnclosingSymbol(compilation, d.Location))));
+                    DiagnosticFacts.From(d.Properties, elmBody, DiagnosticFacts.EnclosingSymbol(compilation, d.Location), ClauseIds.ForLocation(d.Location))));
             }
         }
 
@@ -222,7 +227,7 @@ internal static class ElmCheckEngine
     {
         var errors = report.Diagnostics.Where(d => d.Severity == "error").ToList();
         if (errors.Count == 0) return report.ErrorCount > 0 ? AgentOutcome.Refuted : AgentOutcome.Proved;
-        if (errors.Any(d => d.RuleId.StartsWith("CS", StringComparison.Ordinal))) return AgentOutcome.InputError;
+        if (errors.Any(d => d.RuleId.StartsWith("CS", StringComparison.Ordinal) || d.RuleId == "VER404")) return AgentOutcome.InputError;
         if (errors.Any(d => d.RuleId == "VER104")) return AgentOutcome.ToolMissing;
         if (errors.All(d => d.RuleId is "VER103" or "VER106")) return AgentOutcome.Undecided;
         return AgentOutcome.Refuted;
@@ -414,6 +419,15 @@ internal static class ElmCheckEngine
             }
         }
         return names;
+    }
+
+    /// <summary>An additional file read from disk (the clause manifest).</summary>
+    private sealed class FileText(string path) : AdditionalText
+    {
+        public override string Path { get; } = System.IO.Path.GetFullPath(path);
+
+        public override Microsoft.CodeAnalysis.Text.SourceText? GetText(System.Threading.CancellationToken cancellationToken = default) =>
+            File.Exists(Path) ? Microsoft.CodeAnalysis.Text.SourceText.From(File.ReadAllText(Path)) : null;
     }
 
     private sealed class DictAnalyzerConfigOptionsProvider(string? z3Path, IReadOnlyList<string>? scope = null, int? timeoutMs = null) : AnalyzerConfigOptionsProvider

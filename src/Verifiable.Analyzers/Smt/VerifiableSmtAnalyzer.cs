@@ -931,6 +931,8 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         var props = ImmutableDictionary.CreateBuilder<string, string?>(StringComparer.Ordinal);
         props["Symbol"] = $"{method.ContainingType?.Name}.{method.Name}";
         props["ObligationKind"] = ob.Kind;
+        var clause = ClauseIds.ForLocation(ob.ContractLocation) ?? ClauseIds.ForLocation(ob.Location);
+        if (clause is not null) props["Clause"] = clause;
         props["Contract"] = ob.ContractText;
         if (!string.IsNullOrWhiteSpace(ob.Reason)) props["Reason"] = ob.Reason!.Trim();
         if (counterexampleJson is not null) props["Counterexample"] = counterexampleJson;

@@ -16,7 +16,7 @@ public sealed class SchemaConformanceTests
     private const string Source = """
         using Verifiable.Contracts;
 
-        [TypeAlias<int>("Percentages run from 0 to 100.")]
+        [TypeAlias<int>("Percentages run from 0 to 100.", Clause = "C1")]
         public readonly partial record struct Percent
         {
             public static bool IsValid(int value) => value >= 0 && value <= 100;
@@ -73,6 +73,7 @@ public sealed class SchemaConformanceTests
         yield return ["query", new[] { "ask", "--file", "{file}", "--format", "json" }];
         yield return ["query", new[] { "check-invariant", "--file", "{file}", "--type", "Percent", "--expr", "p => true", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--format", "json" }];
+        yield return ["clauses", new[] { "clauses", "--file", "{file}", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--z3", "{file}.missing", "--format", "json" }];
         yield return ["tools", new[] { "tools", "frob", "--format", "json" }];
     }
@@ -97,6 +98,7 @@ public sealed class SchemaConformanceTests
     [InlineData("query")]
     [InlineData("list")]
     [InlineData("tools")]
+    [InlineData("clauses")]
     public void Schemas_AreVersionedAndClosed(string name)
     {
         var schema = Schema(name);

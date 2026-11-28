@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/clauses.v1.schema.json",
+  "title": "verifiable-query clauses result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "manifest",
+    "missing",
+    "clauses",
+    "unknownClauses",
+    "withoutClause",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ]
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "manifest": {
+      "type": "boolean",
+      "description": "True when a clause manifest was given; clause IDs then come from it."
+    },
+    "missing": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Manifest clauses no code carries (VER401)."
+    },
+    "clauses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "text",
+          "constructs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "constructs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "symbol",
+                "file",
+                "line",
+                "text"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "Spec.Requires, Spec.Ensures, ..., or [TypeAlias<T>], [Refined<T>], [Invariant]."
+                },
+                "symbol": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "unknownClauses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clause",
+          "kind",
+          "symbol",
+          "file",
+          "line",
+          "text"
+        ],
+        "properties": {
+          "clause": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Spec.Requires, Spec.Ensures, ..., or [TypeAlias<T>], [Refined<T>], [Invariant]."
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Code naming a clause the manifest does not have (VER403)."
+    },
+    "withoutClause": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "symbol",
+          "file",
+          "line",
+          "text"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Spec.Requires, Spec.Ensures, ..., or [TypeAlias<T>], [Refined<T>], [Invariant]."
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Contracts and rules that name no clause (VER402)."
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    }
+  }
+}
