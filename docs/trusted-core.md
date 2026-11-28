@@ -50,7 +50,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **Z3** gives correct `sat`/`unsat` answers.
 - **Roslyn** gives a correct control-flow graph and types.
 - **The C# to SMT translation** (`CfgSsaLowerer` and friends) turns your code and contracts into formulas that mean the same thing. This is the largest trusted part. It is covered by the analyzer test suite, not by proof.
-- **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved.
+- **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved. `LeadingContractBlock` decides which `Spec.Requires` calls are preconditions (only those at the top of the method); the analyzer reports any other one as `VER101` rather than dropping it silently.
 - **The query CLI script.** `QueryEngine.BuildNamedQueryScript` assembles the premises, path conditions and `--assume` for `verifiable-query`. Only its final, negated-goal line comes from the core.
 - **The `VER007` transfer rules.** How each statement changes a token's state, and the check at method exit, live in `LinearObligationAnalyzer`. Only the merge rule is in the core.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query, returns the output lines it read, and computes the cache key (`BuildHashInput`).

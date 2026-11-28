@@ -18,6 +18,11 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Shared with Verifiable.Analyzers so the prover, the [InboundPort] gate and the contract export agree on which Spec.Requires count. -->
+  <ItemGroup>
+    <Compile Include="..\Verifiable.Analyzers\LeadingContractBlock.cs" Link="Shared\LeadingContractBlock.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />

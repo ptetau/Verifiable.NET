@@ -53,6 +53,7 @@ Proved on return values by Z3 and enforced at runtime inside `[InboundPort]` gat
 ### Method & Loop Contracts (`Spec.*`)
 - `Spec.Requires(bool condition, string? because = null)`
 - `Spec.RequiresWhen(bool condition, bool requirement, string? because = null)`
+- Placement: `Spec.Requires` / `Spec.RequiresWhen` must be in the leading contract block, the top-level statements before the first non-`Spec.*` statement (`Requires` and `Ensures` in any order; also constructors, accessors and `=> Spec.Requires(...)`). Elsewhere (inside `if`/`else`/loops/blocks/lambdas/local functions, or after another statement) it is `VER101` and is not assumed or required of callers. Use `Spec.RequiresWhen(condition, requirement, because)` at the top instead.
 - `Spec.Ensures<TResult>(Func<TResult, bool> predicate, string? because = null)`
 - `Spec.Ensures(bool condition, string? because = null)` (use `Spec.Result<TResult>()` if needed)
 - `Spec.EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)` / `Spec.EnsuresWhen(bool condition, bool postcondition, string? because = null)`
@@ -98,7 +99,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER005` (`DISALLOWED CONTROL FLOW`): unannotated `while`/`foreach`, `throw`, `try/catch`, `async`/`await`, `lock`, `goto`. Fix: `LoopInvariant` + `Decreases` or `Result<T, TError>`.
 - `VER006` (`UNVERIFIED CALL`): unverified callee, reflection, `dynamic`, unanalyzed delegate. Fix: `[Verifiable]` / `[PureAxiom]` / Sandwich I/O split.
 - `VER007` (`UNCONSUMED OBLIGATION`): dropped, overwritten, discarded, or double-consumed `[MustConsume]` token. Fix: pass to `[ConsumesObligation]`, return, or `Obligation.Discard(...)`.
-- `VER101` (`UNSUPPORTED CONTRACT`): invalid or non-lowerable contract.
+- `VER101` (`UNSUPPORTED CONTRACT`): invalid or non-lowerable contract, or a `Spec.Requires` / `Spec.RequiresWhen` outside the leading contract block (fix: move it to the top or use `Spec.RequiresWhen`).
 - `VER102` (`PROOF FAILED`): Z3 refutation (`SAT`) with counterexample, `Why this rule exists:`, and under `VERIFIABLE_AGENT=1`:
   `<verifiable-counterexample>{"rule":"VER102","symbol":"...","kind":"...","contract":"...","reason":"...","counterexample":{...},"smtHash":"...","fix":"Fix: ..."}</verifiable-counterexample>`
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.
