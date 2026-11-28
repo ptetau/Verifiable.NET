@@ -419,12 +419,22 @@ internal static class CorpusRunner
                 return new RunOutcome.Broken($"threw {ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}");
             }
 
-            foreach (var (because, predicate) in RuntimeSpec.Postconditions)
+            // A postcondition may call a contracted method. Evaluate it inside a frame so that callee counts as a
+            // callee (its broken precondition is a contract failure, its own postconditions are not collected), and
+            // iterate over a copy because that call must not change the list being checked.
+            foreach (var (because, predicate) in RuntimeSpec.Postconditions.ToList())
             {
                 bool holds;
                 try
                 {
-                    holds = (bool)predicate.DynamicInvoke(result)!;
+                    using (RuntimeSpec.Enter("(postcondition)", "postcondition"))
+                    {
+                        holds = (bool)predicate.DynamicInvoke(result)!;
+                    }
+                }
+                catch (TargetInvocationException ex) when (ex.InnerException is ContractBrokenException broken)
+                {
+                    return new RunOutcome.Broken($"returned {Show(result)}, and checking the postcondition \"{because}\" broke a contract: {broken.Message}");
                 }
                 catch (TargetInvocationException ex)
                 {
