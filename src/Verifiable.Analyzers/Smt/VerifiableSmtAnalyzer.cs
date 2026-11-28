@@ -177,10 +177,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                                     : "The Z3 SMT solver executable could not be found, so compile-time proof checks were skipped (`VerifiableAllowMissingZ3` is set).",
                                 explanation: "Checked `VERIFIABLE_Z3_PATH`, `.tools/z3`, `~/.verifiable/z3`, and `PATH`.",
                                 fixHint: blocks
-                                    ? "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`."
-                                    : "Install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.",
+                                    ? "Run `verifiable-query tools install z3`, install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`. To build without proofs on purpose, set `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>`."
+                                    : "Run `verifiable-query tools install z3`, install the `Verifiable.Z3` NuGet package (included with `Verifiable.NET`), pass `-p:VerifiableZ3Path=...`, set `VERIFIABLE_Z3_PATH`, or install `z3` on `PATH`.",
                                 summary: blocks
-                                    ? "Z3 not found, so proofs were not checked. Install Z3 (Verifiable.Z3 package, scripts/install-z3, VERIFIABLE_Z3_PATH or PATH), or set <VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3> to build without proofs."
+                                    ? "Z3 not found, so proofs were not checked. Install Z3 (`verifiable-query tools install z3`, Verifiable.Z3 package, scripts/install-z3, VERIFIABLE_Z3_PATH or PATH), or set <VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3> to build without proofs."
                                     : "Z3 not found; proof checks skipped because VerifiableAllowMissingZ3 is set.");
                             // Reported once per compilation and without a source location, so a `#pragma` or per-file
                             // setting in whichever file happened to reach Z3 first cannot switch off the whole check.
@@ -238,6 +238,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                             VerifiableDescriptors.ProofObligationFailed,
                             ob.Location,
                             additionalLocations: additionalLocs,
+                            properties: BuildAgentProperties(method, ob, combinedFixHint, BuildCounterexampleJson(ob, result)),
                             elmFail));
                     }
                     else
@@ -259,6 +260,12 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         opCtx.ReportDiagnostic(Diagnostic.Create(
                             VerifiableDescriptors.SmtSolverUnknown,
                             ob.Location,
+                            additionalLocations: null,
+                            properties: BuildAgentProperties(
+                                method,
+                                ob,
+                                "Fix: Simplify the contract, add `Spec.LoopInvariant` or `Spec.Decreases` annotations, or factor complex steps into helper lemmas.",
+                                counterexampleJson: null),
                             elmUnknown));
                     }
                 }
@@ -860,6 +867,41 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         _ => "Fix: Strengthen preconditions or fix the implementation so the contract holds on all paths."
     };
 
+    /// <summary>
+    /// Structured facts about a proof obligation, attached to its diagnostic so tools (such as
+    /// <c>verifiable-query check --format json</c>) can report it without parsing the Elm text.
+    /// Keys: <c>Symbol</c>, <c>ObligationKind</c>, <c>Contract</c>, <c>Reason</c>, <c>Counterexample</c>
+    /// (a JSON object of parameter to value), <c>Fix</c>.
+    /// </summary>
+    internal static ImmutableDictionary<string, string?> BuildAgentProperties(
+        IMethodSymbol method,
+        ProofObligation ob,
+        string fixHint,
+        string? counterexampleJson)
+    {
+        var props = ImmutableDictionary.CreateBuilder<string, string?>(StringComparer.Ordinal);
+        props["Symbol"] = $"{method.ContainingType?.Name}.{method.Name}";
+        props["ObligationKind"] = ob.Kind;
+        props["Contract"] = ob.ContractText;
+        if (!string.IsNullOrWhiteSpace(ob.Reason)) props["Reason"] = ob.Reason!.Trim();
+        if (counterexampleJson is not null) props["Counterexample"] = counterexampleJson;
+        props["Fix"] = fixHint;
+        return props.ToImmutable();
+    }
+
+    private static string BuildCounterexampleJson(ProofObligation ob, SmtQueryResult result)
+    {
+        var cePairs = new List<string>();
+        foreach (var (paramName, smtName) in ob.TrackedParameters)
+        {
+            if (result.Model.TryGetValue(smtName, out var val))
+            {
+                cePairs.Add($"{JsonString(paramName)}:{JsonString(val)}");
+            }
+        }
+        return "{" + string.Join(",", cePairs) + "}";
+    }
+
     private static string BuildAgentJsonBlock(
         IMethodSymbol method,
         ProofObligation ob,
@@ -898,7 +940,10 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 case '\r': sb.Append("\\r"); break;
                 case '\n': sb.Append("\\n"); break;
                 case '\t': sb.Append("\\t"); break;
-                default: sb.Append(ch); break;
+                default:
+                    if (ch < 32) sb.Append("\\u").Append(((int)ch).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
+                    else sb.Append(ch);
+                    break;
             }
         }
         sb.Append('"');

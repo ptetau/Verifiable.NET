@@ -32,6 +32,7 @@
 
   <ItemGroup>
     <None Include="..\..\llms.txt" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\docs\schemas\*.schema.json" Pack="true" PackagePath="schemas" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

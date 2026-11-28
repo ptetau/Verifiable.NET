@@ -17,7 +17,8 @@ internal sealed record PresentedDiagnostic(
     int Line,
     int Column,
     string Summary,
-    string ElmBlock);
+    string ElmBlock,
+    DiagnosticFacts? Facts = null);
 
 internal sealed record CheckReport(
     string Mode,
@@ -92,7 +93,9 @@ internal static class ElmSarifPresenter
                     var bannerIdx = normalized.IndexOf("\n-- ", StringComparison.Ordinal);
                     var summary = normalized.Substring(0, bannerIdx).Trim();
                     var elmBody = normalized.Substring(bannerIdx + 1);
-                    presented.Add(new PresentedDiagnostic(ruleId, severity, filePath, startLine, startCol, summary, elmBody));
+                    var symbol = DiagnosticFacts.EnclosingSymbol(compilation, filePath, startLine, startCol);
+                    presented.Add(new PresentedDiagnostic(ruleId, severity, filePath, startLine, startCol, summary, elmBody,
+                        DiagnosticFacts.From(ReadCustomProperties(r), elmBody, symbol)));
                     continue;
                 }
 
@@ -174,6 +177,23 @@ internal static class ElmSarifPresenter
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>Reads the diagnostic properties Roslyn writes to SARIF as <c>properties.customProperties</c>.</summary>
+    private static IReadOnlyDictionary<string, string?>? ReadCustomProperties(JsonElement result)
+    {
+        if (!result.TryGetProperty("properties", out var props) || props.ValueKind != JsonValueKind.Object ||
+            !props.TryGetProperty("customProperties", out var custom) || custom.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var dict = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var p in custom.EnumerateObject())
+        {
+            dict[p.Name] = p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText();
+        }
+        return dict;
     }
 
     private static string FormatFromDiskSnippet(

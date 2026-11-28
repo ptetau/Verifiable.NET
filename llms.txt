@@ -128,5 +128,7 @@ Ask typed C# questions about `[Verifiable]` code and get Z3 unsat-core explanati
 - `dotnet run --project src/Verifiable.Query -c Release -- check-invariant --project App.csproj --type StateType --expr "s => s.TotalDebits == s.TotalCredits"`
 - `dotnet run --project src/Verifiable.Query -c Release -- list --project App.csproj` (also supports `--file <a.cs>` and `--stdin`)
 - Flags: `--format elm|json`, `--timeout <ms>`, `--z3 <path>`, `--all`, `--verbose`
-- Exit codes: `0`=proved, `1`=refuted, `2`=inconclusive, `3`=error/unbound claim, `4`=Z3 missing
+- Native tools: `verifiable-query tools status` / `tools install [z3]` (pinned Z3 5.3.3, SHA-256 checked, installs to `~/.verifiable/z3`; `VERIFIABLE_TOOLS_MIRROR` for offline). Clean machine: `dotnet tool install -g Verifiable.Query` then `verifiable-query tools install`
+- Exit codes, same on every command (JSON `status` in brackets): `0` proved, `1` refuted, `2` undecided, `3` input_error (bad args, missing file, CS errors), `4` tool_missing (no Z3)
+- `--format json`: first property `schema` (`verifiable-query/<check|query|list>@1`, schemas in `docs/schemas`); diagnostics carry `rule, severity, clause, symbol, file, line, column, contract, reason, counterexample, fix, summary`; lists page with `--limit` (default 50) and `--cursor <page.nextCursor>`; paths are relative; output is byte-identical for the same input
 - Under `VERIFIABLE_AGENT=1`, emits single-line `<verifiable-query-result>{...}</verifiable-query-result>` with `reasons[]` (unsat-core rules + spirit strings + `file:line`), `vacuous`, and `counterexamples[]`.

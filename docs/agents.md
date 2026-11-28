@@ -59,9 +59,42 @@ For full GalaxyCheck agent documentation, see `external/GalaxyCheck/docs/agents.
 
 ## 4. `Verifiable.Query` CLI Agent Schema
 
-`Verifiable.Query` (`verifiable-query`, pure .NET Core) exposes `ask`, `check-invariant`, and `list` over `--project`, `--file`, or `--stdin`.
+`Verifiable.Query` (`verifiable-query`, pure .NET Core) exposes `ask`, `check-invariant`, `check`, `build`, and `list` over `--project`, `--file`, or `--stdin`.
 
-- **Exit codes**: `0` proved, `1` refuted, `2` inconclusive, `3` usage/compilation/binding error, `4` Z3 not found.
-- **`--format json`** writes structured JSON to stdout; **`--format elm` + `VERIFIABLE_AGENT=1`** appends `<verifiable-query-result>{...}</verifiable-query-result>` (or `<verifiable-symbols>{...}</verifiable-symbols>` on `list`):
-  - Top-level fields: `command`, `status` (`"proved" | "refuted" | "inconclusive" | "error" | "z3_not_found"`), `exitCode`, `claim`, optional `assume`, `because`, `targetType`, `error`, `fix`, and `results[]`.
-  - Per-method fields: `method`, `returnType`, `status`, `vacuous`, `pathsChecked`, `smtHash`, `reasons[]` (`{kind, label, spirit?, file?, line?}` from Z3 unsat core), `counterexamples[]` (`{file, line, values}`), optional `error`, `hint`.
+Every command follows one output contract (requirement R12):
+
+- **Never interactive.** No prompts; stdin is read only with `--stdin`.
+- **Exit codes, the same on every command** (JSON `status` carries the same word):
+
+  | Exit | `status` | Meaning |
+  | --- | --- | --- |
+  | 0 | `proved` | Everything asked was proved; `check` found no errors. |
+  | 1 | `refuted` | A claim was disproved, or `check` / `build` found proof or rule errors. |
+  | 2 | `undecided` | The solver could not decide (`VER103`, `VER106`) and nothing was refuted. |
+  | 3 | `input_error` | Bad arguments, missing files, or code that does not compile (`CS*`). |
+  | 4 | `tool_missing` | Z3 was not found (`VER104`). |
+
+- **`--format json`** writes one JSON document to stdout. Its first property is `schema`, e.g. `"verifiable-query/check@1"`. The schemas are published in [`docs/schemas`](schemas/) (`check`, `query`, `list`), are closed (no extra properties), and fix the property order. The version after `@` changes only on a breaking change.
+- **Diagnostics** (`check`, `build`, `check --sarif`) each carry `rule`, `severity`, `clause`, `symbol`, `file`, `line`, `column`, `contract`, `reason`, `counterexample` (an object of input to value), `fix`, and a one-line `summary`. A field an analyzer cannot fill is `null`, never missing.
+- **Query results** (`ask`, `check-invariant`) carry `claim`, `assume`, `because`, `target`, `error` (`{title, message, fix}` or `null`) and `results[]`, each with `method`, `returnType`, `status`, `vacuous`, `pathsChecked`, `file`, `line`, `smtHash`, `reasons[]` (from the Z3 unsat core), `counterexamples[]`, `error` and `fix`.
+- **Bounded output.** List-shaped results (`diagnostics`, `list`) come in pages of `--limit` items (default 50, max 1000). Pass `page.nextCursor` back as `--cursor` for the next page; it is `null` on the last page.
+- **Same input, same output.** File paths are relative to the current directory with forward slashes; there are no timestamps or random ordering. Two runs on the same input give byte-identical JSON.
+- **No colour for agents.** JSON never has ANSI escapes, and neither does Elm output under `VERIFIABLE_AGENT=1`, whatever `--color` says.
+- `--format elm` + `VERIFIABLE_AGENT=1` appends the same JSON on one line inside `<verifiable-query-result>`, `<verifiable-check-result>` or `<verifiable-symbols>` tags.
+
+### Native tools (`tools`)
+
+Agents only ever call `dotnet` commands; native tools sit behind `verifiable-query` (requirement R16). Today that is Z3; APE (SWI-Prolog) for the pipeline's ACE step will join it once its packaging is decided.
+
+On a machine with only the .NET SDK, two commands set everything up:
+
+```bash
+dotnet tool install -g Verifiable.Query
+verifiable-query tools install          # downloads Z3 5.3.3, checks its SHA-256, unpacks to ~/.verifiable/z3
+```
+
+- `verifiable-query tools status [--format json]` reports each tool's pinned version, checksum, whether it is installed, its version, and where it was found (`managed`, `VERIFIABLE_Z3_PATH`, `repository`, `PATH`, `--z3`). Exit `0` when all are installed, `4` when one is missing.
+- `verifiable-query tools install [z3] [--to <dir>] [--force]` installs the pinned build for this platform. A download whose checksum does not match the manifest is refused and nothing is installed. Re-running is a no-op when the pinned version is already there.
+- Set `VERIFIABLE_TOOLS_MIRROR` to an `https://` mirror or a `file://` folder holding the same archives for offline or air-gapped machines.
+- Every "Z3 not found" result (`VER104`, query exit code `4`) quotes `verifiable-query tools install z3`.
+

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/list.v1.schema.json",
+  "title": "verifiable-query list result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "constrainedTypes",
+    "invariants",
+    "methods",
+    "page"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Schema identifier and version, always the first property."
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "Same word for the same exit code on every command."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "0 proved, 1 refuted, 2 undecided, 3 input_error, 4 tool_missing."
+    },
+    "constrainedTypes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "underlyingType",
+          "predicate",
+          "description",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "underlyingType": {
+            "type": "string"
+          },
+          "predicate": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "member",
+          "description",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "member": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "signature",
+          "returnType",
+          "isInboundPort",
+          "requiresCount",
+          "ensuresCount",
+          "file",
+          "line"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "returnType": {
+            "type": "string"
+          },
+          "isInboundPort": {
+            "type": "boolean"
+          },
+          "requiresCount": {
+            "type": "integer"
+          },
+          "ensuresCount": {
+            "type": "integer"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "returned",
+        "total",
+        "nextCursor"
+      ],
+      "properties": {
+        "offset": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "returned": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      },
+      "description": "One page spans constrainedTypes, then invariants, then methods."
+    }
+  }
+}

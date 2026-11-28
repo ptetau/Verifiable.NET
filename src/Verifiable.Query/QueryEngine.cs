@@ -425,7 +425,7 @@ internal static class QueryEngine
                     Array.Empty<QueryReason>(),
                     Array.Empty<PathCounterexample>(),
                     "The Z3 SMT solver executable could not be found.",
-                    "Run `scripts/install-z3.ps1` (Windows) or `scripts/install-z3.sh` (Linux/macOS), pass `--z3 <path>`, or set `VERIFIABLE_Z3_PATH`.");
+                    "Run `verifiable-query tools install z3`, or pass `--z3 <path>`, or set `VERIFIABLE_Z3_PATH`.");
             }
 
             if (verdict == ObligationVerdict.Refuted)
