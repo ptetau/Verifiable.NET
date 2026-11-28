@@ -14,10 +14,16 @@ public readonly record struct PendingCommit(int Id);
 public static class Ledger
 {
     private static readonly HashSet<int> Committed = new();
+    private static readonly object Gate = new();
 
+    // The two commits run on thread-pool threads after Task.Yield, so the set is guarded: without the lock both
+    // Adds can race and return true, and the witness would miss the double commit.
     public static void Record(int id)
     {
-        if (!Committed.Add(id)) throw new InvalidOperationException($"commit {id} applied twice");
+        lock (Gate)
+        {
+            if (!Committed.Add(id)) throw new InvalidOperationException($"commit {id} applied twice");
+        }
     }
 }
 
