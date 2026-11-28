@@ -50,6 +50,7 @@ internal static class ElmCheckEngine
             new LinearObligationAnalyzer(),
             new SpecQualityAnalyzer(),
             new VerifiableSmtAnalyzer(),
+            new ProofSuppressionAuditor(),
             new VerifiableNullabilitySuppressor());
 
         var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path);
