@@ -42,6 +42,80 @@ internal static class InitializerProjection
         return false;
     }
 
+    /// <summary>Prefix of the synthetic field that holds a primary-constructor parameter captured by a member of a class or struct.</summary>
+    internal const string CapturedFieldPrefix = "$";
+
+    /// <summary>The parameter list of a C# 12 primary constructor on a class or struct (not a record), or null.</summary>
+    internal static TypeDeclarationSyntax? PrimaryConstructorDeclaration(INamedTypeSymbol type)
+    {
+        if (type.IsRecord || type.TypeKind is not (TypeKind.Class or TypeKind.Struct) ||
+            type.BaseType is not { } bt || bt.SpecialType is not (SpecialType.System_Object or SpecialType.System_ValueType))
+        {
+            return null;
+        }
+        foreach (var r in type.DeclaringSyntaxReferences)
+        {
+            if (r.GetSyntax() is TypeDeclarationSyntax decl && decl.ParameterList is not null && decl is ClassDeclarationSyntax or StructDeclarationSyntax)
+            {
+                return decl;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>True for the constructor a class or struct declares through its primary-constructor parameter list.</summary>
+    internal static bool IsPrimaryNonRecordConstructor(IMethodSymbol ctor) =>
+        ctor.MethodKind == MethodKind.Constructor && !ctor.IsStatic &&
+        ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ClassDeclarationSyntax or StructDeclarationSyntax;
+
+    /// <summary>
+    /// The primary-constructor parameters of a class or struct that members read (captured), and whether any parameter
+    /// is ever assigned, incremented or passed by reference (then the type is not a pure projection of its parameters).
+    /// </summary>
+    internal static (List<IParameterSymbol> Captured, bool AnyMutated) AnalyzePrimaryConstructor(INamedTypeSymbol type)
+    {
+        var captured = new List<IParameterSymbol>();
+        var anyMutated = false;
+        if (PrimaryConstructorDeclaration(type) is not { } decl)
+        {
+            return (captured, false);
+        }
+        var ctor = type.InstanceConstructors.FirstOrDefault(c => IsPrimaryNonRecordConstructor(c));
+        if (ctor is null)
+        {
+            return (captured, false);
+        }
+        foreach (var param in ctor.Parameters)
+        {
+            var isCaptured = false;
+            foreach (var r in type.DeclaringSyntaxReferences)
+            {
+                if (r.GetSyntax() is not TypeDeclarationSyntax td) continue;
+                foreach (var id in td.Members.SelectMany(m => m.DescendantNodes().OfType<IdentifierNameSyntax>())
+                             .Where(i => i.Identifier.ValueText == param.Name))
+                {
+                    if (id.Parent is MemberAccessExpressionSyntax ma && ma.Name == id) continue;
+                    if (id.Parent is MemberBindingExpressionSyntax) continue;
+                    if (id.Parent is NameColonSyntax || id.Parent is NameEqualsSyntax) continue;
+                    // An initializer reads the parameter at construction time, not through a stored capture.
+                    var inInitializer = id.Ancestors().TakeWhile(a => a is not MemberDeclarationSyntax)
+                        .Any(a => a is EqualsValueClauseSyntax);
+                    if (!inInitializer) isCaptured = true;
+                    if (id.Parent is AssignmentExpressionSyntax asg && asg.Left == id ||
+                        id.Parent is PrefixUnaryExpressionSyntax { RawKind: (int)Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreIncrementExpression or (int)Microsoft.CodeAnalysis.CSharp.SyntaxKind.PreDecrementExpression } ||
+                        id.Parent is PostfixUnaryExpressionSyntax ||
+                        id.Parent is ArgumentSyntax { RefKindKeyword.ValueText: "ref" or "out" or "in" } ||
+                        id.Parent is RefExpressionSyntax)
+                    {
+                        anyMutated = true;
+                    }
+                }
+            }
+            if (isCaptured) captured.Add(param);
+        }
+        return (captured, anyMutated);
+    }
+
     /// <summary>
     /// Returns true if an object creation can be modeled purely as a field projection
     /// (positional record construction, or implicit/default parameterless construction with
@@ -75,8 +149,20 @@ internal static class InitializerProjection
 
         var isPositionalRecordCtor = IsPurePositionalRecordConstructor(ctor, composite);
         var isPureDefaultCtor = IsPureDefaultParameterlessConstructor(ctor);
+        var isPrimaryCtor = false;
+        HashSet<string>? capturedNames = null;
+        if (!isPositionalRecordCtor && !isPureDefaultCtor && IsPrimaryNonRecordConstructor(ctor))
+        {
+            var (captured, anyMutated) = AnalyzePrimaryConstructor(targetType);
+            if (!anyMutated &&
+                captured.All(c => composite.Fields.Any(f => f.Name == CapturedFieldPrefix + c.Name)))
+            {
+                isPrimaryCtor = true;
+                capturedNames = new HashSet<string>(captured.Select(c => c.Name), StringComparer.Ordinal);
+            }
+        }
 
-        if (!isPositionalRecordCtor && !isPureDefaultCtor)
+        if (!isPositionalRecordCtor && !isPureDefaultCtor && !isPrimaryCtor)
         {
             reason = $"Constructor of '{targetType.Name}' has custom logic and cannot be lowered as a pure projection.";
             return false;
@@ -88,7 +174,14 @@ internal static class InitializerProjection
         {
             if (arg.Parameter is not null)
             {
-                assignedMembers.Add(arg.Parameter.Name);
+                if (!isPrimaryCtor)
+                {
+                    assignedMembers.Add(arg.Parameter.Name);
+                }
+                else if (capturedNames!.Contains(arg.Parameter.Name))
+                {
+                    assignedMembers.Add(CapturedFieldPrefix + arg.Parameter.Name);
+                }
             }
         }
 

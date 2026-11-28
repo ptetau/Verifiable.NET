@@ -1,6 +1,5 @@
 // Generic method with T : struct and a correct contract, called with two instantiations.
 // @expect: proved
-// @known-bug: calling a generic method (T : struct) with a Requires on another parameter makes the SMT query reference an undeclared constant (VER103 unknown constant p_k)
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;
@@ -17,7 +16,7 @@ public static class R2GenOk
 
     public static int Use(int a, bool b)
     {
-        Spec.Requires(a >= 0 && a < 100, "Small.");
+        Spec.Requires(a >= 0 && a < 99, "Small enough that a + 1 is still below 100.");
         Spec.Ensures<int>(r => r == a + 2, "Adds two.");
         return Const(b, Const(a, a));
     }

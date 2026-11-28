@@ -1,5 +1,4 @@
 // Two counters meet in the middle: for (; i < j; i++, j--). The gap j - i drops by 2 per pass.
-// @known-bug: LoopDecreasesStep wrongly fails: measure j - i is -1 after the last pass (n = 1), where the loop condition would exit; the step check does not use the condition
 // @expect: proved
 using Verifiable.Contracts;
 

@@ -832,6 +832,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var decBeforeTerms = new List<(IOperation MeasureOp, Location Loc, string Display, string? Because, SmtTypedTerm Term)>();
+        var bodyEntryAssumptions = new List<string>();
         foreach (var (decOp, loc, display, because) in decreasesExprs)
         {
             try
@@ -839,7 +840,9 @@ internal sealed partial class CfgSsaLowerer
                 var decTerm = LowerExpression(decOp, preGamma, loopEnv, emitObligations: false);
                 var zero = _translator.FormatIntLiteral(0, _types.GetSort(decTerm.Type) == "(_ BitVec 64)" ? 64 : 32);
                 var geOp = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(decTerm.Type)) ? "bvsge" : ">=";
-                invAssumptions.Add($"({geOp} {decTerm.Term} {zero})");
+                // The measure is evaluated inside the body, so it is non-negative only on the iterations that enter it
+                // (an iteration that exits the loop may leave it negative): assumed on the edges into the body below.
+                bodyEntryAssumptions.Add($"({geOp} {decTerm.Term} {zero})");
                 decBeforeTerms.Add((decOp, loc, display, because, decTerm));
             }
             catch (ContractLoweringException ex)
@@ -889,12 +892,14 @@ internal sealed partial class CfgSsaLowerer
         if (condDest is not null)
         {
             var edgeGamma = condBranchCond is not null ? CombineAnd(loopGamma, condBranchCond) : loopGamma;
+            edgeGamma = AssumeMeasuresIfEntering(edgeGamma, condDest, header, loopBody, bodyEntryAssumptions);
             DispatchLoopBodyEdge(header, condDest, edgeGamma, headerWorkEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
         }
 
         if (fallDest is not null && header.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Regular)
         {
             var edgeGamma = fallBranchCond is not null ? CombineAnd(loopGamma, fallBranchCond) : loopGamma;
+            edgeGamma = AssumeMeasuresIfEntering(edgeGamma, fallDest, header, loopBody, bodyEntryAssumptions);
             DispatchLoopBodyEdge(header, fallDest, edgeGamma, headerWorkEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
         }
 
@@ -965,6 +970,53 @@ internal sealed partial class CfgSsaLowerer
         }
     }
 
+    private string AssumeMeasuresIfEntering(string gamma, BasicBlock dst, BasicBlock header, HashSet<BasicBlock> loopBody, List<string> assumptions)
+    {
+        if (ReferenceEquals(dst, header) || !loopBody.Contains(dst)) return gamma;
+        foreach (var a in assumptions) gamma = CombineAnd(gamma, a);
+        return gamma;
+    }
+
+    /// <summary>
+    /// The term that says the next iteration enters the loop body, read in the environment at a back edge; null when the
+    /// header is not a plain condition (then the measure check falls back to requiring the measure to be valid unconditionally).
+    /// </summary>
+    private string? NextIterationEntersBody(BasicBlock header, HashSet<BasicBlock> loopBody, string gamma, BlockEnv env)
+    {
+        if (header.Operations.Any(o => !IsAnnotationFragment(o))) return null;
+        if (header.BranchValue is not { } bv || IsAnnotationFragment(bv) || header.ConditionalSuccessor is null) return null;
+        var kind = header.ConditionKind;
+        if (kind != ControlFlowConditionKind.WhenTrue && kind != ControlFlowConditionKind.WhenFalse) return null;
+        var condDest = header.ConditionalSuccessor.Destination;
+        var fallDest = header.FallThroughSuccessor?.Destination;
+        var condEnters = condDest is not null && !ReferenceEquals(condDest, header) && loopBody.Contains(condDest);
+        var fallEnters = fallDest is not null && !ReferenceEquals(fallDest, header) && loopBody.Contains(fallDest);
+        if (condEnters == fallEnters) return null;
+        try
+        {
+            var c = LowerExpression(bv, gamma, env.Clone(), emitObligations: false).Term;
+            var whenTrue = kind == ControlFlowConditionKind.WhenTrue;
+            return condEnters == whenTrue ? c : $"(not {c})";
+        }
+        catch (ContractLoweringException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A primary-constructor parameter read from a member of its type is the stored field of the receiver.</summary>
+    private SmtTypedTerm? TryReadCapturedPrimaryParameter(IParameterSymbol parameter, BlockEnv env)
+    {
+        if (parameter.ContainingSymbol is not IMethodSymbol ctor || !InitializerProjection.IsPrimaryNonRecordConstructor(ctor))
+            return null;
+        var self = env.ThisOverride ?? _entryThis;
+        if (self is null || !_types.TryGetComposite(ctor.ContainingType, out var comp) || comp is null)
+            return null;
+        var fname = InitializerProjection.CapturedFieldPrefix + parameter.Name;
+        var field = comp.Fields.FirstOrDefault(f => f.Name == fname);
+        return field is null ? null : new SmtTypedTerm($"({field.AccessorName} {self.Term})", field.Type);
+    }
+
     private void DispatchLoopBodyEdge(
         BasicBlock src,
         BasicBlock dst,
@@ -1001,8 +1053,11 @@ internal sealed partial class CfgSsaLowerer
                     var isBv = ContractExpressionTranslator.IsBitVecSort(_types.GetSort(afterTerm.Type));
                     var geOp = isBv ? "bvsge" : ">=";
                     var ltOp = isBv ? "bvslt" : "<";
+                    // The measure is evaluated only on an iteration that enters the body, so the check is conditional on that.
+                    var stepOk = $"(and ({geOp} {afterTerm.Term} {zero}) ({ltOp} {afterTerm.Term} {beforeTerm.Term}))";
+                    var enters = NextIterationEntersBody(header, loopBody, edgeGamma, env);
                     AddObligation("LoopDecreasesStep", $"{display} decreases", loc, edgeGamma,
-                        $"(and ({geOp} {afterTerm.Term} {zero}) ({ltOp} {afterTerm.Term} {beforeTerm.Term}))", because);
+                        enters is null ? stepOk : $"(=> {enters} {stepOk})", because);
                 }
                 catch (ContractLoweringException ex)
                 {
@@ -1635,6 +1690,7 @@ internal sealed partial class CfgSsaLowerer
                 if (env.Vars.TryGetValue(pr.Parameter, out var pVal)) return pVal;
                 if (pr.Parameter.Name == CrossAssemblyContractCache.ThisPlaceholder && env.ThisOverride is not null) return env.ThisOverride;
                 if (pr.Parameter.Name == CrossAssemblyContractCache.ResultPlaceholder && env.SpecResult is not null) return env.SpecResult;
+                if (TryReadCapturedPrimaryParameter(pr.Parameter, env) is { } capturedRead) return capturedRead;
                 return new SmtTypedTerm("p_" + SmtTypeSystem.SymbolPart(pr.Parameter.Name), pr.Parameter.Type);
 
             case IInstanceReferenceOperation inst when inst.ReferenceKind == InstanceReferenceKind.ContainingTypeInstance:
@@ -2522,7 +2578,12 @@ internal sealed partial class CfgSsaLowerer
             {
                 var v = LowerExpression(arg.Value, gamma, env, emitObligations, inlineDepth);
                 var converted = _translator.ConvertTo(v, arg.Parameter.Type);
-                if (ctorFields is null) argMap[arg.Parameter.Name] = converted;
+                if (ctorFields is null)
+                {
+                    argMap[objCreate.Constructor is { } pc && InitializerProjection.IsPrimaryNonRecordConstructor(pc)
+                        ? InitializerProjection.CapturedFieldPrefix + arg.Parameter.Name
+                        : arg.Parameter.Name] = converted;
+                }
                 if (arg.Parameter.Ordinal < ctorArgs.Length) ctorArgs[arg.Parameter.Ordinal] = converted;
             }
         }
@@ -3079,6 +3140,10 @@ internal sealed partial class CfgSsaLowerer
         for (var i = 0; i < method.Parameters.Length && i < args.Count; i++)
         {
             calleeEnv.Vars[method.Parameters[i]] = args[i];
+            // The callee's contract and body are written against the declaration's parameters, which differ from the
+            // parameters of a constructed generic instantiation.
+            if (method.OriginalDefinition.Parameters.Length == method.Parameters.Length)
+                calleeEnv.Vars[method.OriginalDefinition.Parameters[i]] = args[i];
             if (IsClosedEnum(method.Parameters[i].Type, out var paramEnum, out var paramEnumVals))
             {
                 EmitSafetyObligation("Precondition",

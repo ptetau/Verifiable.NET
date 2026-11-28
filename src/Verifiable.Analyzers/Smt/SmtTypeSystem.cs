@@ -698,9 +698,11 @@ internal sealed class SmtTypeSystem
         while (hierarchy.Count > 0)
         {
             var cur = hierarchy.Pop();
+            var (capturedParams, primaryMutated) = InitializerProjection.AnalyzePrimaryConstructor(cur);
+            var hasPrimary = InitializerProjection.PrimaryConstructorDeclaration(cur) is not null;
             var ctorParamNames = new HashSet<string>(
                 cur.InstanceConstructors
-                    .Where(c => !IsCopyConstructor(cur, c))
+                    .Where(c => !IsCopyConstructor(cur, c) && !(hasPrimary && InitializerProjection.IsPrimaryNonRecordConstructor(c)))
                     .SelectMany(c => c.Parameters)
                     .Select(p => p.Name),
                 StringComparer.OrdinalIgnoreCase);
@@ -720,6 +722,19 @@ internal sealed class SmtTypeSystem
                 {
                     var isNonDefault = VerifiableSymbolHelpers.IsNonDefaultMember(p, cur, globalNonDefault: false);
                     fields.Add(new SmtFieldInfo(p.Name, p.Type, $"f_{dtSort}_{SymbolPart(p.Name)}", isNonDefault));
+                }
+            }
+
+            if (!primaryMutated)
+            {
+                // A parameter of a class's or struct's primary constructor that members read is stored state: a field.
+                foreach (var cp in capturedParams)
+                {
+                    var fname = InitializerProjection.CapturedFieldPrefix + cp.Name;
+                    if (seen.Add(fname))
+                    {
+                        fields.Add(new SmtFieldInfo(fname, cp.Type, $"f_{dtSort}_{SymbolPart(fname)}"));
+                    }
                 }
             }
 
