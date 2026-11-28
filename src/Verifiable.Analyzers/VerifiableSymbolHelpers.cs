@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Verifiable.Shared;
 
 namespace Verifiable.Analyzers;
 
@@ -32,6 +34,20 @@ internal static class VerifiableSymbolHelpers
 
     public static bool IsSpecCall(IMethodSymbol method, string specMethodName) =>
         method.ContainingType?.ToDisplayString() == SpecTypeName && method.Name == specMethodName;
+
+    /// <summary>True if <paramref name="call"/> binds to a <c>Verifiable.Contracts.Spec</c> method.</summary>
+    public static bool BindsToSpec(SemanticModel model, InvocationExpressionSyntax call) =>
+        model.SyntaxTree == call.SyntaxTree &&
+        model.GetSymbolInfo(call).Symbol is IMethodSymbol { ContainingType: { } type } &&
+        type.ToDisplayString() == SpecTypeName;
+
+    /// <summary>
+    /// True if this <c>Spec.Requires</c> / <c>Spec.RequiresWhen</c> call is a precondition: it sits in its member's
+    /// leading contract block (see <see cref="LeadingContractBlock"/>).
+    /// </summary>
+    public static bool IsPrecondition(SemanticModel model, SyntaxNode call) =>
+        call is InvocationExpressionSyntax inv &&
+        LeadingContractBlock.Classify(inv, c => BindsToSpec(model, c), out _) == ContractPlacement.Leading;
 
     public static bool IsImmutableArrayType(ITypeSymbol? type) =>
         type is INamedTypeSymbol named &&

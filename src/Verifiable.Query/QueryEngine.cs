@@ -839,18 +839,17 @@ internal static class QueryEngine
 
     private static (int RequiresCount, int EnsuresCount) CountMethodSpecs(MethodDeclarationSyntax md)
     {
-        var req = 0;
-        var ens = 0;
-        foreach (var inv in md.DescendantNodes().OfType<InvocationExpressionSyntax>())
-        {
-            if (inv.Expression is MemberAccessExpressionSyntax ma &&
-                ma.Expression is IdentifierNameSyntax { Identifier.ValueText: "Spec" })
-            {
-                var name = ma.Name.Identifier.ValueText;
-                if (name is "Requires" or "RequiresWhen") req++;
-                else if (name.StartsWith("Ensures", StringComparison.Ordinal)) ens++;
-            }
-        }
+        static bool IsSpec(InvocationExpressionSyntax inv) =>
+            inv.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax { Identifier.ValueText: "Spec" } };
+
+        static string Name(InvocationExpressionSyntax inv) =>
+            ((MemberAccessExpressionSyntax)inv.Expression).Name.Identifier.ValueText;
+
+        // Only a Requires in the leading contract block is a precondition; see LeadingContractBlock.
+        var req = Verifiable.Shared.LeadingContractBlock.GetLeadingSpecCalls(md, IsSpec)
+            .Count(inv => Name(inv) is "Requires" or "RequiresWhen");
+        var ens = md.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Count(inv => IsSpec(inv) && Name(inv).StartsWith("Ensures", StringComparison.Ordinal));
         return (req, ens);
     }
 
