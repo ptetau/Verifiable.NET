@@ -223,8 +223,9 @@ internal sealed partial class CfgSsaLowerer
                 calleeEnv.Vars[callee.Parameters[i]] = args[i];
             }
 
+            // The caller's own measure is checked once, at entry; the callee's is evaluated at this call.
             var before = LowerExpression(callerMeasure.Measure, gamma, entryEnv, emitObligations: false);
-            var after = LowerExpression(calleeMeasure.Measure, gamma, calleeEnv, emitObligations: false);
+            var after = LowerSpecGoal(calleeMeasure.Measure, gamma, calleeEnv);
             var (beforeTerm, afterTerm, unified) = _translator.UnifyNumericPair(before, after);
             var sort = _types.GetSort(unified);
             var isBv = ContractExpressionTranslator.IsBitVecSort(sort);

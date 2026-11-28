@@ -1,5 +1,4 @@
 // The measure n * 2 wraps negative for n >= 2^30.
-// @known-bug: Recursive Decreases(n * 2) is accepted although n * 2 wraps negative for n >= 2^30 (measure arithmetic is not checked for int overflow)
 // @expect: rejected
 // @witness: Corpus.Control.RecWrap.F(1073741824)
 using Verifiable.Contracts;
