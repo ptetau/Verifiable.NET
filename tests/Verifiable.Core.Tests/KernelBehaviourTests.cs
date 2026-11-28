@@ -154,6 +154,43 @@ public class KernelBehaviourTests
     }
 
     [Fact]
+    public void ClassifyGuarantee_MatchesReference()
+    {
+        foreach (var withGuarantee in AllStatuses)
+        foreach (var withoutGuarantee in AllStatuses)
+        {
+            var expected =
+                withGuarantee == SmtStatus.Sat ? GuaranteeVerdict.CanHold :
+                withGuarantee != SmtStatus.Unsat ? GuaranteeVerdict.Undecided :
+                withoutGuarantee == SmtStatus.Sat ? GuaranteeVerdict.Impossible :
+                withoutGuarantee == SmtStatus.Unsat ? GuaranteeVerdict.Unreachable :
+                GuaranteeVerdict.Undecided;
+            Assert.Equal(expected, VacuityKernel.ClassifyGuarantee(withGuarantee, withoutGuarantee));
+        }
+    }
+
+    [Fact]
+    public void VacuityChecks_ReachabilityOnlyAfterUnsat_UndecidedUnlessDefinitive()
+    {
+        foreach (var status in AllStatuses)
+        {
+            Assert.Equal(status == SmtStatus.Unsat, VacuityKernel.NeedsReachabilityCheck(status));
+            Assert.Equal(status is not (SmtStatus.Sat or SmtStatus.Unsat), VacuityKernel.CheckUndecided(status));
+        }
+    }
+
+    [Property(Iterations = 300)]
+    public Property VacuityQueries_AreThePrefixThenContextThenGuarantee() =>
+        (from prefix in Gen.String().WithLengthBetween(0, 40)
+         from context in Gen.Element(new[] { "true", "(> x 0)", "(and p q)" })
+         from guarantee in Gen.String().WithLengthBetween(1, 20)
+         select (prefix, context, guarantee)).ForAll(x =>
+            VacuityKernel.GuaranteeQuery(x.prefix, x.context, x.guarantee) ==
+                x.prefix + "\n(assert " + x.context + ")\n(assert " + x.guarantee + ")\n" &&
+            VacuityKernel.ReachabilityQuery(x.prefix, x.context) ==
+                x.prefix + "\n(assert " + x.context + ")\n");
+
+    [Fact]
     public void NamedNegatedGoal_IsTheNegatedGoal()
     {
         Assert.Equal("(assert (! (not (> x 0)) :named query_negated_goal))\n", ProofKernel.NamedNegatedGoal("(> x 0)"));
