@@ -26,7 +26,9 @@ Each rule is written as a `Spec.Ensures` contract next to the code, and Z3 check
 | `ProofKernel.PremisesContradict` | Premises are called contradictory only when Z3 answers `unsat` to them alone; an undecided check is not evidence either way. When they contradict, the analyzer rejects the method's proofs with `VER105`. |
 | `QueryKernel.Aggregate` | One counterexample refutes a query. An undecided path blocks a proof. A proof that never used the goal is flagged as vacuous. |
 | `ObligationLattice.Join` | When two paths merge, a `[MustConsume]` token that may be live on either path is still flagged, unless one side is a sink-method parameter (which may hold the token). A token counts as consumed only if it was consumed on both paths. |
-| `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. Together with the per-block transfer rules (which are not proved), this is what lets the `VER007` analysis give the same answer in any visiting order. |
+| `Proofs/LatticeLaws.cs` | The merge is commutative, idempotent, associative and an upper bound. |
+| `LinearTransfer.*` | The `VER007` per-statement rules, each with an exact contract. Consuming a token (passing it to a `[ConsumesObligation]` method, moving it or returning it) makes it consumed, and is a double consumption exactly when it was already consumed on every path. Reading a consumed token is a use after consumption. `_ = token` and overwriting a variable are reported exactly when the old token may still be live. At exit, a live token is a leak and a maybe-live one a partial-branch leak. A sink method's own parameter is never reported, unless it is overwritten. |
+| `Proofs/TransferLaws.cs` | Every transfer rule is monotone and distributes over the merge, so the `VER007` worklist reaches the same fixed point in any visiting order, and that answer is the merge of what each path gives alone. A merge that changes a state raises its rank, and a rank is at most 2, which bounds how often the worklist can revisit a block. |
 
 ## How the core is checked
 
@@ -49,7 +51,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 - **The C# to SMT translation** (`CfgSsaLowerer` and friends) turns your code and contracts into formulas that mean the same thing. This is the largest trusted part. It is covered by the analyzer test suite, not by proof.
 - **Choosing what to check.** `VerifiableSmtAnalyzer.MethodNeedsSmtCheck` and the lowerer decide which methods and obligations reach Z3. A method that is skipped produces no error, so it looks proved.
 - **The query CLI script.** `QueryEngine.BuildNamedQueryScript` assembles the premises, path conditions and `--assume` for `verifiable-query`. Only its final, negated-goal line comes from the core.
-- **The `VER007` transfer rules.** How each statement changes a token's state, and the check at method exit, live in `LinearObligationAnalyzer`. Only the merge rule is in the core.
+- **The `VER007` statement walk.** The rules for what a statement does to a token, and the check at exit, are in the core (`LinearTransfer`). Finding the statements is not: `LinearObligationAnalyzer` decides which operations count as a consumption, a move, a read, a discard or an overwrite, and handles variables that have no state yet. The worklist's visit budget comes from the rank lemmas; going past it is an analyzer failure, not a pass.
 - **The Z3 process plumbing** (`Z3SolverRunner`) sends the query, returns the output lines it read, and computes the cache key (`BuildHashInput`).
 - **The disk cache** (`SignedAnswerCache`) signs each entry with a per-user key, binding it to its query. The folder is built owner-only before the key is written, and an existing folder or key that group or others could access, or that is a link, is never trusted. On Windows it relies on the default private ACL of `LocalApplicationData`. It is as safe as your user account: code running as you (or as root) can still forge entries.
 
@@ -57,6 +59,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 
 These are open, and are listed so they are not forgotten:
 
+- **A second consumption after a partial one.** `MaybeLive` means "live on some path". A token consumed on one branch and then consumed again after the branches merge, or consumed in a loop, is not reported as a double consumption: only a token consumed on every path is. `TransferLaws.DoubleConsumeIsOnlySeenOnEveryPath` keeps this gap visible. Closing it needs a new lattice state for "consumed on some path".
 - **Vacuous proofs on one path.** `VER105` catches premises that contradict for the whole method. It does not catch a contradiction that only appears on one branch, for example a callee guarantee or `[PureAxiom]` that is impossible but only used inside an `if`: goals on that branch are still "proved". It also stays silent when Z3 cannot decide whether the premises can hold. `verifiable-query` reports per-path vacuity through its unsat core.
 
 ## Rules for contributors
