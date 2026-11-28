@@ -229,8 +229,16 @@ internal sealed partial class CfgSsaLowerer
     /// <summary>Named premises recorded so far (only when constructed with <c>trackProofPremises: true</c>).</summary>
     internal IReadOnlyList<NamedPremise> Premises => _premises;
 
+    /// <summary>Test seam: when set on the current async flow, lowering throws an unexpected exception.</summary>
+    internal static readonly System.Threading.AsyncLocal<bool> SimulateInternalFailure = new();
+
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
+        if (SimulateInternalFailure.Value)
+        {
+            throw new InvalidOperationException("simulated lowering bug");
+        }
+
         try
         {
             return LowerCore(cfg, rawOperationBlocks);
