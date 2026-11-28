@@ -301,6 +301,143 @@ public class EqualityModelTests
     }
 
     [Fact]
+    public async Task TupleEquality_OfTwoFloatingPointValues_IsRejectedBecauseNaNIsNotModeled()
+    {
+        // (d, 1) == (d, 1) is false in C# for NaN, and != is true; the model has no NaN, so it refuses instead of proving them.
+        foreach (var expr in new[] { "(d, 1) == (d, 1)", "(d, 1) != (d, 1)", "((d, 1), 2) == ((d, 1), 2)", "(d, 1) == (e, 1)" })
+        {
+            await AssertRejected($$"""
+                using Verifiable.Contracts;
+                namespace Sample;
+
+                [Verifiable]
+                public static class Tuples
+                {
+                    public static bool Same(double d, double e)
+                    {
+                        Spec.Ensures<bool>(r => r == true);
+                        return {{expr}};
+                    }
+                }
+                """, "VER101", "NaN is not modeled");
+        }
+
+        await AssertRejected("""
+            using Verifiable.Contracts;
+            namespace Sample;
+
+            [Verifiable]
+            public static class Tuples
+            {
+                public static bool Same(float f)
+                {
+                    var t = (f, 1);
+                    return t == t;
+                }
+            }
+            """, "VER101", "NaN is not modeled");
+    }
+
+    [Fact]
+    public async Task TupleEquality_FloatingPointAgainstConstantOrInteger_IsElementWise()
+    {
+        await AssertClean("""
+            using Verifiable.Contracts;
+            namespace Sample;
+
+            [Verifiable]
+            public static class Tuples
+            {
+                public static bool Constant(double d, int n)
+                {
+                    Spec.Ensures<bool>(r => r == (d == 2.5 && n == 1));
+                    return (d, n) == (2.5, 1);
+                }
+
+                public static bool Widened(int a, double d)
+                {
+                    Spec.Ensures<bool>(r => r == (a == d));
+                    return (a, 1) == (d, 1);
+                }
+            }
+            """);
+    }
+
+    [Fact]
+    public async Task NestedTupleEquality_IsElementWise()
+    {
+        await AssertClean("""
+            using Verifiable.Contracts;
+            namespace Sample;
+
+            [Verifiable]
+            public static class Tuples
+            {
+                public static bool Nested(int x, int y, int z)
+                {
+                    Spec.Ensures<bool>(r => r == (x == y));
+                    return ((x, y), z) == ((y, x), z);
+                }
+
+                public static bool NestedVariable(int a, int b, int c)
+                {
+                    Spec.Ensures<bool>(r => r == (a == b));
+                    var inner = (a, c);
+                    return (inner, 1) == ((b, c), 1);
+                }
+
+                public static bool MixedTypes(int a, long b, string s, bool f)
+                {
+                    Spec.Ensures<bool>(r => r == (a == a && b == b && s == s && f == f));
+                    return ((a, b), (s, f)) == ((a, b), (s, f));
+                }
+            }
+            """);
+
+        var wrong = await Analyze("""
+            using Verifiable.Contracts;
+            namespace Sample;
+
+            [Verifiable]
+            public static class Tuples
+            {
+                public static bool Swapped(int x, int y, int z)
+                {
+                    Spec.Ensures<bool>(r => r == false);
+                    return ((x, y), z) == ((y, x), z);
+                }
+            }
+            """);
+        Assert.Contains(wrong, d => d.Id == "VER102");
+        Assert.DoesNotContain(wrong, d => d.Id == "VER103");
+    }
+
+    [Fact]
+    public async Task TupleEquality_WithImplicitConversions_IsElementWise()
+    {
+        await AssertClean("""
+            using Verifiable.Contracts;
+            namespace Sample;
+
+            [Verifiable]
+            public static class Tuples
+            {
+                public static bool Widened(int a, long b)
+                {
+                    Spec.Ensures<bool>(r => r == (a == b && b == a));
+                    return (a, b) == (b, a);
+                }
+
+                public static bool IntToDouble(int a, double d)
+                {
+                    Spec.Ensures<bool>(r => r == (a == d));
+                    return (a, 1) == (d, 1);
+                }
+            }
+            """);
+    }
+
+    [Fact]
     public async Task TupleEquality_WithUserEqualityElement_IsRejected()
     {
         await AssertRejected("""

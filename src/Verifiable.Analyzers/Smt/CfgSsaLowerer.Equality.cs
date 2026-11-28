@@ -322,28 +322,87 @@ internal sealed partial class CfgSsaLowerer
 
         var left = TupleOperands(tupleBin.LeftOperand, gamma, env, emitObligations, inlineDepth);
         var right = TupleOperands(tupleBin.RightOperand, gamma, env, emitObligations, inlineDepth);
-        if (left.Count != right.Count || left.Count == 0)
-        {
-            throw new ContractLoweringException($"Unsupported tuple comparison '{tupleBin.Syntax}'.");
-        }
-
-        var parts = new List<string>(left.Count);
-        for (var i = 0; i < left.Count; i++)
-        {
-            var reason = UnmodeledEqualityReason(left[i].Type, viaOperator: true) ??
-                         UnmodeledEqualityReason(right[i].Type, viaOperator: true);
-            if (reason is not null)
-            {
-                throw new ContractLoweringException($"Tuple element {i + 1} of '{tupleBin.Syntax}' cannot be compared: {reason}.");
-            }
-            parts.Add(LowerBinaryOperator(BinaryOperatorKind.Equals, left[i], right[i], boolType, gamma, loc, emitObligations).Term);
-        }
+        var parts = new List<string>();
+        CompareTupleNodes(left, right, tupleBin.Syntax.ToString(), boolType, gamma, loc, emitObligations, parts);
 
         var all = parts.Count == 1 ? parts[0] : $"(and {string.Join(" ", parts)})";
         return new SmtTypedTerm(tupleBin.OperatorKind == BinaryOperatorKind.Equals ? all : $"(not {all})", boolType);
     }
 
-    private List<SmtTypedTerm> TupleOperands(IOperation operand, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
+    /// <summary>One side of a tuple comparison: either a lowered value or, for a tuple literal, its elements.</summary>
+    private sealed class TupleNode
+    {
+        public SmtTypedTerm? Value { get; init; }
+
+        /// <summary>True when the value may be NaN: a floating-point operand that is not a constant and not widened from an integer.</summary>
+        public bool MayBeNaN { get; init; }
+        public List<TupleNode>? Elements { get; init; }
+    }
+
+    /// <summary>
+    /// Compares two tuple sides element by element with each element's own <c>==</c> (so a double NaN is never equal to
+    /// itself), recursing into nested tuples, and appends one SMT conjunct per leaf pair.
+    /// </summary>
+    private void CompareTupleNodes(TupleNode left, TupleNode right, string syntax, ITypeSymbol boolType, string gamma, Location loc,
+        bool emitObligations, List<string> parts)
+    {
+        var l = ExpandTupleNode(left, syntax);
+        var r = ExpandTupleNode(right, syntax);
+        if (l.Count != r.Count || l.Count == 0)
+        {
+            throw new ContractLoweringException($"Unsupported tuple comparison '{syntax}'.");
+        }
+
+        for (var i = 0; i < l.Count; i++)
+        {
+            var lIsTuple = l[i].Elements is not null || l[i].Value!.Type.IsTupleType;
+            var rIsTuple = r[i].Elements is not null || r[i].Value!.Type.IsTupleType;
+            if (lIsTuple && rIsTuple)
+            {
+                CompareTupleNodes(l[i], r[i], syntax, boolType, gamma, loc, emitObligations, parts);
+                continue;
+            }
+            if (lIsTuple || rIsTuple)
+            {
+                throw new ContractLoweringException($"Tuple element {i + 1} of '{syntax}' cannot be compared: one side is a tuple and the other is not.");
+            }
+
+            var le = l[i].Value!;
+            var re = r[i].Value!;
+            var reason = UnmodeledEqualityReason(le.Type, viaOperator: true) ?? UnmodeledEqualityReason(re.Type, viaOperator: true);
+            if (reason is not null)
+            {
+                throw new ContractLoweringException($"Tuple element {i + 1} of '{syntax}' cannot be compared: {reason}.");
+            }
+            if (l[i].MayBeNaN && r[i].MayBeNaN)
+            {
+                throw new ContractLoweringException(
+                    $"Tuple element {i + 1} of '{syntax}' compares two floating-point values; NaN is not modeled (NaN == NaN is false in C#), so compare against a constant or compare the elements separately.");
+            }
+            parts.Add(LowerBinaryOperator(BinaryOperatorKind.Equals, le, re, boolType, gamma, loc, emitObligations).Term);
+        }
+    }
+
+    private List<TupleNode> ExpandTupleNode(TupleNode node, string syntax)
+    {
+        if (node.Elements is not null)
+        {
+            return node.Elements;
+        }
+
+        var whole = node.Value!;
+        if (!_types.TryGetComposite(whole.Type, out var comp) || comp is null || comp.Fields.Count == 0)
+        {
+            throw new ContractLoweringException($"Unsupported tuple operand in comparison '{syntax}'.");
+        }
+        return comp.Fields.Select(f => new TupleNode
+        {
+            Value = new SmtTypedTerm($"({f.AccessorName} {whole.Term})", f.Type),
+            MayBeNaN = IsFloatingPoint(f.Type),
+        }).ToList();
+    }
+
+    private TupleNode TupleOperands(IOperation operand, string gamma, BlockEnv env, bool emitObligations, int inlineDepth)
     {
         while (operand is IConversionOperation { IsImplicit: true } conv && conv.Operand.Type is { IsTupleType: true })
         {
@@ -352,15 +411,29 @@ internal sealed partial class CfgSsaLowerer
 
         if (operand is ITupleOperation literal)
         {
-            return literal.Elements.Select(e => LowerExpression(e, gamma, env, emitObligations, inlineDepth)).ToList();
+            return new TupleNode
+            {
+                Elements = literal.Elements.Select(e =>
+                    e.Type is { IsTupleType: true } || e is ITupleOperation || e is IConversionOperation { IsImplicit: true, Operand: ITupleOperation }
+                        ? TupleOperands(e, gamma, env, emitObligations, inlineDepth)
+                        : new TupleNode { Value = LowerExpression(e, gamma, env, emitObligations, inlineDepth), MayBeNaN = MayBeNaN(e) }).ToList()
+            };
         }
 
-        var whole = LowerExpression(operand, gamma, env, emitObligations, inlineDepth);
-        if (!_types.TryGetComposite(whole.Type, out var comp) || comp is null || comp.Fields.Count == 0)
+        return new TupleNode { Value = LowerExpression(operand, gamma, env, emitObligations, inlineDepth), MayBeNaN = MayBeNaN(operand) };
+    }
+
+    private static bool IsFloatingPoint(ITypeSymbol type) =>
+        UnwrapNullable(type).SpecialType is SpecialType.System_Double or SpecialType.System_Single;
+
+    /// <summary>A floating-point operand that is neither a constant nor widened from a non-floating value.</summary>
+    private static bool MayBeNaN(IOperation operand)
+    {
+        while (operand is IConversionOperation { IsImplicit: true } conv && conv.Operand.Type is not null)
         {
-            throw new ContractLoweringException($"Unsupported tuple operand '{operand.Syntax}' in comparison.");
+            operand = conv.Operand;
         }
-        return comp.Fields.Select(f => new SmtTypedTerm($"({f.AccessorName} {whole.Term})", f.Type)).ToList();
+        return operand.ConstantValue.HasValue is false && operand.Type is not null && IsFloatingPoint(operand.Type);
     }
 
     /// <summary>
