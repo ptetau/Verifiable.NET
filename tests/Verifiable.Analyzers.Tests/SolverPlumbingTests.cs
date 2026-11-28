@@ -134,7 +134,9 @@ public class SolverPlumbingTests
             var counter = System.IO.Path.Combine(dir, "starts.txt");
             var fake = FakeSolver(dir, silentStarts: 1, counter);
 
-            Z3SolverRunner.HardWaitExtraMsOverride = 400;
+            // Long enough for a fresh Z3 to start and answer on a loaded CI runner; the stalled first worker costs this
+            // much waiting, so keep it to a few seconds.
+            Z3SolverRunner.HardWaitExtraMsOverride = 4000;
             try
             {
                 var result = Z3SolverRunner.RunUncached(fake, UnsatScript, timeoutMs: 200);
