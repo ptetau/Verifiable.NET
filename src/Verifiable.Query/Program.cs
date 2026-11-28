@@ -28,6 +28,7 @@ public static class Program
           verifiable-query fix --project <path> [--rule <id>] [--target <symbols>] [--apply]
           verifiable-query explain [<rule id>...]
           verifiable-query describe
+          verifiable-query impact --old <export.json> (--new <export.json> | --project <path>)
           verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
@@ -45,6 +46,7 @@ public static class Program
           fix               Run the code fixes from the command line and return JSON text edits (--apply writes them).
           explain           Explain a rule: why it exists, how to fix it, and an example.
           describe          List every command, its options and its output schema.
+          impact            Compare two contract exports: widened / narrowed / changed, and the proofs each change breaks.
           export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
@@ -69,6 +71,8 @@ public static class Program
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
           --holes           With `pack`, one pack per hole.
+          --old <file>      With `impact`, the export from before the change.
+          --new <file>      With `impact`, the export from after (or pass the new sources).
           --rule <id>       With `fix`, only fixes for this rule.
           --apply           With `fix`, write the fixes to disk.
           --one-answer      With `check`, report each unmarked method whose contract allows two answers as VER111.
@@ -96,7 +100,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe", "impact"];
 
     /// <summary>
     /// CLI entry point.
@@ -209,6 +213,8 @@ public static class Program
         var allHoles = false;
         var oneAnswerCheck = false;
         string? ruleFilter = null;
+        string? oldExport = null;
+        string? newExport = null;
         var applyFixes = false;
         string? outPath = null;
         var timeoutGiven = false;
@@ -305,6 +311,12 @@ public static class Program
                     break;
                 case "--rule":
                     ruleFilter = NextVal();
+                    break;
+                case "--old":
+                    oldExport = NextVal();
+                    break;
+                case "--new":
+                    newExport = NextVal();
                     break;
                 case "--apply":
                     applyFixes = true;
@@ -444,6 +456,69 @@ public static class Program
             var sarifExit = (int)ElmCheckEngine.Classify(sarifReport);
             (sarifExit == 0 || format.Equals("json", StringComparison.OrdinalIgnoreCase) ? stdout : stderr).WriteLine(formattedSarif);
             return sarifExit;
+        }
+
+        if (command == "impact")
+        {
+            string? ReadExport(string? path, out string? err)
+            {
+                err = null;
+                if (path is null) return null;
+                if (!File.Exists(path)) { err = $"Export file not found: `{path}`."; return null; }
+                return File.ReadAllText(path);
+            }
+
+            var oldText = ReadExport(oldExport, out var oldErr);
+            var newText = ReadExport(newExport, out var newErr);
+            var usage = oldExport is null ? "`impact` needs `--old <export.json>`." :
+                        oldErr ?? newErr ??
+                        (newExport is null && project is null && files.Count == 0 && !useStdin ? "`impact` needs `--new <export.json>` or the new sources (`--project`)." : null);
+            List<ExportEntry>? before = null, after = null;
+            if (usage is null)
+            {
+                try
+                {
+                    before = ChangeImpact.Read(oldText!);
+                    if (newText is not null) after = ChangeImpact.Read(newText);
+                }
+                catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException)
+                {
+                    usage = $"Not a `verifiable-query export` document: {ex.Message}";
+                }
+            }
+
+            if (usage is not null)
+            {
+                var iErr = new QueryReport(command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "BAD IMPACT INPUT", usage, Location.None,
+                    "Example: verifiable-query impact --old before.export.json --project App.csproj --format json");
+                WriteOutput(command, iErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+
+            List<BrokenProof>? brokenProofs = null;
+            if (after is null)
+            {
+                var newLoad = WorkspaceLoader.Load(project, files, useStdin ? (readStdin?.Invoke() ?? Console.In.ReadToEnd()) : null);
+                if (newLoad.Compilation is null || newLoad.ErrorMessage is not null || newLoad.CompilationErrors.Count > 0)
+                {
+                    var nErr = new QueryReport(command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                        Array.Empty<MethodQueryResult>(), "FAILED TO LOAD SOURCES", newLoad.ErrorMessage ?? "The new sources do not compile.", Location.None,
+                        "Run `verifiable-query check` on the new sources first.");
+                    WriteOutput(command, nErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                    return ResolveExitCode(QueryOutcomeStatus.Error);
+                }
+                after = ChangeImpact.Read(ContractExport.Document(ContractExport.Collect(newLoad.Compilation), false, int.MaxValue, 0, null));
+                var changesNow = ChangeImpact.Compare(before!, after, z3Path);
+                brokenProofs = ChangeImpact.Broken(newLoad.Compilation, changesNow, z3Path);
+                var json1 = ChangeImpact.ToJson(changesNow, brokenProofs, indented: true);
+                stdout.WriteLine(json1);
+                return brokenProofs.Count > 0 ? 1 : 0;
+            }
+
+            var changes = ChangeImpact.Compare(before!, after, z3Path);
+            stdout.WriteLine(ChangeImpact.ToJson(changes, null, indented: true));
+            return 0;
         }
 
         string? stdinText = null;

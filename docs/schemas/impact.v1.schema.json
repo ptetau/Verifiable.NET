@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ptetau/Verifiable.NET/docs/schemas/impact.v1.schema.json",
+  "title": "verifiable-query impact result: contract changes between builds",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "status",
+    "exitCode",
+    "changes",
+    "brokenProofs"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "proved",
+        "refuted",
+        "undecided",
+        "input_error",
+        "tool_missing"
+      ],
+      "description": "refuted when a proof now fails."
+    },
+    "exitCode": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "kind",
+          "clause",
+          "change",
+          "oldText",
+          "newText",
+          "note"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "clause": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "widened",
+              "narrowed",
+              "equivalent",
+              "changed",
+              "unknown"
+            ],
+            "description": "widened: old implies new (accepts more). narrowed: new implies old (accepts less). changed: neither. unknown: not decided (see note)."
+          },
+          "oldText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "newText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "brokenProofs": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule",
+          "symbol",
+          "obligation",
+          "contract",
+          "file",
+          "line",
+          "dependsOn"
+        ],
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "obligation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contract": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "dependsOn": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "symbol",
+                "kind",
+                "clause",
+                "change",
+                "oldText",
+                "newText",
+                "note"
+              ],
+              "properties": {
+                "symbol": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "clause": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "change": {
+                  "enum": [
+                    "added",
+                    "removed",
+                    "widened",
+                    "narrowed",
+                    "equivalent",
+                    "changed",
+                    "unknown"
+                  ],
+                  "description": "widened: old implies new (accepts more). narrowed: new implies old (accepts less). changed: neither. unknown: not decided (see note)."
+                },
+                "oldText": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "newText": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "Only when the new side is sources (not an export); null otherwise."
+    }
+  }
+}

@@ -118,6 +118,19 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Change impact between builds (`impact`)
+
+After a spec change, people need to know what broke and why (requirement R7).
+
+```bash
+verifiable-query export --project App.csproj --out before.export.json   # before the change
+verifiable-query impact --old before.export.json --project App.csproj --format json
+verifiable-query impact --old before.export.json --new after.export.json --format json
+```
+
+- Contracts are paired by symbol and kind (and by clause where that is unambiguous). Each change (schema `impact@1`) is `added`, `removed`, or, decided by Z3, `widened` (the old predicate implies the new: it accepts more, so code that relied on the old limit may break), `narrowed` (the new implies the old: it accepts less, so old data may break), `equivalent`, or `changed` (neither). `unknown` carries a `note`: integer division, calls, quantifiers and non-numeric values are not compared yet, rather than guessed.
+- Given the new sources, `brokenProofs` lists every proof that now fails, each with the changed contracts it `dependsOn`: its own, its callees', and the rules of the types it uses. Exit `1` when any proof broke.
+
 ### Explain, fix and describe (`explain`, `fix`, `describe`)
 
 Agents fix faster from an exact edit than from prose (requirement R15).
