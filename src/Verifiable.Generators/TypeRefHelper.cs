@@ -197,26 +197,29 @@ internal static class TypeRefHelper
                 {
                     TryMatchSpecMethodName(inv.Expression, out var specMethodName);
 
-                    if (specMethodName == "Requires" && inv.ArgumentList.Arguments.Count is 1 or 2)
+                    if (specMethodName is "Requires" or "RequiresWhen")
                     {
-                        var because = inv.ArgumentList.Arguments.Count == 2
-                            && inv.ArgumentList.Arguments[1].Expression is LiteralExpressionSyntax lit
-                            && lit.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
+                        var isWhen = specMethodName == "RequiresWhen";
+                        var first = SpecCallArguments.Get(inv, specMethodName!, 0);
+                        var second = isWhen ? SpecCallArguments.Get(inv, specMethodName!, 1) : null;
+                        if (first is null || (isWhen && second is null))
+                        {
+                            continue;
+                        }
+
+                        var because = SpecCallArguments.Get(inv, specMethodName!, SpecCallArguments.BecauseOrdinal(specMethodName!))
+                            is LiteralExpressionSyntax lit && lit.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
                             ? lit.Token.Value as string
                             : null;
-                        result.Add((inv.ArgumentList.Arguments[0].Expression, because));
-                    }
-                    else if (specMethodName == "RequiresWhen" && inv.ArgumentList.Arguments.Count is 2 or 3)
-                    {
-                        var because = inv.ArgumentList.Arguments.Count == 3
-                            && inv.ArgumentList.Arguments[2].Expression is LiteralExpressionSyntax lit
-                            && lit.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralExpression)
-                            ? lit.Token.Value as string
-                            : null;
-                        var condText = inv.ArgumentList.Arguments[0].Expression.ToString();
-                        var reqText = inv.ArgumentList.Arguments[1].Expression.ToString();
-                        var combined = Microsoft.CodeAnalysis.CSharp.SyntaxFactory.ParseExpression($"(!({condText}) || ({reqText}))");
-                        result.Add((combined, because));
+                        if (!isWhen)
+                        {
+                            result.Add((first, because));
+                        }
+                        else
+                        {
+                            var combined = Microsoft.CodeAnalysis.CSharp.SyntaxFactory.ParseExpression($"(!({first}) || ({second}))");
+                            result.Add((combined, because));
+                        }
                     }
                 }
             }

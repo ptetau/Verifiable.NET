@@ -163,6 +163,12 @@ dotnet run --project src/Verifiable.Query -c Release -- ask `
 
 ---
 
+### 8. "Show which spec sentence each contract came from"
+
+Tag contracts and constrained types with a clause ID (`Spec.Requires(..., clause: "C1")`, `[TypeAlias<decimal>("...", Clause = "C1")]`), list the clauses in `verifiable.clauses.json`, and the build fails on a clause with no code (`VER402`) or an unknown ID (`VER401`), and warns on code with no clause (`VER403`). `verifiable-query clauses <project>` prints the clause-to-code map as JSON. See [the manual](docs/manual.md#12-clause-ids-and-coverage-clause-verifiableclausesjson).
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -207,7 +213,7 @@ Verifiable.NET uses **GalaxyCheck** (`external/GalaxyCheck`, via `GalaxyCheck.Xu
 | `Verifiable.Analyzers` | Gatekeeper (`VER001`–`VER006`), linear obligation checker (`VER007`), and Z3 proof engine (`VER101`–`VER106`) with Elm-style diagnostics. |
 | `Verifiable.CodeFixes` | Automated IDE/Roslyn refactorings for `[VerifiableCandidate]` migration. |
 | `Verifiable.Testing` | Deterministic state-machine drivers and fault-injected persistence test helpers. |
-| `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`) for asking ad-hoc `ask`, `check-invariant`, and `list` verification queries with Z3 unsat-core explanations. |
+| `Verifiable.Query` | Pure .NET Core CLI tool (`verifiable-query`) for asking ad-hoc `ask`, `check-invariant`, and `list` verification queries with Z3 unsat-core explanations, and for the `clauses` report that maps spec clause IDs to the contracts that carry them. |
 
 Inside these packages, the code that decides whether a proof passes is kept in one small, separate kernel (`src/Verifiable.Core`) that Verifiable.NET proves with its own Z3 checks on every build. See [The Trusted Core](docs/trusted-core.md) for what is proved and what is still trusted.
 

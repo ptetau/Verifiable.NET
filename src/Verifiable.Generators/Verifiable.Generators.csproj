@@ -21,6 +21,7 @@
   <!-- Shared with Verifiable.Analyzers so the prover, the [InboundPort] gate and the contract export agree on which Spec.Requires count. -->
   <ItemGroup>
     <Compile Include="..\Verifiable.Analyzers\LeadingContractBlock.cs" Link="Shared\LeadingContractBlock.cs" />
+    <Compile Include="..\Verifiable.Analyzers\SpecCallArguments.cs" Link="Shared\SpecCallArguments.cs" />
   </ItemGroup>
 
   <ItemGroup>

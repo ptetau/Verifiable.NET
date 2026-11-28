@@ -32,6 +32,12 @@ public sealed class InvariantAttribute(string? description = null) : Attribute
     /// Gets an optional human-readable explanation of the spirit of this invariant.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule came from (for example <c>"C1"</c>). It does not change any proof;
+    /// the build uses it to report which clauses have code.
+    /// </summary>
+    public string? Clause { get; init; }
 }
 
 /// <summary>
@@ -99,6 +105,12 @@ public sealed class TypeAliasAttribute<TUnderlying>(string? description = null) 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule came from (for example <c>"C1"</c>). It does not change any proof;
+    /// the build uses it to report which clauses have code.
+    /// </summary>
+    public string? Clause { get; init; }
 }
 
 /// <summary>
@@ -112,6 +124,12 @@ public sealed class RefinedAttribute<TUnderlying>(string? description = null) : 
     /// Gets an optional human-readable explanation of why values of this type are constrained.
     /// </summary>
     public string? Description { get; } = description;
+
+    /// <summary>
+    /// Gets or sets the ID of the spec clause this rule came from (for example <c>"C1"</c>). It does not change any proof;
+    /// the build uses it to report which clauses have code.
+    /// </summary>
+    public string? Clause { get; init; }
 }
 
 /// <summary>

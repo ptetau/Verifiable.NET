@@ -64,36 +64,36 @@ public static class RuntimeSpec
     private static Frame? Current => s_frames is { Count: > 0 } f ? f.Peek() : null;
     private static bool Outermost => Current is null || Current.Depth == 1;
 
-    public static void Requires(bool condition, string? because = null)
+    public static void Requires(bool condition, string? because = null, string? clause = null)
     {
         if (condition) return;
         if (Outermost) throw new InputRejectedException();
         throw new ContractBrokenException($"{Current!.Member} was called without meeting its precondition: {because ?? "(no reason given)"}");
     }
 
-    public static void RequiresWhen(bool condition, bool requirement, string? because = null) =>
+    public static void RequiresWhen(bool condition, bool requirement, string? because = null, string? clause = null) =>
         Requires(!condition || requirement, because);
 
-    public static void Ensures<TResult>(Func<TResult, bool> predicate, string? because = null)
+    public static void Ensures<TResult>(Func<TResult, bool> predicate, string? because = null, string? clause = null)
     {
         if (Outermost) s_postconditions?.Add((because ?? "(no reason given)", predicate));
     }
 
-    public static void EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)
+    public static void EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null, string? clause = null)
     {
         if (condition) Ensures(predicate, because);
     }
 
     // Postconditions written with Spec.Result<T>() cannot be evaluated before the method returns, so they are not checked.
-    public static void Ensures(bool condition, string? because = null) { }
+    public static void Ensures(bool condition, string? because = null, string? clause = null) { }
 
-    public static void EnsuresWhen(bool condition, bool postcondition, string? because = null) { }
+    public static void EnsuresWhen(bool condition, bool postcondition, string? because = null, string? clause = null) { }
 
     /// <summary>
     /// A loop invariant, checked each time it is reached. The runner passes the source span of the enclosing loop
     /// (<paramref name="loopStart"/>, <paramref name="loopEnd"/>) so that loops nested inside it can start afresh.
     /// </summary>
-    public static void LoopInvariant(bool condition, string? because = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0)
+    public static void LoopInvariant(bool condition, string? because = null, string? clause = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0)
     {
         Current?.ForgetLoopsInside(loopStart, loopEnd);
         if (!condition)
@@ -102,7 +102,7 @@ public static class RuntimeSpec
         }
     }
 
-    public static void Decreases(long measure, string? because = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0)
+    public static void Decreases(long measure, string? because = null, string? clause = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0)
     {
         var frame = Current;
         if (frame is null) return;
@@ -121,8 +121,8 @@ public static class RuntimeSpec
         frame.LastMeasure[key] = (measure, loopEnd);
     }
 
-    public static void Decreases(int measure, string? because = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0) =>
-        Decreases((long)measure, because, loopStart, loopEnd, line);
+    public static void Decreases(int measure, string? because = null, string? clause = null, int loopStart = -1, int loopEnd = -1, [CallerLineNumber] int line = 0) =>
+        Decreases((long)measure, because, clause, loopStart, loopEnd, line);
 
     private sealed class Frame(string member, int depth) : IDisposable
     {

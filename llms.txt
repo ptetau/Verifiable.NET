@@ -51,16 +51,17 @@ public bool IsBalanced() => TotalDebits == TotalCredits;
 Proved on return values by Z3 and enforced at runtime inside `[InboundPort]` gates.
 
 ### Method & Loop Contracts (`Spec.*`)
-- `Spec.Requires(bool condition, string? because = null)`
-- `Spec.RequiresWhen(bool condition, bool requirement, string? because = null)`
+- `Spec.Requires(bool condition, string? because = null, string? clause = null)`
+- `Spec.RequiresWhen(bool condition, bool requirement, string? because = null, string? clause = null)`
+- `clause` is the optional ID of the spec clause a contract came from (constant string, never changes a proof). `[TypeAlias<T>]`, `[Refined<T>]` and `[Invariant]` take `Clause = "C1"`. With a `verifiable.clauses.json` `AdditionalFiles` manifest (`{ "clauses": [ { "id": "C1", "text": "..." } ] }`), the build reports `VER401`-`VER403`; `verifiable-query clauses <project>` prints a JSON report of clause to constructs. See `docs/manual.md` section 12.
 - Placement: `Spec.Requires` / `Spec.RequiresWhen` must be in the leading contract block, the top-level statements before the first non-`Spec.*` statement (`Requires` and `Ensures` in any order; also constructors, accessors and `=> Spec.Requires(...)`). Elsewhere (inside `if`/`else`/loops/blocks/lambdas/local functions, or after another statement) it is `VER101` and is not assumed or required of callers. Use `Spec.RequiresWhen(condition, requirement, because)` at the top instead.
-- `Spec.Ensures<TResult>(Func<TResult, bool> predicate, string? because = null)`
-- `Spec.Ensures(bool condition, string? because = null)` (use `Spec.Result<TResult>()` if needed)
-- `Spec.EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)` / `Spec.EnsuresWhen(bool condition, bool postcondition, string? because = null)`
+- `Spec.Ensures<TResult>(Func<TResult, bool> predicate, string? because = null, string? clause = null)`
+- `Spec.Ensures(bool condition, string? because = null, string? clause = null)` (use `Spec.Result<TResult>()` if needed)
+- `Spec.EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null, string? clause = null)` / `Spec.EnsuresWhen(bool condition, bool postcondition, string? because = null, string? clause = null)`
 - `Spec.Implies(bool antecedent, bool consequent)` (`(=> antecedent consequent)` in Z3)
 - `Spec.ForAll(int startInclusive, int endExclusive, Func<int, bool> predicate)` / `Spec.Exists(int startInclusive, int endExclusive, Func<int, bool> predicate)` (bounded Z3 `forall` / `exists` over integer indices)
-- `Spec.LoopInvariant(bool condition, string? because = null)` (inside `while` loop)
-- `Spec.Decreases(int|long measure, string? because = null)` (inside `while` loop; proves termination)
+- `Spec.LoopInvariant(bool condition, string? because = null, string? clause = null)` (inside `while` loop)
+- `Spec.Decreases(int|long measure, string? because = null, string? clause = null)` (inside `while` loop; proves termination)
 
 ### Linear Obligation Tokens (`[MustConsume]`)
 - `[MustConsume]` on a `readonly record struct` token returned by commands/factories.
@@ -111,6 +112,10 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
 - `VER301` (`COMPLEX CONTRACT`, default `Info`, configurable via `.editorconfig` / `VerifiableMaxSpecClauses`): `Spec.Requires`/`Spec.Ensures` exceeds max top-level `&&` clauses (default 3; includes CodeFix to split) or uses nested ternaries.
 - `VER302` (`MISSING CONTRACT EXPLANATION`, default `Info`): missing or blank `because` argument on `[Verifiable]` `Spec.Requires`/`Spec.Ensures` calls.
+- `VER401` (`UNKNOWN CLAUSE`, Error): a contract or constrained type names a clause missing from `verifiable.clauses.json` (only with a manifest).
+- `VER402` (`UNCOVERED CLAUSE`, Error): a manifest clause has no construct in this project.
+- `VER403` (`MISSING CLAUSE ID`, Warning): with a manifest, a `[Verifiable]` contract or constrained type has no clause.
+- `VER404` (`INVALID CLAUSE`, Error): `clause` is not a constant non-empty string without whitespace, or the manifest is malformed.
 
 ## 5. Packages
 

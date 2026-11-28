@@ -21,6 +21,7 @@ public static class Program
           verifiable-query check --project <path> | --file <path> | --stdin | --sarif <build.sarif> [options]
           verifiable-query build <project-or-sln> [options] [-- <extra dotnet build args>]
           verifiable-query list --project <path> [options]
+          verifiable-query clauses <project-or-dir> [--manifest <path>] [--out <file>]
 
         Commands:
           ask               Prove or refute a boolean C# claim on a method or all methods in a type/project.
@@ -28,6 +29,7 @@ public static class Program
           check             Compile & run all Verifiable analyzers + Z3 (or present a SARIF 2.1 log) with full Elm formatting.
           build             Run `dotnet build` with SARIF capture and present CS*/VER* diagnostics in Elm format.
           list              List queryable [Verifiable] methods, [Invariant] members, and [TypeAlias<T>] types.
+          clauses           Print a JSON report mapping each spec clause ID to the contracts and types that carry it.
 
         Options:
           --project <path>  Path to a .csproj file or directory containing C# sources.
@@ -46,6 +48,8 @@ public static class Program
           --no-warnings     Hide warnings in `check` / `build` output.
           --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000).
           --z3 <path>       Explicit path to z3 / z3.exe executable.
+          --manifest <path> Clause manifest for `clauses` (default: verifiable.clauses.json in the project directory, if present).
+          --out <file>      Write the `clauses` JSON report to a file instead of standard output.
           --verbose         Include internal SSA trace steps in proof core output.
           -h, --help        Show this help message.
 
@@ -62,7 +66,7 @@ public static class Program
           4  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "clauses"];
 
     /// <summary>
     /// CLI entry point.
@@ -99,8 +103,8 @@ public static class Program
             var rankedCmd = Verifiable.Analyzers.ElmSuggest.Rank(command, KnownCommands, maxResults: 2);
             var didYouMean = Verifiable.Analyzers.ElmSuggest.FormatDidYouMean(rankedCmd);
             var cmdFix = didYouMean is not null
-                ? $"{didYouMean} Supported subcommands are `ask`, `check-invariant`, `check`, `build`, and `list`."
-                : "Use `ask`, `check-invariant`, `check`, `build`, or `list` (run `verifiable-query --help`).";
+                ? $"{didYouMean} Supported subcommands are `ask`, `check-invariant`, `check`, `build`, `list`, and `clauses`."
+                : "Use `ask`, `check-invariant`, `check`, `build`, `list`, or `clauses` (run `verifiable-query --help`).";
             var errReport = new QueryReport(
                 command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
                 Array.Empty<MethodQueryResult>(), "UNKNOWN COMMAND",
@@ -128,6 +132,8 @@ public static class Program
         var verbose = false;
         var extraBuildArgs = new List<string>();
         var positionalBuildTarget = (string?)null;
+        string? manifestPath = null;
+        string? outPath = null;
 
         for (var i = 1; i < args.Length; i++)
         {
@@ -195,12 +201,18 @@ public static class Program
                 case "--z3":
                     z3Path = NextVal();
                     break;
+                case "--manifest":
+                    manifestPath = NextVal();
+                    break;
+                case "--out":
+                    outPath = NextVal();
+                    break;
                 case "--verbose":
                 case "-v":
                     verbose = true;
                     break;
                 default:
-                    if (command == "build" && !flag.StartsWith("-", StringComparison.Ordinal) && positionalBuildTarget is null)
+                    if (command is "build" or "clauses" && !flag.StartsWith("-", StringComparison.Ordinal) && positionalBuildTarget is null)
                     {
                         positionalBuildTarget = flag;
                         break;
@@ -216,6 +228,11 @@ public static class Program
         }
 
         var useColor = ElmAnsiRenderer.ShouldUseColor(colorMode, format, agentMode, isRedirected);
+
+        if (command == "clauses")
+        {
+            return RunClauses(project ?? positionalBuildTarget, files, manifestPath, outPath, stdout, stderr);
+        }
 
         if (command == "build")
         {
@@ -364,6 +381,49 @@ public static class Program
         var askReport = QueryEngine.Ask(compilation, target, all, assertExpr!, assumeExpr, because, z3Path, timeoutMs);
         WriteOutput(command, askReport, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
         return ResolveExitCode(askReport.Status);
+    }
+
+    private static int RunClauses(
+        string? project,
+        IReadOnlyList<string> files,
+        string? manifestPath,
+        string? outPath,
+        TextWriter stdout,
+        TextWriter stderr)
+    {
+        var load = WorkspaceLoader.Load(project, files, null);
+        if (load.ErrorMessage is not null || load.Compilation is null)
+        {
+            stderr.WriteLine(load.ErrorMessage ?? "Could not load C# sources. Pass a project or directory: `verifiable-query clauses <project-or-dir>`.");
+            return 3;
+        }
+
+        var baseDir = project is not null
+            ? (File.Exists(project) ? Path.GetDirectoryName(Path.GetFullPath(project))! : Path.GetFullPath(project))
+            : Directory.GetCurrentDirectory();
+        if (manifestPath is null && Directory.Exists(baseDir))
+        {
+            manifestPath = Directory.EnumerateFiles(baseDir)
+                .FirstOrDefault(f => Verifiable.Analyzers.ClauseManifest.IsManifestPath(f));
+        }
+
+        var result = ClauseReport.Build(load.Compilation, baseDir, manifestPath);
+        if (result.ErrorMessage is not null)
+        {
+            stderr.WriteLine(result.ErrorMessage);
+            return 3;
+        }
+
+        if (outPath is not null)
+        {
+            File.WriteAllText(outPath, result.Json + Environment.NewLine);
+        }
+        else
+        {
+            stdout.WriteLine(result.Json);
+        }
+
+        return result.HasErrors ? 1 : 0;
     }
 
     [Verifiable]

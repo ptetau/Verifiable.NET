@@ -109,6 +109,40 @@ internal static class AnalyzerTestHarness
             : analyzerDiagnostics.AddRange(genDiagnostics);
     }
 
+    /// <summary>Analyzes one source file with <c>AdditionalFiles</c> items such as <c>verifiable.clauses.json</c>.</summary>
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeWithAdditionalFilesAsync(
+        string source,
+        IEnumerable<(string Path, string Text)> additionalFiles,
+        params DiagnosticAnalyzer[] analyzers)
+    {
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions, path: "TestInput.cs");
+        var compilation = CSharpCompilation.Create(
+            "AnalyzerTestAssembly",
+            [syntaxTree],
+            CollectDefaultReferences(null),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            generators: CreateDefaultGenerators(null),
+            parseOptions: parseOptions);
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updatedCompilation, out _);
+
+        var texts = additionalFiles
+            .Select(f => (AdditionalText)new InMemoryAdditionalText(f.Path, f.Text))
+            .ToImmutableArray();
+        var options = new AnalyzerOptions(texts, new DictionaryConfigOptionsProvider(new Dictionary<string, string>()));
+        var withAnalyzers = updatedCompilation.WithAnalyzers(ImmutableArray.Create(analyzers), options);
+        return await withAnalyzers.GetAllDiagnosticsAsync();
+    }
+
+    private sealed class InMemoryAdditionalText(string path, string text) : AdditionalText
+    {
+        public override string Path { get; } = path;
+        public override Microsoft.CodeAnalysis.Text.SourceText GetText(System.Threading.CancellationToken cancellationToken = default) =>
+            Microsoft.CodeAnalysis.Text.SourceText.From(text);
+    }
+
     /// <summary>
     /// Compiles several source files into one assembly and returns compiler and analyzer diagnostics,
     /// with suppressions (such as the Z3 nullability suppressor) applied.

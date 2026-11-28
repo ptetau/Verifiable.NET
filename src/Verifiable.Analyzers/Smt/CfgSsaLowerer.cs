@@ -600,15 +600,15 @@ internal sealed partial class CfgSsaLowerer
 
                 switch (inv.TargetMethod.Name)
                 {
-                    case "Requires" when inv.Arguments.Length is 1 or 2:
+                    case "Requires" when inv.Arguments.Length is 2 or 3:
                         specs.Requires.Add(new RequiresSpec(GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
 
-                    case "RequiresWhen" when inv.Arguments.Length is 2 or 3:
+                    case "RequiresWhen" when inv.Arguments.Length is 3 or 4:
                         specs.Requires.Add(new RequiresSpec(GetOrderedArgOp(inv, 1), loc, text, because, GuardCondition: GetOrderedArgOp(inv, 0)));
                         return;
 
-                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 1 or 2:
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 2 or 3:
                     {
                         var declaredType = inv.TargetMethod.TypeArguments[0];
                         if (!SymbolEqualityComparer.Default.Equals(declaredType, method.ReturnType))
@@ -628,11 +628,11 @@ internal sealed partial class CfgSsaLowerer
                         return;
                     }
 
-                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 1 or 2:
+                    case "Ensures" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 2 or 3:
                         specs.Ensures.Add(new EnsuresSpec(null, GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
 
-                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 2 or 3:
+                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 1 && inv.Arguments.Length is 3 or 4:
                     {
                         var declaredType = inv.TargetMethod.TypeArguments[0];
                         if (!SymbolEqualityComparer.Default.Equals(declaredType, method.ReturnType))
@@ -652,11 +652,11 @@ internal sealed partial class CfgSsaLowerer
                         return;
                     }
 
-                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 2 or 3:
+                    case "EnsuresWhen" when inv.TargetMethod.TypeArguments.Length == 0 && inv.Arguments.Length is 3 or 4:
                         specs.Ensures.Add(new EnsuresSpec(null, GetOrderedArgOp(inv, 1), loc, text, because, GuardCondition: GetOrderedArgOp(inv, 0)));
                         return;
 
-                    case "LoopInvariant" when inv.Arguments.Length is 1 or 2:
+                    case "LoopInvariant" when inv.Arguments.Length is 2 or 3:
                         if (enclosingLoop is null)
                         {
                             specs.Errors.Add((text, loc, "Spec.LoopInvariant(...) must be called inside a loop body."));
@@ -670,7 +670,7 @@ internal sealed partial class CfgSsaLowerer
                         loopGroups[enclosingLoop].LoopInvariants.Add((GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
 
-                    case "Decreases" when inv.Arguments.Length is 1 or 2:
+                    case "Decreases" when inv.Arguments.Length is 2 or 3:
                         if (enclosingLoop is null)
                         {
                             if (IsPreconditionCall(compilation, inv))

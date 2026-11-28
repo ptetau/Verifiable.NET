@@ -15,12 +15,14 @@ public static class Spec
     /// </summary>
     /// <param name="condition">A pure C# boolean expression over method parameters and visible state.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void Requires(bool condition, string? because = null)
+    public static void Requires(bool condition, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -29,12 +31,14 @@ public static class Spec
     /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
     /// <param name="predicate">A pure lambda predicate referencing the return value and method inputs.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void Ensures<TResult>(Func<TResult, bool> predicate, string? because = null)
+    public static void Ensures<TResult>(Func<TResult, bool> predicate, string? because = null, string? clause = null)
     {
         _ = predicate;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -42,16 +46,18 @@ public static class Spec
     /// </summary>
     /// <param name="condition">A pure C# boolean expression referencing <see cref="Result{TResult}"/> and method inputs.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void Ensures(bool condition, string? because = null)
+    public static void Ensures(bool condition, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
-    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?)"/>.
+    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?, string?)"/>.
     /// </summary>
     /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
     [PureAxiom]
@@ -63,12 +69,14 @@ public static class Spec
     /// </summary>
     /// <param name="condition">A pure C# boolean expression over loop variables.</param>
     /// <param name="because">Optional human-readable explanation of why this invariant holds.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void LoopInvariant(bool condition, string? because = null)
+    public static void LoopInvariant(bool condition, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -78,12 +86,14 @@ public static class Spec
     /// </summary>
     /// <param name="measure">A non-negative <see cref="int"/> expression that strictly decreases per iteration.</param>
     /// <param name="because">Optional human-readable explanation of why this loop terminates.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void Decreases(int measure, string? because = null)
+    public static void Decreases(int measure, string? because = null, string? clause = null)
     {
         _ = measure;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -93,13 +103,15 @@ public static class Spec
     /// <param name="condition">Guard condition under which <paramref name="requirement"/> applies.</param>
     /// <param name="requirement">A pure C# boolean expression that must hold when <paramref name="condition"/> is true.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void RequiresWhen(bool condition, bool requirement, string? because = null)
+    public static void RequiresWhen(bool condition, bool requirement, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = requirement;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -110,13 +122,15 @@ public static class Spec
     /// <param name="condition">Guard condition over method inputs under which <paramref name="predicate"/> must hold.</param>
     /// <param name="predicate">A pure lambda predicate referencing the return value and method inputs.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null)
+    public static void EnsuresWhen<TResult>(bool condition, Func<TResult, bool> predicate, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = predicate;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -126,13 +140,15 @@ public static class Spec
     /// <param name="condition">Guard condition over method inputs under which <paramref name="postcondition"/> must hold.</param>
     /// <param name="postcondition">A pure C# boolean expression referencing <see cref="Result{TResult}"/> and method inputs.</param>
     /// <param name="because">Optional human-readable explanation of the spirit of this requirement.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void EnsuresWhen(bool condition, bool postcondition, string? because = null)
+    public static void EnsuresWhen(bool condition, bool postcondition, string? because = null, string? clause = null)
     {
         _ = condition;
         _ = postcondition;
         _ = because;
+        _ = clause;
     }
 
     /// <summary>
@@ -183,11 +199,13 @@ public static class Spec
     /// </summary>
     /// <param name="measure">A non-negative <see cref="long"/> expression that strictly decreases per iteration.</param>
     /// <param name="because">Optional human-readable explanation of why this loop terminates.</param>
+    /// <param name="clause">Optional ID of the spec clause this contract came from (for example <c>"C2"</c>). It must be a constant string. It never changes a proof; the build uses it to report which clauses have code.</param>
     [Conditional("VERIFIABLE_SPEC")]
     [PureAxiom]
-    public static void Decreases(long measure, string? because = null)
+    public static void Decreases(long measure, string? because = null, string? clause = null)
     {
         _ = measure;
         _ = because;
+        _ = clause;
     }
 }

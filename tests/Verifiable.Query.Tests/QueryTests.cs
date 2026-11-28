@@ -860,4 +860,97 @@ public sealed class QueryTests
             Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void Clauses_ReportsConstructsPerClause_AndGaps()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "verifiable-clauses-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "Bookings.cs"), """
+                using Verifiable.Contracts;
+
+                namespace Bookings;
+
+                [Verifiable]
+                public static class Schedule
+                {
+                    public static int Length(int start, int end)
+                    {
+                        Spec.Requires(start >= 0 && end <= 1000 && start <= end, "Times are in range.", clause: "C1");
+                        Spec.Ensures<int>(r => r >= 0, "A booking ends after it starts", clause: "C2");
+                        return end - start;
+                    }
+
+                    public static int Twice(int x)
+                    {
+                        Spec.Requires(x >= 0 && x < 1000, "Small.", clause: "C9");
+                        Spec.Ensures<int>(r => r == x * 2, "Doubles.");
+                        return x * 2;
+                    }
+                }
+                """);
+            File.WriteAllText(Path.Combine(dir, "verifiable.clauses.json"), """
+                { "clauses": [
+                  { "id": "C1", "text": "Times are in range." },
+                  { "id": "C2", "text": "A booking ends after it starts." },
+                  { "id": "C3", "text": "Never double booked." }
+                ] }
+                """);
+
+            var (code, stdout, stderr) = RunCli(["clauses", dir]);
+            Assert.Equal(1, code);
+            Assert.True(string.IsNullOrWhiteSpace(stderr), stderr);
+
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            var clauses = root.GetProperty("clauses").EnumerateArray().ToList();
+            Assert.Equal(["C1", "C2", "C3"], clauses.Select(c => c.GetProperty("id").GetString()!).ToArray());
+            Assert.Equal("Never double booked.", clauses[2].GetProperty("text").GetString());
+            Assert.Empty(clauses[2].GetProperty("constructs").EnumerateArray());
+
+            var c2 = Assert.Single(clauses[1].GetProperty("constructs").EnumerateArray());
+            Assert.Equal("ensures", c2.GetProperty("kind").GetString());
+            Assert.Equal("Bookings.Schedule.Length(int, int)", c2.GetProperty("symbol").GetString());
+            Assert.Equal("A booking ends after it starts", c2.GetProperty("because").GetString());
+            Assert.Equal("Bookings.cs", c2.GetProperty("file").GetString());
+            Assert.Equal(11, c2.GetProperty("line").GetInt32());
+
+            var unknown = Assert.Single(root.GetProperty("unknownClauses").EnumerateArray());
+            Assert.Equal("C9", unknown.GetProperty("id").GetString());
+            Assert.Equal(["C3"], root.GetProperty("uncoveredClauses").EnumerateArray().Select(e => e.GetString()!).ToArray());
+            var without = Assert.Single(root.GetProperty("constructsWithoutClause").EnumerateArray());
+            Assert.Equal("Bookings.Schedule.Twice(int)", without.GetProperty("symbol").GetString());
+
+            var outFile = Path.Combine(dir, "report.json");
+            var (code2, stdout2, _) = RunCli(["clauses", dir, "--out", outFile]);
+            Assert.Equal(1, code2);
+            Assert.True(string.IsNullOrWhiteSpace(stdout2));
+            Assert.Equal(stdout.Trim(), File.ReadAllText(outFile).Trim());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Clauses_MalformedManifest_IsAnError()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "verifiable-clauses-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "A.cs"), "public class A { }");
+            File.WriteAllText(Path.Combine(dir, "verifiable.clauses.json"), """{ "clauses": [ { "id": "C1" }, { "id": "C1" } ] }""");
+            var (code, _, stderr) = RunCli(["clauses", dir]);
+            Assert.Equal(3, code);
+            Assert.Contains("more than once", stderr);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }
