@@ -53,7 +53,9 @@ internal sealed class SignedAnswerCache
     /// could sign any answer. A fresh folder is built under a temporary name, locked to the owner, given a new
     /// key and only then renamed into place. An existing folder is used only if it is a real directory (not a
     /// link) and, on Unix, neither it nor its key is accessible to group or others. Because the folder is 700
-    /// and we can read it, we are its owner (or root). Anything else is moved aside and replaced once.
+    /// and we can read it, we are its owner (or root). On Windows, the folder and key must be owned by the
+    /// user (or SYSTEM or Administrators) and no ACL entry may let anyone else in (see <see cref="WindowsAcl"/>).
+    /// Anything else is moved aside and replaced once.
     /// </remarks>
     internal static SignedAnswerCache? Open(string? directory)
     {
@@ -61,6 +63,10 @@ internal sealed class SignedAnswerCache
 
         try
         {
+            // Without the ACL API we cannot tell a private folder from a planted one, so use no disk cache, and
+            // leave any existing folder alone for a runtime that can check it.
+            if (IsWindows && !WindowsFileAcl.IsAvailable) return null;
+
             var full = Path.GetFullPath(directory!);
             var parent = Path.GetDirectoryName(full);
             if (string.IsNullOrEmpty(parent)) return null;
@@ -269,10 +275,9 @@ internal sealed class SignedAnswerCache
         var staging = full + ".new-" + Guid.NewGuid().ToString("N");
         try
         {
-            Directory.CreateDirectory(staging);
-            RestrictToOwner(staging, OwnerOnlyDirectory);
+            CreateOwnerOnlyDirectory(staging);
 
-            // Until the chmod above, a permissive umask may have left the folder open. Refuse it if anyone used that window.
+            // On Unix, until the chmod above, a permissive umask may have left the folder open. Refuse it if anyone used that window.
             if (Directory.EnumerateFileSystemEntries(staging).GetEnumerator().MoveNext()) return;
 
             var key = new byte[KeyLength];
@@ -300,6 +305,19 @@ internal sealed class SignedAnswerCache
         }
     }
 
+    private static void CreateOwnerOnlyDirectory(string path)
+    {
+        if (IsWindows)
+        {
+            // Created with a protected owner-only ACL in one call; files created inside inherit it.
+            WindowsFileAcl.CreateOwnerOnlyDirectory(path);
+            return;
+        }
+
+        Directory.CreateDirectory(path);
+        RestrictToOwner(path, OwnerOnlyDirectory);
+    }
+
     /// <summary>Returns the folder's key only if neither the folder nor the key could have been written by anyone else.</summary>
     private static byte[]? TryLoadTrustedKey(string full)
     {
@@ -317,8 +335,7 @@ internal sealed class SignedAnswerCache
 
     private static bool IsOwnerOnly(string path)
     {
-        // On Windows, LocalApplicationData is private to the user through its inherited ACL.
-        if (IsWindows) return true;
+        if (IsWindows) return WindowsFileAcl.IsOwnerOnly(path);
 
         // No way to read the mode (runtime older than .NET 7): do not trust the folder.
         if (GetUnixFileModeMethod is null) return false;
@@ -329,7 +346,7 @@ internal sealed class SignedAnswerCache
 
     private static void RestrictToOwner(string path, int mode)
     {
-        if (IsWindows) return;
+        if (IsWindows) return; // the cache folder's ACL is set when it is created; see CreateOwnerOnlyDirectory
         if (SetUnixFileModeMethod is null || UnixFileModeType is null)
         {
             throw new IOException("This runtime cannot set Unix file modes.");
