@@ -143,10 +143,16 @@ internal sealed partial class CfgSsaLowerer
     private sealed record LoopSpecGroup(
         ILoopOperation Loop,
         List<(IOperation Condition, Location Location, string DisplayText, string? Because)> LoopInvariants,
-        List<(IOperation Measure, Location Location, string DisplayText, string? Because)> Decreases);
+        List<(IOperation Measure, Location Location, string DisplayText, string? Because)> Decreases)
+    {
+        /// <summary>Loop contracts that are not among the first statements of the loop body (see CfgSsaLowerer.Loops.cs).</summary>
+        public List<(Location Location, string DisplayText)> Misplaced { get; } = new();
+    }
 
     private sealed class MethodSpecs
     {
+        /// <summary>The <c>Spec.Decreases</c> calls in the method's leading contract block: its termination measure for recursion.</summary>
+        public List<(IOperation Measure, Location Location, string DisplayText, string? Because)> MethodDecreases { get; } = new();
         public HashSet<SyntaxNode> AnnotationCalls { get; } = new();
         public List<RequiresSpec> Requires { get; } = new();
         public List<EnsuresSpec> Ensures { get; } = new();
@@ -399,6 +405,7 @@ internal sealed partial class CfgSsaLowerer
             }
         }
 
+        _loopBlocksByHeader = loopBlocksByHeader;
         var rpo = ComputeRpoIgnoringBackEdges(cfg, backEdges);
         var incoming = new Dictionary<BasicBlock, List<IncomingEdge>>();
         foreach (var b in cfg.Blocks) incoming[b] = new List<IncomingEdge>();
@@ -528,6 +535,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var loopGroups = new Dictionary<ILoopOperation, LoopSpecGroup>();
+        var loopLeadingCalls = new Dictionary<ILoopOperation, HashSet<SyntaxNode>>();
 
         void Walk(IOperation op, ILoopOperation? enclosingLoop)
         {
@@ -543,6 +551,7 @@ internal sealed partial class CfgSsaLowerer
                     var grp = new LoopSpecGroup(loopOp, new(), new());
                     loopGroups[loopOp] = grp;
                     specs.Loops.Add(grp);
+                    loopLeadingCalls[loopOp] = LeadingLoopContractCalls(loopOp);
                 }
 
                 foreach (var child in op.ChildOperations)
@@ -638,13 +647,28 @@ internal sealed partial class CfgSsaLowerer
                             specs.Errors.Add((text, loc, "Spec.LoopInvariant(...) must be called inside a loop body."));
                             return;
                         }
+                        if (!loopLeadingCalls[enclosingLoop].Contains(inv.Syntax))
+                        {
+                            loopGroups[enclosingLoop].Misplaced.Add((loc, text));
+                            return;
+                        }
                         loopGroups[enclosingLoop].LoopInvariants.Add((GetOrderedArgOp(inv, 0), loc, text, because));
                         return;
 
                     case "Decreases" when inv.Arguments.Length is 1 or 2:
                         if (enclosingLoop is null)
                         {
-                            specs.Errors.Add((text, loc, "Spec.Decreases(...) must be called inside a loop body."));
+                            if (IsPreconditionCall(compilation, inv))
+                            {
+                                specs.MethodDecreases.Add((GetOrderedArgOp(inv, 0), loc, text, because));
+                                return;
+                            }
+                            specs.Errors.Add((text, loc, "Spec.Decreases(...) must be called inside a loop body, or at the top of a recursive method."));
+                            return;
+                        }
+                        if (!loopLeadingCalls[enclosingLoop].Contains(inv.Syntax))
+                        {
+                            loopGroups[enclosingLoop].Misplaced.Add((loc, text));
                             return;
                         }
                         loopGroups[enclosingLoop].Decreases.Add((GetOrderedArgOp(inv, 0), loc, text, because));
@@ -703,7 +727,7 @@ internal sealed partial class CfgSsaLowerer
     private LoopSpecGroup? FindLoopSpecGroup(BasicBlock header, HashSet<BasicBlock> loopBody)
     {
         var anchorSpan = header.BranchValue?.Syntax.Span
-            ?? loopBody.SelectMany(b => b.Operations).FirstOrDefault()?.Syntax.Span;
+            ?? CommonSpanOfLoopOperations(loopBody);
 
         if (anchorSpan is null)
         {
@@ -730,14 +754,25 @@ internal sealed partial class CfgSsaLowerer
         HashSet<BasicBlock> loopBody,
         List<IncomingEdge> preEdges,
         HashSet<(BasicBlock Src, BasicBlock Dst)> backEdges,
-        Dictionary<BasicBlock, List<IncomingEdge>> incoming)
+        Dictionary<BasicBlock, List<IncomingEdge>> incoming,
+        EdgeSink? enclosingExit = null)
     {
+        // Where an edge that leaves this loop goes: to the code after it, or (for a loop nested in another loop's
+        // body) back into the enclosing loop's own dispatch.
+        var exit = enclosingExit ?? ((src, dst, edgeGamma, edgeEnv) =>
+        {
+            if (dst.Kind != BasicBlockKind.Exit)
+            {
+                incoming[dst].Add(new IncomingEdge(src, edgeGamma, edgeEnv.Clone()));
+            }
+        });
         var (preGamma, preEnv) = MergeIncomingEdges(preEdges);
         var headerLoc = header.BranchValue?.Syntax.GetLocation() ?? _method.Locations.FirstOrDefault() ?? Location.None;
 
         var loopSpecs = FindLoopSpecGroup(header, loopBody);
         var loopInvs = loopSpecs?.LoopInvariants ?? new List<(IOperation Condition, Location Location, string DisplayText, string? Because)>();
         var decreasesExprs = loopSpecs?.Decreases ?? new List<(IOperation Measure, Location Location, string DisplayText, string? Because)>();
+        CheckLoopRules(loopSpecs, headerLoc);
 
         // 1. Check LoopInvariant entry and Decreases >= 0 at pre-loop state
         foreach (var (condOp, loc, display, because) in loopInvs)
@@ -780,6 +815,7 @@ internal sealed partial class CfgSsaLowerer
         }
 
         var invAssumptions = new List<string>();
+        invAssumptions.AddRange(HavocEnumeratorCaptures(loopBody, preEnv, loopEnv));
         foreach (var (condOp, loc, display, _) in loopInvs)
         {
             try
@@ -846,30 +882,40 @@ internal sealed partial class CfgSsaLowerer
         var bodyIncoming = new Dictionary<BasicBlock, List<IncomingEdge>>();
         foreach (var b in loopBody) bodyIncoming[b] = new List<IncomingEdge>();
 
+        // The header's own edges go through the same dispatch as every other block's. An edge from the header back to
+        // itself (a do-while whose body is one block) is a back edge: the invariant and measure are checked on it.
         if (condDest is not null)
         {
             var edgeGamma = condBranchCond is not null ? CombineAnd(loopGamma, condBranchCond) : loopGamma;
-            if (loopBody.Contains(condDest) && !ReferenceEquals(condDest, header))
-                bodyIncoming[condDest].Add(new IncomingEdge(header, edgeGamma, headerWorkEnv.Clone()));
-            else if (!ReferenceEquals(condDest, header))
-                incoming[condDest].Add(new IncomingEdge(header, edgeGamma, headerWorkEnv.Clone()));
+            DispatchLoopBodyEdge(header, condDest, edgeGamma, headerWorkEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
         }
 
         if (fallDest is not null && header.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Regular)
         {
             var edgeGamma = fallBranchCond is not null ? CombineAnd(loopGamma, fallBranchCond) : loopGamma;
-            if (loopBody.Contains(fallDest) && !ReferenceEquals(fallDest, header))
-                bodyIncoming[fallDest].Add(new IncomingEdge(header, edgeGamma, headerWorkEnv.Clone()));
-            else if (!ReferenceEquals(fallDest, header))
-                incoming[fallDest].Add(new IncomingEdge(header, edgeGamma, headerWorkEnv.Clone()));
+            DispatchLoopBodyEdge(header, fallDest, edgeGamma, headerWorkEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
         }
 
         var bodyOrder = ComputeSubgraphRpo(header, loopBody, backEdges);
+        var nestedLoopBlocks = new HashSet<BasicBlock>();
         foreach (var b in bodyOrder)
         {
             if (ReferenceEquals(b, header)) continue;
+            if (nestedLoopBlocks.Contains(b)) continue;
             var bEdges = bodyIncoming[b];
             if (bEdges.Count == 0) continue;
+
+            // A loop nested in this loop's body is lowered as a loop of its own, entered by the edges collected so far.
+            if (_loopBlocksByHeader.TryGetValue(b, out var nestedBody))
+            {
+                foreach (var nb in nestedBody)
+                {
+                    if (!ReferenceEquals(nb, b)) nestedLoopBlocks.Add(nb);
+                }
+                LowerNaturalLoop(b, nestedBody, bEdges, backEdges, incoming,
+                    (nSrc, nDst, nGamma, nEnv) => DispatchLoopBodyEdge(nSrc, nDst, nGamma, nEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms));
+                continue;
+            }
 
             var (bGamma, bEnv) = MergeIncomingEdges(bEdges);
 
@@ -897,19 +943,22 @@ internal sealed partial class CfgSsaLowerer
                     }
                 }
 
-                DispatchLoopBodyEdge(b, bCondDest, CombineAnd(bGamma, cTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
+                DispatchLoopBodyEdge(b, bCondDest, CombineAnd(bGamma, cTerm), bEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
                 if (b.FallThroughSuccessor?.Destination is { } bFallDest)
                 {
-                    DispatchLoopBodyEdge(b, bFallDest, CombineAnd(bGamma, fTerm), bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
+                    DispatchLoopBodyEdge(b, bFallDest, CombineAnd(bGamma, fTerm), bEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
                 }
             }
             else if (b.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Return)
             {
                 HandleReturnBranch(b, bGamma, bEnv);
             }
+            else if (EmitImplicitSwitchThrowObligation(b, bGamma))
+            {
+            }
             else if (b.FallThroughSuccessor?.Destination is { } bFallOnly && b.FallThroughSuccessor.Semantics == ControlFlowBranchSemantics.Regular)
             {
-                DispatchLoopBodyEdge(b, bFallOnly, bGamma, bEnv, header, loopBody, bodyIncoming, incoming, loopInvs, decBeforeTerms);
+                DispatchLoopBodyEdge(b, bFallOnly, bGamma, bEnv, header, loopBody, bodyIncoming, exit, loopInvs, decBeforeTerms);
             }
         }
     }
@@ -922,7 +971,7 @@ internal sealed partial class CfgSsaLowerer
         BasicBlock header,
         HashSet<BasicBlock> loopBody,
         Dictionary<BasicBlock, List<IncomingEdge>> bodyIncoming,
-        Dictionary<BasicBlock, List<IncomingEdge>> outerIncoming,
+        EdgeSink outerExit,
         List<(IOperation Condition, Location Location, string DisplayText, string? Because)> loopInvs,
         List<(IOperation MeasureOp, Location Loc, string Display, string? Because, SmtTypedTerm Term)> decBeforeTerms)
     {
@@ -965,7 +1014,7 @@ internal sealed partial class CfgSsaLowerer
         }
         else if (dst.Kind != BasicBlockKind.Exit)
         {
-            outerIncoming[dst].Add(new IncomingEdge(src, edgeGamma, env.Clone()));
+            outerExit(src, dst, edgeGamma, env);
         }
     }
 
@@ -1014,6 +1063,11 @@ internal sealed partial class CfgSsaLowerer
         if (block.FallThroughSuccessor?.Semantics == ControlFlowBranchSemantics.Return)
         {
             HandleReturnBranch(block, gamma, env);
+            return;
+        }
+
+        if (EmitImplicitSwitchThrowObligation(block, gamma))
+        {
             return;
         }
 
@@ -1549,6 +1603,8 @@ internal sealed partial class CfgSsaLowerer
                 return new SmtTypedTerm(_types.GetDefaultTerm(op.Type!), op.Type!);
 
             case IFlowCaptureOperation cap:
+                if (TryLowerEnumeratorCapture(cap, gamma, env, emitObligations, inlineDepth, out var enumeratorStart))
+                    return enumeratorStart;
                 var capVal = LowerExpression(cap.Value, gamma, env, emitObligations, inlineDepth);
                 var capSsa = BindSsaValue("cap", capVal);
                 env.Captures[cap.Id] = capSsa;
@@ -2052,6 +2108,11 @@ internal sealed partial class CfgSsaLowerer
     {
         var prop = propRef.Property;
 
+        if (TryLowerEnumeratorCurrent(propRef, env, out var currentItem))
+        {
+            return currentItem;
+        }
+
         if (prop.IsIndexer && propRef.Instance is not null && propRef.Arguments.Length == 1)
         {
             var recv = LowerExpression(propRef.Instance, gamma, env, emitObligations, inlineDepth);
@@ -2380,6 +2441,11 @@ internal sealed partial class CfgSsaLowerer
         var method = inv.TargetMethod;
         var containing = method.ContainingType;
         var loc = inv.Syntax.GetLocation();
+
+        if (TryLowerEnumeratorMoveNext(inv, env, out var moveNextResult))
+        {
+            return moveNextResult;
+        }
 
         // 0. Spec.* intrinsics
         if (containing?.ToDisplayString() == VerifiableSymbolHelpers.SpecTypeName)
@@ -2769,6 +2835,11 @@ internal sealed partial class CfgSsaLowerer
     private SmtTypedTerm LowerHelperCall(IMethodSymbol method, SmtTypedTerm? receiver, IReadOnlyList<SmtTypedTerm> args,
         string gamma, Location loc, bool implementationCall, int inlineDepth)
     {
+        if (implementationCall)
+        {
+            CheckRecursiveCall(method, receiver, args, gamma, loc);
+        }
+
         var specs = ExtractMethodSpecs(_compilation, method, default);
         _errors.AddRange(specs.Errors);
         var calleeEnv = new BlockEnv { ThisOverride = receiver };
@@ -4198,7 +4269,7 @@ internal sealed partial class CfgSsaLowerer
         var captureAliases = new Dictionary<CaptureId, ISymbol>();
         foreach (var b in loopBlocks)
         {
-            foreach (var op in b.Operations)
+            foreach (var op in LoopBlockOperations(b))
             {
                 foreach (var cap in op.DescendantsAndSelf().OfType<IFlowCaptureOperation>())
                 {
@@ -4211,7 +4282,7 @@ internal sealed partial class CfgSsaLowerer
         var set = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var b in loopBlocks)
         {
-            foreach (var op in b.Operations)
+            foreach (var op in LoopBlockOperations(b))
             {
                 foreach (var desc in op.DescendantsAndSelf())
                 {
@@ -4223,11 +4294,20 @@ internal sealed partial class CfgSsaLowerer
                         case ISimpleAssignmentOperation sa:
                             AddAssignedSym(sa.Target, captureAliases, set);
                             break;
+                        case IDeconstructionAssignmentOperation da:
+                            AddAssignedSym(da.Target, captureAliases, set);
+                            break;
                         case ICompoundAssignmentOperation ca:
                             AddAssignedSym(ca.Target, captureAliases, set);
                             break;
                         case IIncrementOrDecrementOperation inc:
                             AddAssignedSym(inc.Target, captureAliases, set);
+                            break;
+                        case IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out } arg:
+                            AddAssignedSym(arg.Value, captureAliases, set);
+                            break;
+                        case IDeclarationPatternOperation { DeclaredSymbol: ILocalSymbol declared }:
+                            set.Add(declared);
                             break;
                     }
                 }
@@ -4241,6 +4321,12 @@ internal sealed partial class CfgSsaLowerer
         if (target is ILocalReferenceOperation lr) set.Add(lr.Local);
         else if (target is IParameterReferenceOperation pr) set.Add(pr.Parameter);
         else if (target is IFlowCaptureReferenceOperation cr && captureAliases.TryGetValue(cr.Id, out var sym)) set.Add(sym);
+        else if (target is ITupleOperation tuple)
+        {
+            foreach (var element in tuple.Elements) AddAssignedSym(element, captureAliases, set);
+        }
+        else if (target is IDeclarationExpressionOperation decl) AddAssignedSym(decl.Expression, captureAliases, set);
+        else if (target is IConversionOperation conv) AddAssignedSym(conv.Operand, captureAliases, set);
     }
 
     private static ITypeSymbol GetSymbolType(ISymbol sym) => sym switch

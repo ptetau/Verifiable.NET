@@ -1,7 +1,6 @@
 // The loop condition itself bumps i, so the loop runs until i reaches n; i is n afterwards, not 1.
 // @expect: rejected
 // @witness: Corpus.Control.ConditionIncrement.Run(3)
-// @known-bug: Variables assigned inside a loop condition (the header block branch value) are not havocked, so the analyzer treats the loop as running its condition once.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

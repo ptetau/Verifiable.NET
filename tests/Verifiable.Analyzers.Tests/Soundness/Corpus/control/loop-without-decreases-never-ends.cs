@@ -2,7 +2,6 @@
 // @expect: rejected
 // @witness: Corpus.Control.Spin.Run(0)
 // @runtime: skip Every run loops forever.
-// @known-bug: Termination is not checked: a while loop with only Spec.LoopInvariant (no Decreases) is accepted, and code after a loop that never exits is proved vacuously.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

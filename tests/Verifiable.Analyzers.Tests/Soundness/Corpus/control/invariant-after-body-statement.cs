@@ -1,7 +1,6 @@
 // The invariant sits after x = x + 100, where x is far above 3; it only holds at the loop head, not where it is written.
 // @expect: rejected
 // @witness: Corpus.Control.MidBodyInvariant.Run(0)
-// @known-bug: Spec.LoopInvariant is always checked at the loop head, wherever it is written in the body; one placed after a body statement is never checked where it stands.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

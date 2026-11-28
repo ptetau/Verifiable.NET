@@ -1,6 +1,5 @@
 // Summing a list of non-negative ints gives a non-negative total.
 // @expect: proved
-// @known-bug: False rejection: the foreach item is an unconstrained value (the enumerator is not modelled), so facts about the items from the precondition never reach the loop body.
 using System.Collections.Immutable;
 using System.Linq;
 using Verifiable.Contracts;
