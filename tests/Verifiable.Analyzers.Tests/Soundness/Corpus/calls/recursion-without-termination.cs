@@ -2,7 +2,6 @@
 // The loop rules ask for a Decreases measure; recursion asks for none.
 // @expect: rejected
 // @witness: Corpus.Calls.Forever.Spin(1)
-// @known-bug: Recursive calls assume the callee postcondition with no termination measure, so a method that never returns proves any satisfiable postcondition.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

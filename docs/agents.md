@@ -26,7 +26,7 @@ When Z3 refutes a contract (`SAT`) with `VERIFIABLE_AGENT=1`, `Verifiable.Analyz
 - A single-line `<verifiable-counterexample>{...}</verifiable-counterexample>` payload containing:
   - `rule`: `"VER102"`
   - `symbol`: `"DeclaringType.Method"`
-  - `kind`: `"Precondition" | "Postcondition" | "TypeInvariant" | "Overflow" | "DivisionByZero" | "CollectionBounds" | "LoopInvariantEntry" | "LoopInvariantStep" | "LoopDecreasesEntry" | "LoopDecreasesStep"`
+  - `kind`: `"Precondition" | "Postcondition" | "TypeInvariant" | "Overflow" | "DivisionByZero" | "CollectionBounds" | "LoopInvariantEntry" | "LoopInvariantStep" | "LoopDecreasesEntry" | "LoopDecreasesStep" | "RecursionDecreases" | "SwitchExpressionException"`
   - `contract`: exact contract or check description
   - `reason` *(optional)*: human-readable `because` or attribute `description` string when present
   - `counterexample`: key-value map of parameter names to Z3 counterexample values

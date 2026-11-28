@@ -1,7 +1,6 @@
 // i reaches n (up to 5), so the invariant i <= 2 fails on the third pass through the body.
 // @expect: rejected
 // @witness: Corpus.Control.DoWhile.Run(5)
-// @known-bug: When a do-while body is one basic block, its back edge targets the header itself and is skipped, so LoopInvariant and Decreases are never checked after an iteration.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

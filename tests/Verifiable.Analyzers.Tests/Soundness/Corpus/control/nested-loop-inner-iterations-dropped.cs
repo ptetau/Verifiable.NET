@@ -1,7 +1,6 @@
 // The inner loop runs n times per outer iteration, so c ends up n, not 0.
 // @expect: rejected
 // @witness: Corpus.Control.NestedLoop.Count(1)
-// @known-bug: A loop nested in another loop body is lowered as straight-line code; its back edge is dropped, so only zero-iteration paths of the inner loop are kept.
 using Verifiable.Contracts;
 
 namespace Corpus.Control;

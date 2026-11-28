@@ -59,7 +59,7 @@ public static class Spec
 
     /// <summary>
     /// Declares an inductive loop invariant checked on loop entry and preserved across every loop back-edge.
-    /// Place directly inside the body of the loop being verified.
+    /// Place it among the first statements of the body of the loop being verified, before any other statement.
     /// </summary>
     /// <param name="condition">A pure C# boolean expression over loop variables.</param>
     /// <param name="because">Optional human-readable explanation of why this invariant holds.</param>
@@ -73,6 +73,8 @@ public static class Spec
 
     /// <summary>
     /// Declares a non-negative integer ranking expression that strictly decreases on every iteration of the enclosing loop.
+    /// Every <c>while</c>, <c>do</c> and <c>for</c> loop needs one, placed among the first statements of its body.
+    /// At the top of a recursive method it is the measure that goes down at every recursive call.
     /// </summary>
     /// <param name="measure">A non-negative <see cref="int"/> expression that strictly decreases per iteration.</param>
     /// <param name="because">Optional human-readable explanation of why this loop terminates.</param>
