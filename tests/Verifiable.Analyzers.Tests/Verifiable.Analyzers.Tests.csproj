@@ -31,6 +31,13 @@
                       SetTargetFramework="TargetFramework=netstandard2.0" />
   </ItemGroup>
 
+  <!-- The break-it corpus is input data for SoundnessCorpusTests, not part of this assembly. -->
+  <ItemGroup>
+    <Compile Remove="Soundness/Corpus/**" />
+    <None Remove="Soundness/Corpus/**" />
+    <None Include="Soundness/Corpus/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <Target Name="CopyBootstrapAnalyzer" AfterTargets="Build">
     <Copy SourceFiles="@(BootstrapAnalyzer)" DestinationFolder="$(OutputPath)bootstrap" SkipUnchangedFiles="true" />
   </Target>

@@ -155,7 +155,7 @@ internal static class AnalyzerTestHarness
         return await withAnalyzers.GetAllDiagnosticsAsync();
     }
 
-    private static List<MetadataReference> CollectDefaultReferences(IEnumerable<MetadataReference>? extraReferences)
+    internal static List<MetadataReference> CollectDefaultReferences(IEnumerable<MetadataReference>? extraReferences)
     {
         var refLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var refs = new List<MetadataReference>();
@@ -188,7 +188,7 @@ internal static class AnalyzerTestHarness
         return refs;
     }
 
-    private static List<ISourceGenerator> CreateDefaultGenerators(IEnumerable<ISourceGenerator>? extraGenerators)
+    internal static List<ISourceGenerator> CreateDefaultGenerators(IEnumerable<ISourceGenerator>? extraGenerators)
     {
         var generators = new List<ISourceGenerator>
         {
