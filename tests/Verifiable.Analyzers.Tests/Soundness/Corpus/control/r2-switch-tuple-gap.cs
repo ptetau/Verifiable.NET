@@ -1,5 +1,4 @@
 // (0, 5) matches none of the three tuple arms and throws.
-// @known-bug: Tuple-pattern switch expression with arms (>0,>0), (<0,_), (_,<0) is accepted although (0,5) matches no arm (exhaustiveness of tuple patterns not checked)
 // @expect: rejected
 // @witness: Corpus.Control.TupleGap.Cls(0, 5)
 using Verifiable.Contracts;

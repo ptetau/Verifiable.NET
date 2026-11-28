@@ -795,6 +795,127 @@ public class LoopSoundnessTests
             """));
     }
 
+    [Fact]
+    public async Task TupleSwitchExpressionMissingACase_IsRefuted()
+    {
+        AssertRefuted(await AnalyzeAsync("""
+            public static int Cls(int a, int b)
+            {
+                Spec.Ensures<int>(r => r >= 1 && r <= 3, "A class.");
+            #pragma warning disable CS8509
+                return (a, b) switch
+                {
+                    (> 0, > 0) => 1,
+                    (< 0, _) => 2,
+                    (_, < 0) => 3,
+                };
+            #pragma warning restore CS8509
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task TupleSwitchExpressionCoveringEveryCase_IsAccepted()
+    {
+        AssertAccepted(await AnalyzeAsync("""
+            public static int Cls(int a, int b)
+            {
+                Spec.Ensures<int>(r => r >= 1 && r <= 4, "A class.");
+                return (a, b) switch
+                {
+                    (> 0, > 0) => 1,
+                    (<= 0, > 0) => 2,
+                    (> 0, <= 0) => 3,
+                    (<= 0, <= 0) => 4,
+                };
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task TupleSwitchArmBodyUsesItsElementConditions()
+    {
+        AssertRefuted(await AnalyzeAsync("""
+            public static int Pick(int a, int b)
+            {
+                Spec.Ensures<int>(r => r > 0, "Positive.");
+                return (a, b) switch
+                {
+                    (> 0, _) => a,
+                    (_, > 0) => b,
+                    _ => 0,
+                };
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task TupleIsPattern_IsModelled()
+    {
+        AssertAccepted(await AnalyzeAsync("""
+            public static int Pick(int a, int b)
+            {
+                Spec.Ensures<int>(r => r >= 0, "Not negative.");
+                if ((a, b) is (> 0, > 0))
+                {
+                    return a + 0 * b;
+                }
+                return 0;
+            }
+            """));
+        AssertRefuted(await AnalyzeAsync("""
+            public static int Pick(int a, int b)
+            {
+                Spec.Ensures<int>(r => r > 0, "Positive.");
+                if ((a, b) is (> 0, _))
+                {
+                    return b;
+                }
+                return 1;
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task TupleSwitchStatement_ArmsAreLowered()
+    {
+        AssertRefuted(await AnalyzeAsync("""
+            public static int Pick(int a, int b)
+            {
+                Spec.Ensures<int>(r => r > 0, "Positive.");
+                switch ((a, b))
+                {
+                    case (> 0, > 0):
+                        return 1;
+                    case (_, > 0):
+                        return b - 5;
+                }
+                return 1;
+            }
+            """));
+    }
+
+    [Fact]
+    public async Task PositionalPatternOnARecord_IsRejectedNotAssumedToMatch()
+    {
+        var result = await AnalyzeAsync("""
+            public readonly record struct Pt(int X, int Y);
+
+            public static int Cls(Pt p)
+            {
+                Spec.Ensures<int>(r => r == 1 || r == 2, "A class.");
+            #pragma warning disable CS8509
+                return p switch
+                {
+                    (> 0, _) => 1,
+                    (< 0, _) => 2,
+                };
+            #pragma warning restore CS8509
+            }
+            """);
+        AssertRefuted(result, "VER101");
+    }
+
     // ---- foreach over a sequence hands out its items ----
 
     [Fact]

@@ -2215,6 +2215,25 @@ internal sealed partial class CfgSsaLowerer
             env.Vars[locSym] = target;
         }
 
+        if (!recPat.DeconstructionSubpatterns.IsDefaultOrEmpty)
+        {
+            // A positional pattern is modelled only on tuples: it matches when every element matches its subpattern.
+            // A Deconstruct method (records, user types) is user code and is not modelled: reject, never assume a match.
+            if (recPat.DeconstructSymbol is not null || !target.Type.IsTupleType ||
+                !_types.TryGetComposite(target.Type, out var tupComp) ||
+                tupComp!.Fields.Count != recPat.DeconstructionSubpatterns.Length)
+            {
+                throw new ContractLoweringException($"Unsupported positional pattern '{recPat.Syntax}': only tuple patterns are supported.");
+            }
+
+            for (var i = 0; i < recPat.DeconstructionSubpatterns.Length; i++)
+            {
+                var field = tupComp.Fields[i];
+                var elemTerm = new SmtTypedTerm($"({field.AccessorName} {target.Term})", field.Type);
+                clauses.Add(LowerPatternOp(elemTerm, recPat.DeconstructionSubpatterns[i], gamma, env, emitObligations, inlineDepth).Term);
+            }
+        }
+
         foreach (var sub in recPat.PropertySubpatterns)
         {
             var memberName = sub.Member switch
