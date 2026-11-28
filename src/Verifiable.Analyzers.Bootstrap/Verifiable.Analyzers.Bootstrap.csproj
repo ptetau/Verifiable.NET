@@ -39,4 +39,18 @@
     <Using Include="Verifiable.Analyzers.KernelShim.VerifiableAttribute" Alias="VerifiableAttribute" />
   </ItemGroup>
 
+  <!--
+    Kernel files that exist only in the live kernel (a new rule nobody has promoted yet) are compiled in
+    as they are, so analyzer code that calls a new rule still builds. Every file that has a frozen copy
+    uses the frozen copy, so a change to an existing rule is still proved by the earlier version.
+  -->
+  <ItemGroup>
+    <_VerifiableFrozenKernel Include="Kernel\**\*.cs" />
+    <_VerifiableLiveKernel Include="..\Verifiable.Core\**\*.cs"
+                           Exclude="..\Verifiable.Core\AssemblyInfo.cs;..\Verifiable.Core\Proofs\**;..\Verifiable.Core\obj\**;..\Verifiable.Core\bin\**" />
+    <_VerifiableLiveKernelNew Include="@(_VerifiableLiveKernel)"
+                              Exclude="@(_VerifiableFrozenKernel->'..\Verifiable.Core\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Compile Include="@(_VerifiableLiveKernelNew)" Link="LiveKernelOnly\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>
