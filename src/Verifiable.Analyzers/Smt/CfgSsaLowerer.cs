@@ -101,6 +101,7 @@ internal sealed partial class CfgSsaLowerer
     private readonly ContractExpressionTranslator _translator;
 
     private readonly List<string> _decls = new();
+    private readonly Dictionary<IFieldSymbol, SmtTypedTerm> _staticReadonlyFields = new(SymbolEqualityComparer.Default);
     private readonly List<string> _assertions = new();
     private readonly List<ProofObligation> _obligations = new();
     private readonly List<NamedPremise> _premises = new();
@@ -2167,6 +2168,16 @@ internal sealed partial class CfgSsaLowerer
             }
             if (!emitObligations)
                 throw new ContractLoweringException($"Unsupported static field '{field.Name}' in specification.");
+            if (field.IsReadOnly && _inQuantifierDepth == 0)
+            {
+                // A static readonly field never changes after its initializer, so every read sees the same unknown value.
+                if (!_staticReadonlyFields.TryGetValue(field, out var cached))
+                {
+                    cached = BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
+                    _staticReadonlyFields[field] = cached;
+                }
+                return cached;
+            }
             return BindSsaValue("fld", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true);
         }
 
@@ -2401,7 +2412,10 @@ internal sealed partial class CfgSsaLowerer
             if (method.Name == "Implies" && inv.Arguments.Length == 2)
             {
                 var ant = LowerExpression(GetOrderedArgOp(inv, 0), gamma, env, emitObligations, inlineDepth);
-                var cons = LowerExpression(GetOrderedArgOp(inv, 1), CombineAnd(gamma, ant.Term), env, emitObligations, inlineDepth);
+                // In code (obligations emitted) C# evaluates both arguments, so the consequent runs under the caller's path
+                // condition; only in a specification is Implies a logical connective guarding its consequent.
+                var consGamma = emitObligations ? gamma : CombineAnd(gamma, ant.Term);
+                var cons = LowerExpression(GetOrderedArgOp(inv, 1), consGamma, env, emitObligations, inlineDepth);
                 return new SmtTypedTerm($"(=> {ant.Term} {cons.Term})", _compilation.GetSpecialType(SpecialType.System_Boolean));
             }
 

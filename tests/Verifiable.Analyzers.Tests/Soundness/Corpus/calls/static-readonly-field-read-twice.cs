@@ -1,6 +1,5 @@
 // Reading the same static readonly field twice gives the same value, so K - K is 0.
 // @expect: proved
-// @known-bug: False rejection: each read of a static readonly field becomes a fresh unknown (LowerFieldReference binds a fresh symbol per read), so K - K is not 0.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;

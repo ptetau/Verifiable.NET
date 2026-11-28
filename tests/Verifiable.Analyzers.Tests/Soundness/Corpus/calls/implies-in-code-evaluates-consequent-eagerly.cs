@@ -2,7 +2,6 @@
 // when x == 0. The analyzer lowers the consequent only under the antecedent, so it misses the division by zero.
 // @expect: rejected
 // @witness: Corpus.Calls.ImpliesInCode.Check(0)
-// @known-bug: Spec.Implies in code is lowered as short-circuit, but C# evaluates both arguments, so the division-by-zero check is guarded by the antecedent.
 using Verifiable.Contracts;
 
 namespace Corpus.Calls;
