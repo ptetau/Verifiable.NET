@@ -1807,12 +1807,12 @@ internal sealed partial class CfgSsaLowerer
             EmitBitVecOverflowObligation(kind, lTerm, rTerm, sort, gamma, loc);
         }
 
-        if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && !isBv && sort != "Real")
+        if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && sort != "Real")
         {
-            if (emitObligations || _inQuantifierDepth > 0)
-                EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0))");
+            return LowerIntegerDivision(kind, lTerm, rTerm, sort, resultType, gamma, loc, emitObligations);
         }
-        else if (kind == BinaryOperatorKind.Divide && sort == "Real")
+
+        if (kind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && sort == "Real")
         {
             if (emitObligations || _inQuantifierDepth > 0)
                 EmitSafetyObligation("DivisionByZero", "Divisor must be non-zero", loc, gamma, $"(not (= {rTerm} 0.0))");
@@ -1827,8 +1827,8 @@ internal sealed partial class CfgSsaLowerer
             BinaryOperatorKind.Add => new SmtTypedTerm($"({(isBv ? "bvadd" : "+")} {lTerm} {rTerm})", resultType),
             BinaryOperatorKind.Subtract => new SmtTypedTerm($"({(isBv ? "bvsub" : "-")} {lTerm} {rTerm})", resultType),
             BinaryOperatorKind.Multiply => new SmtTypedTerm($"({(isBv ? "bvmul" : "*")} {lTerm} {rTerm})", resultType),
-            BinaryOperatorKind.Divide => new SmtTypedTerm($"({(isBv ? "bvsdiv" : (sort == "Real" ? "/" : "div"))} {lTerm} {rTerm})", resultType),
-            BinaryOperatorKind.Remainder => new SmtTypedTerm($"({(isBv ? "bvsrem" : "mod")} {lTerm} {rTerm})", resultType),
+            BinaryOperatorKind.Divide => new SmtTypedTerm($"(/ {lTerm} {rTerm})", resultType),
+            BinaryOperatorKind.Remainder => new SmtTypedTerm(RealRemainder(lTerm, rTerm), resultType),
             BinaryOperatorKind.And => new SmtTypedTerm($"(and {lTerm} {rTerm})", boolType),
             BinaryOperatorKind.Or => new SmtTypedTerm($"(or {lTerm} {rTerm})", boolType),
             _ when !emitObligations => throw new ContractLoweringException($"Unsupported binary operator '{kind}' in specification."),
@@ -2649,9 +2649,15 @@ internal sealed partial class CfgSsaLowerer
             {
                 var a = _translator.UnwrapRefinedIfApplicable(argValues[0]);
                 var sort = _types.GetSort(a.Type);
-                var zero = sort == "Real" ? "0.0" : _translator.FormatIntLiteral(0, 32);
+                var zero = sort == "Real" ? "0.0" : _translator.FormatIntLiteral(0, sort == "(_ BitVec 64)" ? 64 : 32);
                 var lt = ContractExpressionTranslator.IsBitVecSort(sort) ? "bvslt" : "<";
                 var neg = ContractExpressionTranslator.IsBitVecSort(sort) ? "bvneg" : "-";
+                if (emitObligations && sort is "(_ BitVec 32)" or "(_ BitVec 64)")
+                {
+                    // Math.Abs(MinValue) has no positive counterpart and throws OverflowException.
+                    var minVal = sort == "(_ BitVec 32)" ? "(_ bv2147483648 32)" : "(_ bv9223372036854775808 64)";
+                    EmitSafetyObligation("Overflow", "Math.Abs(MinValue) throws OverflowException", loc, gamma, $"(not (= {a.Term} {minVal}))");
+                }
                 return new SmtTypedTerm($"(ite ({lt} {a.Term} {zero}) ({neg} {a.Term}) {a.Term})", method.ReturnType);
             }
             if (method.Name == "Max" && argValues.Count == 2)
