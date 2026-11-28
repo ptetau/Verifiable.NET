@@ -89,11 +89,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                         treeNonDefault == "1" || string.Equals(treeNonDefault, "true", StringComparison.OrdinalIgnoreCase);
                 }
 
-                if (!MethodNeedsSmtCheck(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums, nonDefaultImmArr))
-                {
-                    return;
-                }
-
+                // Every [Verifiable] method is lowered. Only what lowering finds decides whether it is checked.
                 var lowerer = new CfgSsaLowerer(
                     opCtx.Compilation,
                     method,
@@ -108,25 +104,39 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
                     {
                         var cfg = opCtx.GetControlFlowGraph(block);
-                        var outcome = lowerer.Lower(cfg, opCtx.OperationBlocks);
-                        allObligations.AddRange(outcome.Obligations);
-                        allErrors.AddRange(outcome.Errors);
+                        try
+                        {
+                            var outcome = lowerer.Lower(cfg, opCtx.OperationBlocks);
+                            allObligations.AddRange(outcome.Obligations);
+                            allErrors.AddRange(outcome.Errors);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // A bug in the translation must not turn into an analyzer crash that leaves the method
+                            // unchecked behind a generic AD0001 warning. Treat it as untranslatable code instead.
+                            allErrors.Add((
+                                method.Name,
+                                method.Locations.FirstOrDefault() ?? Location.None,
+                                $"Internal error while translating this method ({ex.GetType().Name}: {OneLine(ex.Message)}). Please report it."));
+                        }
                     }
+                }
+
+                var selection = CheckSelectionKernel.Select(
+                    allObligations.Count,
+                    loweringFailed: allErrors.Count > 0,
+                    knownObligationSource: allErrors.Count > 0 &&
+                        HasKnownObligationSource(opCtx.Compilation, method, opCtx.OperationBlocks, closedEnums, nonDefaultImmArr));
+                if (selection == MethodCheck.NothingToProve)
+                {
+                    return;
                 }
 
                 foreach (var err in allErrors)
                 {
-                    var elmErr = ElmDiagnosticFormatter.Format(
-                        "UNSUPPORTED CONTRACT",
-                        err.Location,
-                        $"Could not translate contract `{err.Contract}` in `{method.ContainingType?.Name}.{method.Name}` into an SMT formula.",
-                        explanation: $"Reason: {err.Error}",
-                        fixHint: "Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.",
-                        summary: $"Unsupported contract in {method.ContainingType?.Name}.{method.Name}: {OneLine(err.Contract)} — {OneLine(err.Error)}");
-                    opCtx.ReportDiagnostic(Diagnostic.Create(
-                        VerifiableDescriptors.InvalidContractExpression,
-                        err.Location,
-                        elmErr));
+                    opCtx.ReportDiagnostic(selection == MethodCheck.UnsupportedWarning
+                        ? UncheckedMethodWarning(method, err)
+                        : UnsupportedContractError(method, err));
                 }
 
                 var reportedFailures = new HashSet<(int Start, int Length, string Kind, string Contract)>();
@@ -355,7 +365,47 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
     internal static string BuildQueryScript(ProofObligation ob) =>
         ProofKernel.BuildRefutationQuery(ob.ScriptPreamble, ob.PathCondition ?? string.Empty, ob.GoalTerm);
 
-    private static bool MethodNeedsSmtCheck(
+    private static Diagnostic UnsupportedContractError(IMethodSymbol method, (string Contract, Location Location, string Error) err)
+    {
+        var elmErr = ElmDiagnosticFormatter.Format(
+            "UNSUPPORTED CONTRACT",
+            err.Location,
+            $"Could not translate contract `{err.Contract}` in `{method.ContainingType?.Name}.{method.Name}` into an SMT formula.",
+            explanation: $"Reason: {err.Error}",
+            fixHint: "Rewrite the predicate using supported deterministic C# boolean, arithmetic, string, or immutable collection expressions.",
+            summary: $"Unsupported contract in {method.ContainingType?.Name}.{method.Name}: {OneLine(err.Contract)} — {OneLine(err.Error)}");
+        return Diagnostic.Create(VerifiableDescriptors.InvalidContractExpression, err.Location, elmErr);
+    }
+
+    /// <summary>
+    /// A method with no contracts whose code cannot be translated. It may still hide an obligation (a division,
+    /// a callee precondition), so it is reported instead of passing as proved, but only as a warning.
+    /// </summary>
+    private static Diagnostic UncheckedMethodWarning(IMethodSymbol method, (string Contract, Location Location, string Error) err)
+    {
+        var display = $"{method.ContainingType?.Name}.{method.Name}";
+        var elm = ElmDiagnosticFormatter.Format(
+            "METHOD NOT CHECKED",
+            err.Location,
+            $"`{display}` has no contracts, but its code could not be translated into SMT, so it was not checked for hidden obligations such as division by zero or a callee's `Spec.Requires`.",
+            explanation: $"Reason: {err.Error}",
+            fixHint: "Rewrite the code using supported deterministic C# expressions, or mark the method `[Unverifiable]` if it does not need to be proved.",
+            summary: $"{display} was not checked ({OneLine(err.Error).TrimEnd('.')}). Rewrite it with supported code, or mark it [Unverifiable].");
+        return Diagnostic.Create(
+            VerifiableDescriptors.InvalidContractExpression,
+            err.Location,
+            DiagnosticSeverity.Warning,
+            additionalLocations: null,
+            properties: null,
+            elm);
+    }
+
+    /// <summary>
+    /// A quick look at the source for code known to produce a proof obligation. It never decides whether a
+    /// method is checked (every method is lowered); it only makes an untranslatable method an error rather
+    /// than a warning. A miss here can therefore only turn an error into a warning, never into silence.
+    /// </summary>
+    private static bool HasKnownObligationSource(
         Compilation compilation,
         IMethodSymbol method,
         ImmutableArray<IOperation> blocks,
@@ -385,6 +435,16 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
                 if (op is IObjectCreationOperation objOp && objOp.Type is not null &&
                     SmtTypeSystem.HasAnyNonDefaultImmutableArray(objOp.Type, nonDefaultImmutableArrays))
+                {
+                    return true;
+                }
+
+                if (op is IObjectCreationOperation { Constructor: { } ctor } && ConstructorHasSpecRequires(ctor))
+                {
+                    return true;
+                }
+
+                if (op is IBinaryOperation { OperatorKind: BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder })
                 {
                     return true;
                 }
@@ -495,6 +555,17 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
 
         return false;
     }
+
+    // Syntax only: this is a severity hint, so a name match is close enough.
+    private static bool ConstructorHasSpecRequires(IMethodSymbol ctor) =>
+        ctor.DeclaringSyntaxReferences.Any(r => r.GetSyntax()
+            .DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>()
+            .Any(inv => inv.Expression is Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax
+            {
+                Expression: Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax { Identifier.ValueText: "Spec" },
+                Name.Identifier.ValueText: "Requires" or "RequiresWhen"
+            }));
 
     private static bool IsClosedEnumType(ITypeSymbol type, bool closedEnums)
     {
