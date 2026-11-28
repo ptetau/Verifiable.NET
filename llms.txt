@@ -104,7 +104,7 @@ All rules render with Elm formatting (`-- TITLE ---- File.cs`, numbered source l
 - `VER103` (`SOLVER COULD NOT DECIDE`): Z3 `unknown`/timeout.
 - `VER104` (`Z3 SOLVER NOT FOUND`): missing Z3 binary, so nothing was proved. Error by default; `<VerifiableAllowMissingZ3>true</VerifiableAllowMissingZ3>` downgrades it to a warning.
 - `VER105` (`CONTRADICTORY PREMISES`): a proof rests on assumptions that cannot hold. At the method: its assumptions contradict each other (lists the clashing `Spec.Requires` / `[Invariant]` / `[TypeAlias<T>]` rules). At a call: the callee's `Spec.Ensures` / `[PureAxiom]` cannot hold there although the call is reachable, so later goals on that path would be vacuous. Dead code is not reported.
-- `VER106` (`VACUITY CHECK UNDECIDED`, Warning): Z3 could not decide within 1 s whether those assumptions can hold, so the method's proofs may be vacuous. Simplify its contracts or split it into helpers.
+- `VER106` (`VACUITY CHECK UNDECIDED`, Warning): Z3 could not decide, within its fixed work budget, whether those assumptions can hold, so the method's proofs may be vacuous. Simplify its contracts or split it into helpers.
 - `VER201` (`INVALID CONSTRAINED TYPE`) / `VER202` (`MISSING ISVALID PREDICATE`) / `VER203` (`INVALID MAPTO PROJECTION`): generator declaration errors.
 - `VER301` (`COMPLEX CONTRACT`, default `Info`, configurable via `.editorconfig` / `VerifiableMaxSpecClauses`): `Spec.Requires`/`Spec.Ensures` exceeds max top-level `&&` clauses (default 3; includes CodeFix to split) or uses nested ternaries.
 - `VER302` (`MISSING CONTRACT EXPLANATION`, default `Info`): missing or blank `because` argument on `[Verifiable]` `Spec.Requires`/`Spec.Ensures` calls.

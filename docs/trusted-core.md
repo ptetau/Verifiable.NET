@@ -60,7 +60,7 @@ The core is small on purpose. These parts are outside it and are trusted:
 
 These are open, and are listed so they are not forgotten:
 
-- **Vacuous proofs on one path.** `VER105` checks the whole premise set, and each callee guarantee at the call that assumes it. Two cases are still open. The translation's internal axioms (decimal rounding, strings, collections, calendars) are only checked as part of the whole premise set: each guarantee is checked against the assumptions made before it, so a guarantee that clashes only with a later axiom on its path is missed. And when the whole-method check is undecided, the per-call checks are skipped (`VER106` is reported instead). The undecided result depends on a 1 s timeout, so on a slow or busy machine `VER106` can appear where a faster one decides. `verifiable-query` reports per-path vacuity through its unsat core.
+- **Vacuous proofs on one path.** `VER105` checks the whole premise set, and each callee guarantee at the call that assumes it. Two cases are still open. The translation's internal axioms (decimal rounding, strings, collections, calendars) are only checked as part of the whole premise set: each guarantee is checked against the assumptions made before it, so a guarantee that clashes only with a later axiom on its path is missed. And when the whole-method check is undecided, the per-call checks are skipped (`VER106` is reported instead). Premise checks use a fixed Z3 work budget rather than a clock, so the undecided result is the same on every machine (a 10 s wall-clock backstop applies only on extremely slow machines). `verifiable-query` reports per-path vacuity through its unsat core.
 
 ## Rules for contributors
 

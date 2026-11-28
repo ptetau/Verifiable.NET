@@ -279,7 +279,15 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
     /// <summary>Premise checks Z3 could not decide, remembered for the life of the process so they are not retried on every build.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> UndecidedPremiseChecks = new(StringComparer.Ordinal);
 
-    private const int PremiseCheckTimeoutMs = 1000;
+    /// <summary>
+    /// Z3's deterministic work budget for a premise check (about one second on a typical machine). Using a work
+    /// budget rather than the clock makes "undecided" (VER106) the same answer on a fast laptop and a busy CI
+    /// runner, so a build cannot pass or fail by timing. Easy checks use a tiny fraction of it.
+    /// </summary>
+    internal const int PremiseCheckResourceLimit = 5_000_000;
+
+    /// <summary>Wall-clock backstop only; the resource limit above normally decides first.</summary>
+    private const int PremiseCheckTimeoutMs = 10_000;
 
     /// <summary>
     /// Checks that the assumptions behind a method's proofs can hold: all of them at once (<c>VER105</c>), and each
@@ -308,7 +316,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             var key = Z3SolverRunner.ComputeSha256(script);
             if (UndecidedPremiseChecks.ContainsKey(key)) return SmtStatus.Unknown;
 
-            var status = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceFilePath, timeoutMs: PremiseCheckTimeoutMs).Status;
+            // The option sets a work budget only; it adds no assertion, so it cannot change sat or unsat.
+            var budgeted = $"(set-option :rlimit {PremiseCheckResourceLimit})\n" + script;
+            var status = Z3SolverRunner.Execute(budgeted, msbuildZ3Path, sourceFilePath, timeoutMs: PremiseCheckTimeoutMs).Status;
             if (VacuityKernel.CheckUndecided(status))
             {
                 UndecidedPremiseChecks.TryAdd(key, 0);
@@ -417,7 +427,7 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             var elm = ElmDiagnosticFormatter.Format(
                 "VACUITY CHECK UNDECIDED",
                 loc,
-                $"Z3 could not decide, within {PremiseCheckTimeoutMs / 1000} s, whether the assumptions behind the proofs in `{Display}` can hold. If they cannot, those proofs are vacuous: they would pass even for false contracts.",
+                $"Z3 could not decide, within its fixed work budget, whether the assumptions behind the proofs in `{Display}` can hold. If they cannot, those proofs are vacuous: they would pass even for false contracts.",
                 explanation: "Undecided:\n    - " + string.Join("\n    - ", Undecided),
                 fixHint: "Fix: Simplify the contracts this method relies on (its `Spec.Requires`, the types it uses, and the `Spec.Ensures` of the methods it calls), especially non-linear arithmetic and quantifiers, or split the method into smaller helpers with their own contracts.",
                 summary: $"Could not check that the assumptions of {Display} can hold, so its proofs may be vacuous: simplify the contracts it relies on or split it into helpers.");
