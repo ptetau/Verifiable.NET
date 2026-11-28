@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
     <PackageId>Verifiable.Analyzers</PackageId>
-    <Description>Roslyn compile-time Gatekeeper (VER001-VER006), Linear Obligation checker (VER007), and Z3 SMT prover (VER101-VER105) for Verifiable.NET.</Description>
+    <Description>Roslyn compile-time Gatekeeper (VER001-VER006), Linear Obligation checker (VER007), and Z3 SMT prover (VER101-VER106), and proof-suppression audit (VER107) for Verifiable.NET.</Description>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
     <IsRoslynComponent>true</IsRoslynComponent>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
