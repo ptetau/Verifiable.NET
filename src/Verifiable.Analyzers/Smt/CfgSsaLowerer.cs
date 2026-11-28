@@ -4385,6 +4385,10 @@ internal sealed partial class CfgSsaLowerer
         string? resultSmtTerm = null,
         IReadOnlyList<GoalClauseInfo>? goalClauses = null)
     {
+        // A body inlined from another assembly's stub is not part of this compilation; report at the method being verified.
+        if (location.IsInSource && !_compilation.ContainsSyntaxTree(location.SourceTree!))
+            location = _method.Locations.FirstOrDefault(l => l.IsInSource) ?? Location.None;
+
         var preamble = string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions));
         _obligations.Add(new ProofObligation(
             kind,
