@@ -265,6 +265,29 @@ internal sealed class ContractExpressionTranslator
                 return new SmtTypedTerm($"((_ int2bv 64) {value.Term})", targetType);
         }
 
+        // Tuples that differ only in element names or element types (`(a, b)` returned as `(int X, int Y)`)
+        // get different sorts, so convert element by element, as C# does.
+        if (value.Type is INamedTypeSymbol { IsTupleType: true } &&
+            targetType is INamedTypeSymbol { IsTupleType: true } &&
+            _types.TryGetComposite(value.Type, out var srcTuple) &&
+            _types.TryGetComposite(targetType, out var dstTuple) &&
+            srcTuple!.Fields.Count == dstTuple!.Fields.Count)
+        {
+            if (dstTuple.Fields.Count == 0)
+            {
+                return new SmtTypedTerm(dstTuple.ConstructorName, targetType);
+            }
+
+            var elems = new System.Collections.Generic.List<string>(dstTuple.Fields.Count);
+            for (var i = 0; i < dstTuple.Fields.Count; i++)
+            {
+                var src = srcTuple.Fields[i];
+                elems.Add(ConvertTo(new SmtTypedTerm($"({src.AccessorName} {value.Term})", src.Type), dstTuple.Fields[i].Type).Term);
+            }
+
+            return new SmtTypedTerm($"({dstTuple.ConstructorName} {string.Join(" ", elems)})", targetType);
+        }
+
         return new SmtTypedTerm(value.Term, targetType);
     }
 
