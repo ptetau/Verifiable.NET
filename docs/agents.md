@@ -82,6 +82,20 @@ Every command follows one output contract (requirement R12):
 - **No colour for agents.** JSON never has ANSI escapes, and neither does Elm output under `VERIFIABLE_AGENT=1`, whatever `--color` says.
 - `--format elm` + `VERIFIABLE_AGENT=1` appends the same JSON on one line inside `<verifiable-query-result>`, `<verifiable-check-result>` or `<verifiable-symbols>` tags.
 
+### Fast, scoped checks (`check --target`)
+
+The fill loop checks one method many times, so `check` can prove just what an agent is working on (requirement R14):
+
+```bash
+verifiable-query check --project App.csproj --target LedgerEngine.PostTransfer --format json
+verifiable-query check --project App.csproj --target "LedgerEngine,LedgerState" --format json
+```
+
+- `--target` (alias `--symbol`) takes `Type` or `Type.Member` names, comma-separated, simple or namespace-qualified. Only those methods are sent to Z3, and only diagnostics about them are reported. A name that matches nothing is an input error (exit `3`) with suggestions.
+- Proof answers are cached by query hash, in memory and in a signed disk cache, so an unchanged proof is never re-solved. `--stats` adds `elapsedMs`, `queries`, `memoryCacheHits`, `diskCacheHits` and `solverRuns`; it is off by default because it differs between runs.
+- `--timeout <ms>` sets the per-obligation solver timeout (default 2500). A timeout is `VER103`, status `undecided` (exit `2`), and the diagnostic names the `symbol`, the `obligation` kind (`Postcondition`, `Overflow`, `LoopInvariantStep`, ...), the `contract` and its `line`, so the agent can split that one step or add a helper.
+- Measured on `samples/AccountingApp` (4 cores): one method is 71 proof queries against 398 for the project. Warm, it takes about 0.7 s in-process and about 3.3 s as a fresh process, most of which is .NET and compiler start-up. The time target is open question 7.
+
 ### Native tools (`tools`)
 
 Agents only ever call `dotnet` commands; native tools sit behind `verifiable-query` (requirement R16). Today that is Z3; APE (SWI-Prolog) for the pipeline's ACE step will join it once its packaging is decided.

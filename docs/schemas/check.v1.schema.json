@@ -13,7 +13,8 @@
     "warnings",
     "suppressedNullableWarnings",
     "diagnostics",
-    "page"
+    "page",
+    "stats"
   ],
   "properties": {
     "schema": {
@@ -61,6 +62,7 @@
           "file",
           "line",
           "column",
+          "obligation",
           "contract",
           "reason",
           "counterexample",
@@ -101,6 +103,13 @@
           },
           "column": {
             "type": "integer"
+          },
+          "obligation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proof step this is about (Postcondition, Overflow, LoopInvariantStep, ...), so a timeout names exactly what to split."
           },
           "contract": {
             "type": [
@@ -164,6 +173,38 @@
             "null"
           ],
           "description": "Pass to --cursor for the next page; null on the last page."
+        }
+      }
+    },
+    "stats": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "elapsedMs",
+        "queries",
+        "memoryCacheHits",
+        "diskCacheHits",
+        "solverRuns"
+      ],
+      "description": "Only with --stats; null otherwise. Differs between runs, so it is excluded from byte-identical output.",
+      "properties": {
+        "elapsedMs": {
+          "type": "integer"
+        },
+        "queries": {
+          "type": "integer"
+        },
+        "memoryCacheHits": {
+          "type": "integer"
+        },
+        "diskCacheHits": {
+          "type": "integer"
+        },
+        "solverRuns": {
+          "type": "integer"
         }
       }
     }

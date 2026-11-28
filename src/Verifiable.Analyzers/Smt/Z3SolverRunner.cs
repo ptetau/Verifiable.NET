@@ -166,6 +166,26 @@ internal static class Z3SolverRunner
         return pool.RunQuery(smtScriptBody, ComputeSha256(smtScriptBody), timeoutMs);
     }
 
+    private static long _queries;
+    private static long _memoryHits;
+    private static long _diskHits;
+    private static long _solverRuns;
+
+    /// <summary>How many proof queries were asked, and how many were answered from each cache or by Z3.</summary>
+    internal readonly record struct SolverStats(long Queries, long MemoryCacheHits, long DiskCacheHits, long SolverRuns);
+
+    internal static SolverStats GetStats() => new(
+        Interlocked.Read(ref _queries), Interlocked.Read(ref _memoryHits),
+        Interlocked.Read(ref _diskHits), Interlocked.Read(ref _solverRuns));
+
+    internal static void ResetStats()
+    {
+        Interlocked.Exchange(ref _queries, 0);
+        Interlocked.Exchange(ref _memoryHits, 0);
+        Interlocked.Exchange(ref _diskHits, 0);
+        Interlocked.Exchange(ref _solverRuns, 0);
+    }
+
     public static SmtQueryResult Execute(
         string smtScriptBody,
         string? msbuildZ3Path = null,
@@ -184,19 +204,23 @@ internal static class Z3SolverRunner
             timeoutMs = RegexTimeoutMs;
         }
 
+        Interlocked.Increment(ref _queries);
         var hashInput = BuildHashInput(Z3Identity(z3Path), string.Empty, timeoutMs, smtScriptBody, satEvalExprs);
         var hash = ComputeSha256(hashInput);
         if (MemoryCache.TryGetValue(hash, out var cached))
         {
+            Interlocked.Increment(ref _memoryHits);
             return cached;
         }
 
         if (TryLoadDiskCache(hash, out var diskCached))
         {
+            Interlocked.Increment(ref _diskHits);
             MemoryCache.TryAdd(hash, diskCached!);
             return diskCached!;
         }
 
+        Interlocked.Increment(ref _solverRuns);
         var pool = PoolsByPath.GetOrAdd(z3Path, p => new WorkerPool(p));
         var result = pool.RunQuery(smtScriptBody, hash, timeoutMs, satEvalExprs);
 

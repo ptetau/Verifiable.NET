@@ -15,12 +15,13 @@ namespace Verifiable.Query;
 internal sealed record DiagnosticFacts(
     string? Symbol,
     string? Clause,
+    string? Obligation,
     string? Contract,
     string? Reason,
     string? CounterexampleJson,
     string? Fix)
 {
-    public static readonly DiagnosticFacts Empty = new(null, null, null, null, null, null);
+    public static readonly DiagnosticFacts Empty = new(null, null, null, null, null, null, null);
 
     /// <summary>
     /// Builds facts from a diagnostic's properties where the analyzer supplied them, and from the
@@ -35,6 +36,7 @@ internal sealed record DiagnosticFacts(
         return new DiagnosticFacts(
             Symbol: Prop("Symbol") ?? symbol,
             Clause: Prop("Clause"),
+            Obligation: Prop("ObligationKind"),
             Contract: Prop("Contract") ?? parsed.Contract,
             Reason: Prop("Reason") ?? parsed.Reason,
             CounterexampleJson: Prop("Counterexample") ?? parsed.CounterexampleJson,
@@ -81,7 +83,7 @@ internal sealed record DiagnosticFacts(
             }
         }
 
-        return new DiagnosticFacts(null, null, contract, reason, ce, fix);
+        return new DiagnosticFacts(null, null, null, contract, reason, ce, fix);
     }
 
     private static List<string> CollectIndented(string[] lines, ref int i)

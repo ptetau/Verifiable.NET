@@ -25,7 +25,14 @@ internal sealed record CheckReport(
     int ErrorCount,
     int WarningCount,
     int SuppressedWarningCount,
-    IReadOnlyList<PresentedDiagnostic> Diagnostics);
+    IReadOnlyList<PresentedDiagnostic> Diagnostics,
+    CheckStats? Stats = null);
+
+/// <summary>
+/// Opt-in (<c>--stats</c>) timing and proof-cache counts for a check. They differ from run to run, so they are
+/// left out of the default output, which must be byte-identical for the same input.
+/// </summary>
+internal sealed record CheckStats(long ElapsedMs, long Queries, long MemoryCacheHits, long DiskCacheHits, long SolverRuns);
 
 /// <summary>
 /// Parses SARIF 2.1 logs produced by <c>dotnet build -p:ErrorLog=build.sarif,version=2.1</c>

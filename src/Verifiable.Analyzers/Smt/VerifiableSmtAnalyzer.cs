@@ -46,6 +46,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
             globalOptions.TryGetValue("build_property.VerifiableClosedEnums", out var msbuildClosedEnums);
             globalOptions.TryGetValue("build_property.VerifiableNonDefaultImmutableArrays", out var msbuildNonDefaultImmArr);
             globalOptions.TryGetValue("build_property.VerifiableAllowMissingZ3", out var msbuildAllowMissingZ3);
+            globalOptions.TryGetValue("build_property.VerifiableScope", out var msbuildScope);
+            globalOptions.TryGetValue("build_property.VerifiableZ3TimeoutMs", out var msbuildTimeout);
+            var scope = ParseScope(msbuildScope);
+            var obligationTimeoutMs = int.TryParse(msbuildTimeout, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedTimeout) &&
+                                      parsedTimeout >= 1 && parsedTimeout <= 600_000
+                ? parsedTimeout
+                : (int?)null;
 
             var envAgent = Environment.GetEnvironmentVariable("VERIFIABLE_AGENT");
             var isAgentMode =
@@ -75,6 +82,11 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 }
 
                 if (VerifiableSymbolHelpers.GetScope(method) != VerificationScope.Verifiable)
+                {
+                    return;
+                }
+
+                if (scope is not null && !InScope(method, scope))
                 {
                     return;
                 }
@@ -155,7 +167,9 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                 {
                     var script = BuildQueryScript(ob);
                     var satEvals = SmtCounterexampleAnalyzer.BuildSatEvalExprs(ob.ResultSmtTerm, ob.GoalClauses);
-                    var result = Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
+                    var result = obligationTimeoutMs is int customTimeout
+                        ? Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, timeoutMs: customTimeout, satEvalExprs: satEvals)
+                        : Z3SolverRunner.Execute(script, msbuildZ3Path, sourceTree?.FilePath, satEvalExprs: satEvals);
                     var verdict = ProofKernel.Decide(result.Status);
 
                     if (verdict == ObligationVerdict.Proved)
@@ -866,6 +880,41 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
         "SwitchExpressionException" => "Fix: Add an arm for the missing values (a `_ => ...` arm, or one that handles each case) so the switch expression cannot throw SwitchExpressionException.",
         _ => "Fix: Strengthen preconditions or fix the implementation so the contract holds on all paths."
     };
+
+    /// <summary>
+    /// Reads <c>VerifiableScope</c>: a <c>;</c>- or <c>,</c>-separated list of <c>Type</c> or <c>Type.Method</c>
+    /// names (simple or namespace-qualified). Null means every method is checked.
+    /// </summary>
+    internal static IReadOnlyList<string>? ParseScope(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var parts = raw!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToList();
+        return parts.Count == 0 ? null : parts;
+    }
+
+    /// <summary>True when <paramref name="method"/> or its containing type is named in <paramref name="scope"/>.</summary>
+    internal static bool InScope(IMethodSymbol method, IReadOnlyList<string> scope)
+    {
+        var type = method.ContainingType;
+        if (type is null) return false;
+        var simpleType = type.Name;
+        var fullType = type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var memberName = method.MethodKind == MethodKind.PropertyGet || method.MethodKind == MethodKind.PropertySet
+            ? (method.AssociatedSymbol?.Name ?? method.Name)
+            : method.MethodKind == MethodKind.Constructor ? simpleType : method.Name;
+        foreach (var s in scope)
+        {
+            if (s == simpleType || s == fullType ||
+                s == simpleType + "." + memberName || s == fullType + "." + memberName)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// Structured facts about a proof obligation, attached to its diagnostic so tools (such as

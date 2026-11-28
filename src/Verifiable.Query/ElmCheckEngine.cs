@@ -24,7 +24,9 @@ internal static class ElmCheckEngine
         CSharpCompilation compilation,
         IReadOnlyList<Diagnostic> compilationErrors,
         string? z3Path,
-        bool includeWarnings = true)
+        bool includeWarnings = true,
+        IReadOnlyList<string>? scope = null,
+        int? timeoutMs = null)
     {
         if (compilationErrors.Count > 0)
         {
@@ -53,7 +55,7 @@ internal static class ElmCheckEngine
             new ProofSuppressionAuditor(),
             new VerifiableNullabilitySuppressor());
 
-        var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path);
+        var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path, scope, timeoutMs);
         var analyzerOptions = new AnalyzerOptions(ImmutableArray<AdditionalText>.Empty, configProvider);
         var withAnalyzersOptions = new CompilationWithAnalyzersOptions(
             analyzerOptions,
@@ -90,6 +92,14 @@ internal static class ElmCheckEngine
             }
 
             if (d.Severity == DiagnosticSeverity.Warning && !includeWarnings)
+            {
+                continue;
+            }
+
+            // A scoped check reports only what concerns the symbols asked for. Compilation-wide
+            // diagnostics with no source location (such as a missing Z3) always stay.
+            if (scope is not null && d.Location.IsInSource &&
+                !SymbolInScope(DiagnosticFacts.From(d.Properties, string.Empty, DiagnosticFacts.EnclosingSymbol(compilation, d.Location)).Symbol, scope))
             {
                 continue;
             }
@@ -264,6 +274,13 @@ internal static class ElmCheckEngine
             sb.Append($"Summary: {string.Join(", ", summaryParts)}.");
         }
 
+        if (report.Stats is { } stats)
+        {
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.Append($"Stats: {stats.ElapsedMs} ms, {stats.Queries} proof queries ({stats.MemoryCacheHits} from memory cache, {stats.DiskCacheHits} from disk cache, {stats.SolverRuns} solved by Z3).");
+        }
+
         if (agentMode)
         {
             sb.AppendLine();
@@ -296,6 +313,20 @@ internal static class ElmCheckEngine
             }
             w.WriteEndArray();
             AgentOutput.WritePage(w, page, limit);
+            if (report.Stats is { } st)
+            {
+                w.WriteStartObject("stats");
+                w.WriteNumber("elapsedMs", st.ElapsedMs);
+                w.WriteNumber("queries", st.Queries);
+                w.WriteNumber("memoryCacheHits", st.MemoryCacheHits);
+                w.WriteNumber("diskCacheHits", st.DiskCacheHits);
+                w.WriteNumber("solverRuns", st.SolverRuns);
+                w.WriteEndObject();
+            }
+            else
+            {
+                w.WriteNull("stats");
+            }
             w.WriteEndObject();
         });
     }
@@ -315,6 +346,7 @@ internal static class ElmCheckEngine
         w.WriteString("file", AgentOutput.NormalizePath(d.FilePath));
         w.WriteNumber("line", d.Line);
         w.WriteNumber("column", d.Column);
+        AgentOutput.StringOrNull(w, "obligation", facts.Obligation);
         AgentOutput.StringOrNull(w, "contract", facts.Contract);
         AgentOutput.StringOrNull(w, "reason", facts.Reason);
         AgentOutput.RawOrNull(w, "counterexample", facts.CounterexampleJson);
@@ -337,20 +369,77 @@ internal static class ElmCheckEngine
         return idx >= 0 ? text.Substring(0, idx).Trim() : text.Trim();
     }
 
-    private sealed class DictAnalyzerConfigOptionsProvider(string? z3Path) : AnalyzerConfigOptionsProvider
+    /// <summary>
+    /// True when a diagnostic's <c>Type.Member</c> symbol is named in the scope, either exactly or by its type.
+    /// </summary>
+    internal static bool SymbolInScope(string? symbol, IReadOnlyList<string> scope)
     {
-        private readonly AnalyzerConfigOptions _global = new DictOptions(z3Path);
+        if (symbol is null) return false;
+        var dot = symbol.IndexOf('.');
+        var type = dot < 0 ? symbol : symbol.Substring(0, dot);
+        foreach (var entry in scope)
+        {
+            // Diagnostics name symbols as `Type.Member`; scope entries may also carry a namespace,
+            // so compare the entry's last segment as a type and its last two as a member.
+            var parts = entry.Split('.');
+            var lastTwo = parts.Length >= 2 ? parts[^2] + "." + parts[^1] : null;
+            if (entry == symbol || entry == type || lastTwo == symbol || parts[^1] == type) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Every <c>Type</c> and <c>Type.Member</c> name in source, simple and namespace-qualified, for checking that a
+    /// scope names something real.
+    /// </summary>
+    internal static HashSet<string> KnownSymbolNames(CSharpCompilation compilation)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var decl in tree.GetRoot().DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.BaseTypeDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(decl) is not INamedTypeSymbol type) continue;
+                var full = type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+                names.Add(type.Name);
+                names.Add(full);
+                foreach (var m in type.GetMembers())
+                {
+                    if (m.IsImplicitlyDeclared) continue;
+                    var member = m is IMethodSymbol { MethodKind: MethodKind.Constructor } ? type.Name : m.Name;
+                    names.Add(type.Name + "." + member);
+                    names.Add(full + "." + member);
+                }
+            }
+        }
+        return names;
+    }
+
+    private sealed class DictAnalyzerConfigOptionsProvider(string? z3Path, IReadOnlyList<string>? scope = null, int? timeoutMs = null) : AnalyzerConfigOptionsProvider
+    {
+        private readonly AnalyzerConfigOptions _global = new DictOptions(z3Path, scope, timeoutMs);
         public override AnalyzerConfigOptions GlobalOptions => _global;
         public override AnalyzerConfigOptions GetOptions(SyntaxTree tree) => _global;
         public override AnalyzerConfigOptions GetOptions(AdditionalText textFile) => _global;
 
-        private sealed class DictOptions(string? z3Path) : AnalyzerConfigOptions
+        private sealed class DictOptions(string? z3Path, IReadOnlyList<string>? scope, int? timeoutMs) : AnalyzerConfigOptions
         {
             public override bool TryGetValue(string key, out string value)
             {
                 if (key == "build_property.VerifiableZ3Path" && !string.IsNullOrWhiteSpace(z3Path))
                 {
                     value = z3Path!;
+                    return true;
+                }
+                if (key == "build_property.VerifiableScope" && scope is not null)
+                {
+                    value = string.Join(";", scope);
+                    return true;
+                }
+                if (key == "build_property.VerifiableZ3TimeoutMs" && timeoutMs is int t)
+                {
+                    value = t.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     return true;
                 }
                 value = string.Empty;

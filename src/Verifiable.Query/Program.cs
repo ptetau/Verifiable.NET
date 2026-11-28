@@ -37,6 +37,7 @@ public static class Program
           --stdin           Read C# source code directly from standard input.
           --sarif <path>    Path to a SARIF 2.1 log from `dotnet build -p:ErrorLog=build.sarif,version=2.1` (`check`).
           --target <name>   Target method (`LedgerEngine.PostTransfer`) or type (`LedgerEngine`).
+                            With `check`, proves only these (comma-separated) symbols; alias `--symbol`.
           --all             Query every [Verifiable] method in scope (`ask` only).
           --type <name>     Domain type name for `check-invariant` (e.g. `LedgerState`, `TodoBoard`).
           --assert <expr>   Boolean C# expression or lambda (e.g. `result => result.State.TotalDebits == result.State.TotalCredits`).
@@ -46,7 +47,8 @@ public static class Program
           --format <mode>   Output format: `elm` (default) or `json`.
           --color <mode>    ANSI terminal colors: `auto` (default), `always`, or `never` (honors `NO_COLOR`).
           --no-warnings     Hide warnings in `check` / `build` output.
-          --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000).
+          --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000; `check` default: 2500).
+          --stats           With `check`, add timing and proof-cache counts (not byte-stable).
           --z3 <path>       Explicit path to z3 / z3.exe executable.
           --verbose         Include internal SSA trace steps in proof core output.
           --limit <n>       Most items per JSON page (default: 50, max: 1000).
@@ -141,6 +143,8 @@ public static class Program
         var verbose = false;
         var extraBuildArgs = new List<string>();
         var positionalBuildTarget = (string?)null;
+        var timeoutGiven = false;
+        var stats = false;
         var limit = AgentOutput.DefaultLimit;
         var offset = 0;
 
@@ -173,6 +177,7 @@ public static class Program
                     sarifPath = NextVal();
                     break;
                 case "--target":
+                case "--symbol":
                 case "-t":
                     target = NextVal();
                     break;
@@ -205,6 +210,7 @@ public static class Program
                     if (int.TryParse(NextVal(), out var parsedTimeout))
                     {
                         timeoutMs = NormalizeTimeoutMs(parsedTimeout);
+                        timeoutGiven = true;
                     }
                     break;
                 case "--z3":
@@ -213,6 +219,9 @@ public static class Program
                 case "--verbose":
                 case "-v":
                     verbose = true;
+                    break;
+                case "--stats":
+                    stats = true;
                     break;
                 case "--limit":
                     var limitText = NextVal();
@@ -353,7 +362,43 @@ public static class Program
 
         if (command == "check")
         {
-            var checkReport = ElmCheckEngine.CheckCompilation(loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings);
+            IReadOnlyList<string>? scope = null;
+            if (!string.IsNullOrWhiteSpace(target))
+            {
+                scope = target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
+                var known = ElmCheckEngine.KnownSymbolNames(loadResult.Compilation);
+                var unknown = scope.FirstOrDefault(t => !known.Contains(t));
+                if (unknown is not null)
+                {
+                    var ranked = Verifiable.Analyzers.ElmSuggest.Rank(unknown, known.Where(k => k.Count(c => c == '.') <= 1).OrderBy(k => k, StringComparer.Ordinal).ToArray(), maxResults: 3);
+                    var tErr = new QueryReport(
+                        command, string.Empty, null, null, unknown, QueryOutcomeStatus.Error,
+                        Array.Empty<MethodQueryResult>(), "UNKNOWN SYMBOL",
+                        $"`--target {unknown}` names no type or member in these sources.", Location.None,
+                        Verifiable.Analyzers.ElmSuggest.FormatDidYouMean(ranked) ?? "Run `verifiable-query list` to see the names you can check.");
+                    WriteOutput(command, tErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                    return ResolveExitCode(QueryOutcomeStatus.Error);
+                }
+            }
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var before = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();
+            var checkReport = ElmCheckEngine.CheckCompilation(
+                loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings,
+                scope, timeoutGiven ? timeoutMs.Value : null);
+            if (stats)
+            {
+                var after = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();
+                checkReport = checkReport with
+                {
+                    Stats = new CheckStats(
+                        stopwatch.ElapsedMilliseconds,
+                        after.Queries - before.Queries,
+                        after.MemoryCacheHits - before.MemoryCacheHits,
+                        after.DiskCacheHits - before.DiskCacheHits,
+                        after.SolverRuns - before.SolverRuns),
+                };
+            }
             var formattedCheck = ElmCheckEngine.FormatCheckReport(checkReport, format, agentMode, limit, offset);
             if (useColor) formattedCheck = ElmAnsiRenderer.Colorize(formattedCheck);
             var checkExit = (int)ElmCheckEngine.Classify(checkReport);
