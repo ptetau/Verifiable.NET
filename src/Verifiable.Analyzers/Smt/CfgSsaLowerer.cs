@@ -261,8 +261,16 @@ internal sealed partial class CfgSsaLowerer
     internal string PremisePrefix(int assertionCount) =>
         string.Join("\n", _types.Declarations.Concat(_decls).Concat(_assertions.Take(assertionCount)));
 
+    /// <summary>Test seam: when set on the current async flow, lowering throws an unexpected exception.</summary>
+    internal static readonly System.Threading.AsyncLocal<bool> SimulateInternalFailure = new();
+
     public LoweringOutcome Lower(ControlFlowGraph cfg, ImmutableArray<IOperation> rawOperationBlocks)
     {
+        if (SimulateInternalFailure.Value)
+        {
+            throw new InvalidOperationException("simulated lowering bug");
+        }
+
         try
         {
             return LowerCore(cfg, rawOperationBlocks);
