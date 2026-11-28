@@ -104,9 +104,21 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     if (block is IBlockOperation or IMethodBodyOperation or IConstructorBodyOperation)
                     {
                         var cfg = opCtx.GetControlFlowGraph(block);
-                        var outcome = lowerer.Lower(cfg, opCtx.OperationBlocks);
-                        allObligations.AddRange(outcome.Obligations);
-                        allErrors.AddRange(outcome.Errors);
+                        try
+                        {
+                            var outcome = lowerer.Lower(cfg, opCtx.OperationBlocks);
+                            allObligations.AddRange(outcome.Obligations);
+                            allErrors.AddRange(outcome.Errors);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // A bug in the translation must not turn into an analyzer crash that leaves the method
+                            // unchecked behind a generic AD0001 warning. Treat it as untranslatable code instead.
+                            allErrors.Add((
+                                method.Name,
+                                method.Locations.FirstOrDefault() ?? Location.None,
+                                $"Internal error while translating this method ({ex.GetType().Name}: {OneLine(ex.Message)}). Please report it."));
+                        }
                     }
                 }
 

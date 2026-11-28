@@ -121,6 +121,28 @@ public class CheckSelectionTests
         Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
     }
 
+    [Theory]
+    [InlineData("public static int Div(int a, int b) => a / b;", "P.Div", DiagnosticSeverity.Error)]
+    [InlineData("public static int Same(int a) => a;", "P.Same", DiagnosticSeverity.Warning)]
+    public async Task InternalLoweringFailure_IsReported_NotAnAnalyzerCrash(string member, string display, DiagnosticSeverity expected)
+    {
+        Verifiable.Analyzers.Smt.CfgSsaLowerer.SimulateInternalFailure.Value = true;
+        try
+        {
+            var diagnostics = await AnalyzeAsync(member);
+
+            Assert.DoesNotContain(diagnostics, d => d.Id == "AD0001");
+            // The shared test types are lowered too and fail the same way; look at the method under test.
+            var failure = Assert.Single(diagnostics, d => d.Id == "VER101" && d.GetMessage().Contains(display, StringComparison.Ordinal));
+            Assert.Equal(expected, failure.Severity);
+            Assert.Contains("Internal error while translating", failure.GetMessage(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Verifiable.Analyzers.Smt.CfgSsaLowerer.SimulateInternalFailure.Value = false;
+        }
+    }
+
     private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string members) =>
         AnalyzerTestHarness.AnalyzeAsync(
             Types + "[Verifiable]\npublic static class P\n{\n" + members + "\n}\n",
