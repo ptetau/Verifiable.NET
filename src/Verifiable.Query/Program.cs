@@ -23,6 +23,7 @@ public static class Program
           verifiable-query list --project <path> [options]
           verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
+          verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
         Commands:
@@ -33,6 +34,7 @@ public static class Program
           list              List queryable [Verifiable] methods, [Invariant] members, and [TypeAlias<T>] types.
           clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
           holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
+          lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
         Options:
@@ -53,6 +55,8 @@ public static class Program
           --no-warnings     Hide warnings in `check` / `build` output.
           --timeout <ms>    Per-path Z3 timeout in milliseconds (default: 5000; `check` default: 2500).
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
+          --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
+          --out <file>      With `lock`, where to write the lock file.
           --clause <ids>    With `check`, prove only the symbols that carry these clauses (comma-separated).
           --stats           With `check`, add timing and proof-cache counts (not byte-stable).
           --z3 <path>       Explicit path to z3 / z3.exe executable.
@@ -75,7 +79,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock"];
 
     /// <summary>
     /// CLI entry point.
@@ -151,6 +155,8 @@ public static class Program
         var positionalBuildTarget = (string?)null;
         string? clauseManifest = null;
         string? clauseFilter = null;
+        string? lockPath = null;
+        string? outPath = null;
         var timeoutGiven = false;
         var stats = false;
         var limit = AgentOutput.DefaultLimit;
@@ -233,6 +239,12 @@ public static class Program
                     break;
                 case "--clause":
                     clauseFilter = NextVal();
+                    break;
+                case "--lock":
+                    lockPath = NextVal();
+                    break;
+                case "--out":
+                    outPath = NextVal();
                     break;
                 case "--stats":
                     stats = true;
@@ -390,6 +402,30 @@ public static class Program
             manifestClauses = mc;
         }
 
+        if (command == "lock")
+        {
+            IReadOnlyList<string>? lockScope = string.IsNullOrWhiteSpace(target)
+                ? null
+                : target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
+            if (outPath is not null && !outPath.EndsWith(Verifiable.Analyzers.ContractLockAnalyzer.LockSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                var oErr = new QueryReport(command, string.Empty, null, null, null, QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "INVALID OPTION VALUE",
+                    $"The lock file name must end in `{Verifiable.Analyzers.ContractLockAnalyzer.LockSuffix}` so builds pick it up.", Location.None,
+                    $"Example: --out generated{Verifiable.Analyzers.ContractLockAnalyzer.LockSuffix}");
+                WriteOutput(command, oErr, format, colorMode, agentMode, verbose, isRedirected, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+
+            var locks = LockCommand.Select(loadResult.Compilation, lockScope);
+            if (outPath is not null) File.WriteAllText(outPath, LockCommand.LockFileText(locks));
+            var isJsonLock = format.Equals("json", StringComparison.OrdinalIgnoreCase);
+            stdout.WriteLine(isJsonLock
+                ? LockCommand.ResultJson(locks, outPath, indented: true)
+                : $"Locked {locks.Count} {(locks.Count == 1 ? "method" : "methods")}{(outPath is null ? " (pass --out <file> to write the lock)" : $" in {outPath}")}.");
+            return 0;
+        }
+
         if (command == "holes")
         {
             var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase);
@@ -467,7 +503,7 @@ public static class Program
             var before = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();
             var checkReport = ElmCheckEngine.CheckCompilation(
                 loadResult.Compilation, loadResult.CompilationErrors, z3Path, includeWarnings,
-                scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest);
+                scope, timeoutGiven ? timeoutMs.Value : null, clauseManifest, lockPath);
             if (stats)
             {
                 var after = Verifiable.Analyzers.Smt.Z3SolverRunner.GetStats();

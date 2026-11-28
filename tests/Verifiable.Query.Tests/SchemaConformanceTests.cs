@@ -81,6 +81,7 @@ public sealed class SchemaConformanceTests
         yield return ["tools", new[] { "tools", "status", "--format", "json" }];
         yield return ["clauses", new[] { "clauses", "--file", "{file}", "--format", "json" }];
         yield return ["holes", new[] { "holes", "--file", "{file}", "--format", "json" }];
+        yield return ["lock", new[] { "lock", "--file", "{file}", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--z3", "{file}.missing", "--format", "json" }];
         yield return ["tools", new[] { "tools", "frob", "--format", "json" }];
     }
@@ -107,6 +108,7 @@ public sealed class SchemaConformanceTests
     [InlineData("tools")]
     [InlineData("clauses")]
     [InlineData("holes")]
+    [InlineData("lock")]
     public void Schemas_AreVersionedAndClosed(string name)
     {
         var schema = Schema(name);

@@ -140,6 +140,24 @@ internal static class VerifiableDescriptors
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor LockedContractChanged = new(
+        id: "VER109",
+        title: "Generated contract was changed",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
+    public static readonly DiagnosticDescriptor InvalidContractLock = new(
+        id: "VER110",
+        title: "Contract lock file cannot be read",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
+
     public static readonly DiagnosticDescriptor ClauseNotImplemented = new(
         id: "VER401",
         title: "Spec clause has no code",

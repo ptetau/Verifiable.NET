@@ -27,7 +27,8 @@ internal static class ElmCheckEngine
         bool includeWarnings = true,
         IReadOnlyList<string>? scope = null,
         int? timeoutMs = null,
-        string? clauseManifestPath = null)
+        string? clauseManifestPath = null,
+        string? contractLockPath = null)
     {
         if (compilationErrors.Count > 0)
         {
@@ -56,12 +57,14 @@ internal static class ElmCheckEngine
             new ProofSuppressionAuditor(),
             new ClauseCoverageAnalyzer(),
             new HoleAnalyzer(),
+            new ContractLockAnalyzer(),
             new VerifiableNullabilitySuppressor());
 
         var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path, scope, timeoutMs);
-        var additional = clauseManifestPath is null
-            ? ImmutableArray<AdditionalText>.Empty
-            : ImmutableArray.Create<AdditionalText>(new FileText(clauseManifestPath));
+        var additionalBuilder = ImmutableArray.CreateBuilder<AdditionalText>();
+        if (clauseManifestPath is not null) additionalBuilder.Add(new FileText(clauseManifestPath));
+        if (contractLockPath is not null) additionalBuilder.Add(new FileText(contractLockPath));
+        var additional = additionalBuilder.ToImmutable();
         var analyzerOptions = new AnalyzerOptions(additional, configProvider);
         var withAnalyzersOptions = new CompilationWithAnalyzersOptions(
             analyzerOptions,
@@ -228,7 +231,7 @@ internal static class ElmCheckEngine
     {
         var errors = report.Diagnostics.Where(d => d.Severity == "error").ToList();
         if (errors.Count == 0) return report.ErrorCount > 0 ? AgentOutcome.Refuted : AgentOutcome.Proved;
-        if (errors.Any(d => d.RuleId.StartsWith("CS", StringComparison.Ordinal) || d.RuleId == "VER404")) return AgentOutcome.InputError;
+        if (errors.Any(d => d.RuleId.StartsWith("CS", StringComparison.Ordinal) || d.RuleId is "VER404" or "VER110")) return AgentOutcome.InputError;
         if (errors.Any(d => d.RuleId == "VER104")) return AgentOutcome.ToolMissing;
         if (errors.All(d => d.RuleId is "VER103" or "VER106")) return AgentOutcome.Undecided;
         return AgentOutcome.Refuted;

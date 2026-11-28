@@ -21,6 +21,12 @@
     <AdditionalFiles Include="$(VerifiableClauseManifest)" />
   </ItemGroup>
 
+  <!-- R3: a contract lock written by the generator (*.contracts.lock.json) makes any change to a locked
+       method's signature or contracts a build error (VER109). -->
+  <ItemGroup>
+    <AdditionalFiles Include="$(MSBuildProjectDirectory)/*.contracts.lock.json" />
+  </ItemGroup>
+
   <!-- With VerifiableAllowMissingZ3, VER104 is a warning; keep it one under TreatWarningsAsErrors / -warnaserror. -->
   <Target Name="_VerifiableAllowMissingZ3" BeforeTargets="CoreCompile"
           Condition="'$(VerifiableAllowMissingZ3)' == 'true' or '$(VerifiableAllowMissingZ3)' == '1'">

@@ -118,6 +118,19 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Contract lock (`lock`)
+
+Contracts sit at the top of the body, so the LLM filling a body edits the same method that holds its spec. The lock stops it weakening a contract until the proof passes (requirement R3; this is the hash-check option from open question 1).
+
+```bash
+# The generator, after writing signatures, contracts and holes:
+verifiable-query lock --project App.csproj --out generated.contracts.lock.json
+```
+
+- The lock records a SHA-256 of each method's signature and leading contract block, keyed `Type.Member(param types)`, with its clauses. Formatting is normalised, so reflowing a contract is fine.
+- A `*.contracts.lock.json` next to the project is picked up by the build (or pass `check --lock <file>`). Any other change to a locked method — a contract weakened, strengthened, removed, added, reworded, moved below other code, or a changed signature — is `VER109`, naming the method and its clauses. Only the body may change. A lock that cannot be read is `VER110`.
+- Keep the lock file out of the LLM's reach (or check in CI that it only changes when the generator runs). `--target` locks just some methods.
+
 ### Fast, scoped checks (`check --target`)
 
 The fill loop checks one method many times, so `check` can prove just what an agent is working on (requirement R14):
