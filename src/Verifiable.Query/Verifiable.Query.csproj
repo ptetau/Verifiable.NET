@@ -22,12 +22,14 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Verifiable.Contracts\Verifiable.Contracts.csproj" />
     <ProjectReference Include="..\Verifiable.Generators\Verifiable.Generators.csproj" />
     <ProjectReference Include="..\Verifiable.Analyzers\Verifiable.Analyzers.csproj" />
+    <ProjectReference Include="..\Verifiable.CodeFixes\Verifiable.CodeFixes.csproj" />
   </ItemGroup>
 
   <ItemGroup>

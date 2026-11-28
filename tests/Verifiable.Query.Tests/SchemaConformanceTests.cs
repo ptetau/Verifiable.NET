@@ -84,6 +84,9 @@ public sealed class SchemaConformanceTests
         yield return ["lock", new[] { "lock", "--file", "{file}", "--format", "json" }];
         yield return ["export", new[] { "export", "--file", "{file}", "--format", "json" }];
         yield return ["one-answer", new[] { "one-answer", "--file", "{file}", "--format", "json" }];
+        yield return ["fix", new[] { "fix", "--file", "{file}", "--format", "json" }];
+        yield return ["explain", new[] { "explain", "--format", "json" }];
+        yield return ["describe", new[] { "describe", "--format", "json" }];
         yield return ["pack", new[] { "pack", "--file", "{file}", "--holes", "--format", "json" }];
         yield return ["pack", new[] { "pack", "--file", "{file}", "--target", "Pricing.Discount", "--max-tokens", "1", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--z3", "{file}.missing", "--format", "json" }];
@@ -116,6 +119,9 @@ public sealed class SchemaConformanceTests
     [InlineData("pack")]
     [InlineData("export")]
     [InlineData("one-answer")]
+    [InlineData("fix")]
+    [InlineData("explain")]
+    [InlineData("describe")]
     public void Schemas_AreVersionedAndClosed(string name)
     {
         var schema = Schema(name);

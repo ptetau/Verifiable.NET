@@ -118,6 +118,14 @@ public static Result<Booking, BookingError> Book(Schedule s, Booking b)
 - Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
 - `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
 
+### Explain, fix and describe (`explain`, `fix`, `describe`)
+
+Agents fix faster from an exact edit than from prose (requirement R15).
+
+- `verifiable-query explain [VER102 ...] --format json` gives each rule's `title`, `category`, `severity`, `why`, `fix`, a worked `example` (`before` / `after`) and the `codeFixes` that handle it (schema `explain@1`). A test runs each worked example: `before` triggers the rule and `after` does not.
+- `verifiable-query fix --project App.csproj [--rule VER004] [--target T] --format json` runs the IDE code fixes (VER001, VER002, VER004, VER005, VER006, VER301) and returns each as text edits: `file`, 1-based `start` / `end` (end exclusive, positions in the text before the fix) and `newText` (schema `fix@1`). `--apply` applies them one at a time, re-checking after each, and writes the files.
+- `verifiable-query describe --format json` lists every command with its options, its output schema and the schema file, plus the exit codes (schema `describe@1`).
+
 ### Does the contract fix one answer? (`one-answer`)
 
 A weak contract lets the LLM return any of several answers and still pass its proof (requirement R5). For each method, Z3 looks for one input with two different results that both meet every postcondition:

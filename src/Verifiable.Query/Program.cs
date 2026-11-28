@@ -25,6 +25,9 @@ public static class Program
           verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query pack --project <path> (--target <symbols> | --clause <ids> | --holes) [--max-tokens <n>]
           verifiable-query one-answer --project <path> [--target <symbols>] [--lock <file>]
+          verifiable-query fix --project <path> [--rule <id>] [--target <symbols>] [--apply]
+          verifiable-query explain [<rule id>...]
+          verifiable-query describe
           verifiable-query export --project <path> [--out <file.json>]
           verifiable-query lock --project <path> [--target <symbols>] --out <name.contracts.lock.json>
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
@@ -39,6 +42,9 @@ public static class Program
           holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
           pack              Everything an agent needs to fill one method: contracts, clause text, types, helpers, callers.
           one-answer        Report whether each method's contract fixes one answer: fixed, open (with an example), or inconclusive.
+          fix               Run the code fixes from the command line and return JSON text edits (--apply writes them).
+          explain           Explain a rule: why it exists, how to fix it, and an example.
+          describe          List every command, its options and its output schema.
           export            Write every contract, type rule and invariant as JSON expression trees (schema export@1).
           lock              Write the contract lock for generated methods, so changing a contract fails the build (VER109).
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
@@ -63,6 +69,8 @@ public static class Program
           --clauses <file>  Clause manifest from the spec; `check` then fails on uncovered (VER401) or unknown (VER403) clauses.
           --lock <file>     With `check`, verify a contract lock (*.contracts.lock.json) in-process.
           --holes           With `pack`, one pack per hole.
+          --rule <id>       With `fix`, only fixes for this rule.
+          --apply           With `fix`, write the fixes to disk.
           --one-answer      With `check`, report each unmarked method whose contract allows two answers as VER111.
           --max-tokens <n>  With `pack`, drop the least relevant parts until each pack fits; dropped parts are listed.
           --out <file>      With `lock` or `export`, where to write the file (`export` writes every entry, unpaged).
@@ -88,7 +96,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes", "lock", "pack", "export", "one-answer", "fix", "explain", "describe"];
 
     /// <summary>
     /// CLI entry point.
@@ -144,6 +152,36 @@ public static class Program
             return RunTools(args, agentMode, stdout, stderr);
         }
 
+        if (command is "explain" or "describe")
+        {
+            var fmtAt = Array.LastIndexOf(args, "--format");
+            var fmt = fmtAt >= 0 && fmtAt + 1 < args.Length ? args[fmtAt + 1] : "elm";
+            var wantJson = fmt.Equals("json", StringComparison.OrdinalIgnoreCase);
+            if (command == "describe")
+            {
+                stdout.WriteLine(wantJson ? CommandCatalog.DescribeJson(true)
+                    : string.Join("\n", CommandCatalog.Commands.Select(c => $"{c.Name,-16} {c.Summary}  (schema {AgentOutput.SchemaId(c.Schema)})")));
+                return 0;
+            }
+
+            var ids = args.Skip(1).Where(a => !a.StartsWith("-", StringComparison.Ordinal) && !a.Equals(fmt, StringComparison.Ordinal)).ToList();
+            var rules = RuleCatalog.All();
+            var picked = ids.Count == 0 ? rules.ToList() : rules.Where(r => ids.Contains(r.Id, StringComparer.OrdinalIgnoreCase)).ToList();
+            var missing = ids.Where(id => !rules.Any(r => r.Id.Equals(id, StringComparison.OrdinalIgnoreCase))).ToList();
+            if (missing.Count > 0)
+            {
+                var ranked = Verifiable.Analyzers.ElmSuggest.Rank(missing[0].ToUpperInvariant(), rules.Select(r => r.Id).ToArray(), maxResults: 3);
+                var eErr = new QueryReport(command, string.Empty, null, null, missing[0], QueryOutcomeStatus.Error,
+                    Array.Empty<MethodQueryResult>(), "UNKNOWN RULE", $"There is no rule `{missing[0]}`.", Location.None,
+                    Verifiable.Analyzers.ElmSuggest.FormatDidYouMean(ranked) ?? "Run `verifiable-query explain` to list every rule.");
+                WriteOutput(command, eErr, fmt, ElmColorMode.Never, agentMode, false, true, stdout, stderr);
+                return ResolveExitCode(QueryOutcomeStatus.Error);
+            }
+            stdout.WriteLine(wantJson ? CommandCatalog.ExplainJson(picked, true)
+                : string.Join("\n\n", picked.Select(r => $"{r.Id}  {r.Title}\n\nWhy: {r.Why}\n\nFix: {r.Fix}{(r.Bad is null ? string.Empty : $"\n\nBefore:\n{r.Bad}\n\nAfter:\n{r.Good}")}")));
+            return 0;
+        }
+
         string? project = null;
         var files = new List<string>();
         var useStdin = false;
@@ -170,6 +208,8 @@ public static class Program
         int? maxTokens = null;
         var allHoles = false;
         var oneAnswerCheck = false;
+        string? ruleFilter = null;
+        var applyFixes = false;
         string? outPath = null;
         var timeoutGiven = false;
         var stats = false;
@@ -262,6 +302,12 @@ public static class Program
                     break;
                 case "--one-answer":
                     oneAnswerCheck = true;
+                    break;
+                case "--rule":
+                    ruleFilter = NextVal();
+                    break;
+                case "--apply":
+                    applyFixes = true;
                     break;
                 case "--max-tokens":
                     var mtText = NextVal();
@@ -432,6 +478,21 @@ public static class Program
                 return ResolveExitCode(QueryOutcomeStatus.Error);
             }
             manifestClauses = mc;
+        }
+
+        if (command == "fix")
+        {
+            IReadOnlyList<string>? fixScope = string.IsNullOrWhiteSpace(target)
+                ? null
+                : target!.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
+            var fixes = applyFixes
+                ? FixCommand.Apply(loadResult.Compilation, ruleFilter, fixScope)
+                : FixCommand.Propose(loadResult.Compilation, ruleFilter, fixScope);
+            stdout.WriteLine(format.Equals("json", StringComparison.OrdinalIgnoreCase)
+                ? FixCommand.ToJson(fixes, applyFixes, indented: true, limit, offset)
+                : $"{(applyFixes ? "Applied" : "Found")} {fixes.Count} {(fixes.Count == 1 ? "fix" : "fixes")}." +
+                  string.Concat(fixes.Select(f => $"\n  {f.Rule} {f.File}:{f.Line}  {f.Title}")));
+            return 0;
         }
 
         if (command == "one-answer")
