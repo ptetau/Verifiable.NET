@@ -3809,10 +3809,16 @@ internal sealed partial class CfgSsaLowerer
             target = inner;
         if (target is ITupleOperation tupleTarget && _types.TryGetComposite(rhs.Type, out var rhsComp))
         {
+            // A user-written Deconstruct can return the parts in any order, so the fields cannot be read directly;
+            // each target then gets an unconstrained value of its type.
+            var customDeconstruct = !rhs.Type.IsTupleType && rhs.Type.GetMembers("Deconstruct").OfType<IMethodSymbol>()
+                .Any(m => !m.IsImplicitlyDeclared);
             for (var i = 0; i < tupleTarget.Elements.Length && i < rhsComp!.Fields.Count; i++)
             {
                 var field = rhsComp.Fields[i];
-                var elemVal = new SmtTypedTerm($"({field.AccessorName} {rhs.Term})", field.Type);
+                var elemVal = customDeconstruct
+                    ? BindSsaValue("deconstructed", new SmtTypedTerm(_types.GetDefaultTerm(field.Type), field.Type), isFreshFreeSymbol: true)
+                    : new SmtTypedTerm($"({field.AccessorName} {rhs.Term})", field.Type);
                 var elemTarget = tupleTarget.Elements[i];
                 if (elemTarget is IDeclarationExpressionOperation de)
                 {
