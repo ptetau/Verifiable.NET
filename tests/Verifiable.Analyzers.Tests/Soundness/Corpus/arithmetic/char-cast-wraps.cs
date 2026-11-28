@@ -1,7 +1,6 @@
 // (char) keeps only the low 16 bits, so (char)65601 is 'A' (65), not 65601.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.CharWrap.Roundtrip(65601)
-// @known-bug: (char) casts are not wrapped to 16 bits.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

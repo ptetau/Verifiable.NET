@@ -1,6 +1,5 @@
 // A correct program: for small non-negative x, x << 1 is x * 2.
 // @expect: proved
-// @known-bug: False rejection: << in code is lowered as a fresh unconstrained value (LowerBinaryOperator default case).
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

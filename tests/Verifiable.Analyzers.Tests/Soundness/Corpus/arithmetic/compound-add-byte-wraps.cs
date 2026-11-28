@@ -1,7 +1,6 @@
 // b += 1 on a byte stores (byte)(b + 1), so 255 becomes 0, not 256.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.ByteCompound.Bump(255)
-// @known-bug: Compound assignment ignores the narrowing back to byte (ICompoundAssignmentOperation.OutConversion is not applied).
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

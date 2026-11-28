@@ -155,7 +155,9 @@ internal static class Z3SolverRunner
     /// Test seam: on the current thread, a shorter silence limit for a worker. Queries run on the calling thread, so
     /// this does not affect tests running in parallel.
     /// </summary>
+#pragma warning disable CS0649 // only the tests assign it
     [ThreadStatic] internal static int? HardWaitExtraMsOverride;
+#pragma warning restore CS0649
 
     /// <summary>Test seam: runs one query on the solver at <paramref name="z3Path"/>, with no discovery and no caches.</summary>
     internal static SmtQueryResult RunUncached(string z3Path, string smtScriptBody, int timeoutMs)

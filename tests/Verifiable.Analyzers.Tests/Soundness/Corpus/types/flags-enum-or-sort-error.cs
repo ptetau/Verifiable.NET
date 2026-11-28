@@ -1,6 +1,5 @@
 // A correct program: Read | Write is the flags value 3.
 // @expect: proved
-// @known-bug: `|` on a [Flags] enum is lowered as Boolean `or` over Int terms, so Z3 reports a sort error (VER103).
 using Verifiable.Contracts;
 
 namespace Corpus.Types;

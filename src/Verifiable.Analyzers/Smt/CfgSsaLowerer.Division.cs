@@ -27,7 +27,9 @@ internal sealed partial class CfgSsaLowerer
         bool emitObligations)
     {
         var isDivide = kind == BinaryOperatorKind.Divide;
-        var checkThrows = emitObligations || _inQuantifierDepth > 0;
+        var checkThrows = ChecksThrowingOperations(emitObligations) &&
+            // In a contract, a positive literal divisor cannot throw: no obligation is worth a solver call.
+            !(!emitObligations && _inQuantifierDepth == 0 && IsPositiveLiteral(rTerm));
 
         if (ContractExpressionTranslator.IsBitVecSort(sort))
         {
@@ -94,6 +96,16 @@ internal sealed partial class CfgSsaLowerer
     private static readonly System.Text.RegularExpressions.Regex StringLengthShape = new(
         @"^\(ite \(= (?<s>[^\s()]+) str-null\) 0 \(str\.len \(str-text \k<s>\)\)\)$",
         System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static bool IsPositiveLiteral(string term)
+    {
+        if (System.Numerics.BigInteger.TryParse(term, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value))
+            return value > 0;
+        var match = System.Text.RegularExpressions.Regex.Match(term, @"^\(_ bv(?<v>\d+) (?<w>32|64)\)$");
+        return match.Success &&
+            System.Numerics.BigInteger.Parse(match.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture) is var bits &&
+            bits > 0 && bits < (System.Numerics.BigInteger.One << (int.Parse(match.Groups["w"].Value, System.Globalization.CultureInfo.InvariantCulture) - 1));
+    }
 
     private static string RealRemainder(string lTerm, string rTerm)
     {

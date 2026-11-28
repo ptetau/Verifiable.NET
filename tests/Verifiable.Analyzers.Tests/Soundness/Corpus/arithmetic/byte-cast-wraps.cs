@@ -1,7 +1,6 @@
 // (byte) keeps only the low 8 bits, so (byte)256 is 0, not 256.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.ByteWrap.Roundtrip(256)
-// @known-bug: Unchecked (byte) casts are not wrapped to 8 bits (TryLowerIntegralOrEnumConversion returns false when not checked, ConvertTo is the identity).
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

@@ -1,6 +1,5 @@
 // A correct program: Math.Clamp keeps the value in range.
 // @expect: proved
-// @known-bug: False rejection: Math.Clamp is not modelled, so its result is a fresh unconstrained value.
 using System;
 using Verifiable.Contracts;
 

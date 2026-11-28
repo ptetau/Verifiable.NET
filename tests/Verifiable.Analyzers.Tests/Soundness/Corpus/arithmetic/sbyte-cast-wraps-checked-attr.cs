@@ -1,7 +1,6 @@
 // Even under [CheckedArithmetic], an unchecked (sbyte) cast wraps: (sbyte)128 is -128.
 // @expect: rejected
 // @witness: Corpus.Arithmetic.SbyteWrap.ToSigned(128)
-// @known-bug: Under [CheckedArithmetic], an unchecked int-to-sbyte cast becomes bv2int of the int, not a wrap to 8 bits.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

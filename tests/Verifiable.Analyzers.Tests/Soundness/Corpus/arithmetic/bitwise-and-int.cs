@@ -1,6 +1,5 @@
 // A correct program: x & 1 is always 0 or 1.
 // @expect: proved
-// @known-bug: False rejection (VER103): integer & is lowered as the Boolean (and ...), a Z3 sort error.
 using Verifiable.Contracts;
 
 namespace Corpus.Arithmetic;

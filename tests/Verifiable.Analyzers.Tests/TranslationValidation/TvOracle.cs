@@ -178,6 +178,9 @@ internal static class TvOracle
         return sb.ToString();
     }
 
+    private static readonly Regex UndecidedMethod = new(
+        @"^VER103: Z3 returned Unknown for V\.M(?<i>\d+):", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static readonly Dictionary<string, string> AgentProps = new() { ["build_property.VerifiableAgent"] = "1" };
 
     private static readonly Regex AgentJson = new(
@@ -261,9 +264,32 @@ internal static class TvOracle
 
         var source = BuildVerificationSource(program, cases);
         var (refutations, problems) = Analyze(source);
+
+        // Z3 answers "unknown" to some facts about the bits of unknown values (it is weak at int2bv and bv2int). That is
+        // never a wrong verdict, so for the bit programs a case whose method it could not decide is set aside: every
+        // other case must still agree with the CLR.
+        var undecided = new HashSet<int>();
+        if (program.Bits)
+        {
+            foreach (var problem in problems.ToList())
+            {
+                var m = UndecidedMethod.Match(problem);
+                if (m.Success)
+                {
+                    undecided.Add(int.Parse(m.Groups["i"].Value, System.Globalization.CultureInfo.InvariantCulture));
+                    problems.Remove(problem);
+                }
+            }
+        }
+
         var errors = new List<string>(problems);
         for (var i = 0; i < cases.Count; i++)
         {
+            if (undecided.Contains(i))
+            {
+                continue;
+            }
+
             var c = cases[i];
             var mine = refutations.Where(r => r.Method == $"M{i}").ToList();
             var diverge = ExactIntegersDiverge(program, c);

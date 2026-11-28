@@ -26,10 +26,7 @@ internal sealed class ContractExpressionTranslator
     {
         if (receiver.Type.SpecialType == SpecialType.System_String && memberName == "Length")
         {
-            var lenInt = _compilation.GetSpecialType(SpecialType.System_Int32);
-            return new SmtTypedTerm(
-                IntToTargetInt($"(ite (= {receiver.Term} str-null) 0 (str.len (str-text {receiver.Term})))", lenInt),
-                lenInt);
+            return IntResult($"(ite (= {receiver.Term} str-null) 0 (str.len (str-text {receiver.Term})))");
         }
 
         if (memberName == "Length" &&
@@ -37,9 +34,7 @@ internal sealed class ContractExpressionTranslator
             strUnder!.SpecialType == SpecialType.System_String)
         {
             var unwrapped = UnwrapRefinedIfApplicable(receiver);
-            return new SmtTypedTerm(
-                $"(ite (= {unwrapped.Term} str-null) 0 (str.len (str-text {unwrapped.Term})))",
-                _compilation.GetSpecialType(SpecialType.System_Int32));
+            return IntResult($"(ite (= {unwrapped.Term} str-null) 0 (str.len (str-text {unwrapped.Term})))");
         }
 
         if (_types.TryGetDictionaryInfo(receiver.Type, out _, out var dictId, out _, out _) && memberName == "Count")
@@ -100,6 +95,13 @@ internal sealed class ContractExpressionTranslator
         }
 
         return null;
+    }
+
+    /// <summary>An <c>int</c>-typed result computed as an SMT Int (a length, a count), as the <c>int</c> sort of the scope.</summary>
+    private SmtTypedTerm IntResult(string intTerm)
+    {
+        var intType = _compilation.GetSpecialType(SpecialType.System_Int32);
+        return new SmtTypedTerm(IntToTargetInt(intTerm, intType), intType);
     }
 
     private SmtTypedTerm? TryTranslateCalendarMember(SmtTypedTerm receiver, CalendarTypeKind kind, string memberName)
@@ -255,7 +257,7 @@ internal sealed class ContractExpressionTranslator
             if (srcSort == "(_ BitVec 64)")
                 return new SmtTypedTerm(BitVecToInt(value.Term, 64), targetType);
             if (srcSort == "Real")
-                return new SmtTypedTerm($"(to_int {value.Term})", targetType);
+                return new SmtTypedTerm(TruncateToInt(value.Term), targetType);
         }
 
         if (dstSort == "(_ BitVec 32)")
@@ -264,6 +266,8 @@ internal sealed class ContractExpressionTranslator
                 return new SmtTypedTerm($"((_ int2bv 32) {value.Term})", targetType);
             if (srcSort == "(_ BitVec 64)")
                 return new SmtTypedTerm($"((_ extract 31 0) {value.Term})", targetType);
+            if (srcSort == "Real")
+                return new SmtTypedTerm($"((_ int2bv 32) {TruncateToInt(value.Term)})", targetType);
         }
 
         if (dstSort == "(_ BitVec 64)")
@@ -272,6 +276,8 @@ internal sealed class ContractExpressionTranslator
                 return new SmtTypedTerm($"((_ sign_extend 32) {value.Term})", targetType);
             if (srcSort == "Int")
                 return new SmtTypedTerm($"((_ int2bv 64) {value.Term})", targetType);
+            if (srcSort == "Real")
+                return new SmtTypedTerm($"((_ int2bv 64) {TruncateToInt(value.Term)})", targetType);
         }
 
         // Tuples that differ only in element names or element types (`(a, b)` returned as `(int X, int Y)`)
@@ -511,6 +517,10 @@ internal sealed class ContractExpressionTranslator
         sb.Append('"');
         return sb.ToString();
     }
+
+    /// <summary>A real number converted to an integer the way C# does: toward zero (SMT <c>to_int</c> rounds down).</summary>
+    public static string TruncateToInt(string realTerm) =>
+        $"(ite (>= {realTerm} 0.0) (to_int {realTerm}) (- (to_int (- {realTerm}))))";
 
     public static bool IsBitVecSort(string sort) =>
         sort is "(_ BitVec 32)" or "(_ BitVec 64)";
