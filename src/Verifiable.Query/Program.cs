@@ -22,6 +22,7 @@ public static class Program
           verifiable-query build <project-or-sln> [options] [-- <extra dotnet build args>]
           verifiable-query list --project <path> [options]
           verifiable-query clauses --project <path> [--clauses <spec.clauses.json>] [options]
+          verifiable-query holes --project <path> [--clauses <spec.clauses.json>] [options]
           verifiable-query tools status [z3] | tools install [z3] [--to <dir>] [--force]
 
         Commands:
@@ -31,6 +32,7 @@ public static class Program
           build             Run `dotnet build` with SARIF capture and present CS*/VER* diagnostics in Elm format.
           list              List queryable [Verifiable] methods, [Invariant] members, and [TypeAlias<T>] types.
           clauses           Map spec clause IDs to the contracts and rules that carry them, and report gaps.
+          holes             List unwritten bodies (Spec.Hole) with signature, contracts and clause text.
           tools             Show or install the pinned native tools (Z3) with checked SHA-256 checksums.
 
         Options:
@@ -73,7 +75,7 @@ public static class Program
           4  tool_missing  Z3 executable could not be found.
         """;
 
-    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses"];
+    private static readonly string[] KnownCommands = ["ask", "check-invariant", "check", "build", "list", "tools", "clauses", "holes"];
 
     /// <summary>
     /// CLI entry point.
@@ -386,6 +388,27 @@ public static class Program
                 return ResolveExitCode(QueryOutcomeStatus.Error);
             }
             manifestClauses = mc;
+        }
+
+        if (command == "holes")
+        {
+            var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase);
+            var (holeOutcome, holeJson) = HoleReport.Build(loadResult.Compilation, manifestClauses, indented: isJson, limit, offset);
+            if (isJson) stdout.WriteLine(holeJson);
+            else
+            {
+                var holes = HoleReport.Collect(loadResult.Compilation, manifestClauses);
+                stdout.WriteLine(holes.Count == 0 ? "-- NO HOLES --" : $"-- {holes.Count} UNWRITTEN {(holes.Count == 1 ? "BODY" : "BODIES")} --");
+                foreach (var h in holes)
+                {
+                    stdout.WriteLine();
+                    stdout.WriteLine($"{h.Symbol}  (clause {h.Clause ?? "none"}){(h.ClauseText is null ? string.Empty : $": {h.ClauseText}")}");
+                    stdout.WriteLine($"    {h.Signature}");
+                    foreach (var c in h.Contracts) stdout.WriteLine($"    {c}");
+                }
+                if (agentMode) stdout.WriteLine($"<verifiable-holes-result>{HoleReport.Build(loadResult.Compilation, manifestClauses, false, limit, offset).Json}</verifiable-holes-result>");
+            }
+            return (int)holeOutcome;
         }
 
         if (command == "clauses")

@@ -132,6 +132,14 @@ internal static class VerifiableDescriptors
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor UnwrittenBody = new(
+        id: "VER108",
+        title: "Method body has not been written yet (Spec.Hole)",
+        messageFormat: "{0}",
+        category: SmtCategory,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor ClauseNotImplemented = new(
         id: "VER401",
         title: "Spec clause has no code",

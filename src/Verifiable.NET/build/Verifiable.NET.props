@@ -8,6 +8,7 @@
     <CompilerVisibleProperty Include="VerifiableNonDefaultImmutableArrays" />
     <CompilerVisibleProperty Include="VerifiableMaxSpecClauses" />
     <CompilerVisibleProperty Include="VerifiableScope" />
+    <CompilerVisibleProperty Include="VerifiableHolesAsWarnings" />
     <CompilerVisibleProperty Include="VerifiableZ3TimeoutMs" />
   </ItemGroup>
 

@@ -31,6 +31,12 @@ public sealed class SchemaConformanceTests
                 Spec.Ensures<int>(r => r >= 0 && r < price, "A discounted price is never negative and always cheaper.");
                 return price - price * pct / 100;
             }
+
+            public static int Later(int x)
+            {
+                Spec.Requires(x >= 0 && x <= 10, "Small.", clause: "C1");
+                return Spec.Hole<int>("C1");
+            }
         }
         """;
 
@@ -74,6 +80,7 @@ public sealed class SchemaConformanceTests
         yield return ["query", new[] { "check-invariant", "--file", "{file}", "--type", "Percent", "--expr", "p => true", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--format", "json" }];
         yield return ["clauses", new[] { "clauses", "--file", "{file}", "--format", "json" }];
+        yield return ["holes", new[] { "holes", "--file", "{file}", "--format", "json" }];
         yield return ["tools", new[] { "tools", "status", "--z3", "{file}.missing", "--format", "json" }];
         yield return ["tools", new[] { "tools", "frob", "--format", "json" }];
     }
@@ -99,6 +106,7 @@ public sealed class SchemaConformanceTests
     [InlineData("list")]
     [InlineData("tools")]
     [InlineData("clauses")]
+    [InlineData("holes")]
     public void Schemas_AreVersionedAndClosed(string name)
     {
         var schema = Schema(name);

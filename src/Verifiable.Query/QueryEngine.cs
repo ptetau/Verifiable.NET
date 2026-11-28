@@ -275,6 +275,27 @@ internal static class QueryEngine
         var returnTypeDisplay = targetMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
         var methodLoc = targetMethod.Locations.FirstOrDefault() ?? Location.None;
 
+        // R4: a method with an unwritten body (Spec.Hole) is never proved, whatever is asked of it.
+        if (targetMethod.DeclaringSyntaxReferences.Any(r => Verifiable.Analyzers.Holes.ContainsHole(r.GetSyntax())))
+        {
+            return new MethodQueryResult(
+                methodDisplay,
+                returnTypeDisplay,
+                assertText,
+                assumeText,
+                because,
+                QueryOutcomeStatus.Inconclusive,
+                false,
+                0,
+                null,
+                methodLoc,
+                Array.Empty<QueryReason>(),
+                Array.Empty<QueryReason>(),
+                Array.Empty<PathCounterexample>(),
+                $"`{methodDisplay}` has an unwritten body (Spec.Hole), so nothing about its result can be proved yet.",
+                "Write the body, then ask again. `verifiable-query holes` lists every unwritten body.");
+        }
+
         var bindOutcome = QueryExpressionBinder.Bind(compilation, targetMethod, assertText, assumeText);
         if (bindOutcome.Bound is null)
         {

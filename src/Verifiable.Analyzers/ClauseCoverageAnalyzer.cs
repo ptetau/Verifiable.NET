@@ -23,14 +23,17 @@ internal sealed record SpecClause(string Id, string? Text);
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class ClauseCoverageAnalyzer : DiagnosticAnalyzer
 {
+    /// <summary>File name ending that marks an additional file as the spec's clause manifest.</summary>
     public const string ManifestSuffix = ".clauses.json";
 
+    /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(
         VerifiableDescriptors.ClauseNotImplemented,
         VerifiableDescriptors.ConstructWithoutClause,
         VerifiableDescriptors.UnknownClause,
         VerifiableDescriptors.InvalidClauseManifest);
 
+    /// <inheritdoc />
     public override void Initialize(AnalysisContext context)
     {
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);

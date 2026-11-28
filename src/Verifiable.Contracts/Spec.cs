@@ -54,11 +54,36 @@ public static class Spec
     }
 
     /// <summary>
-    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?)"/>.
+    /// Symbolic placeholder representing the enclosing method's return value inside <see cref="Ensures(bool, string?, string?)"/>.
     /// </summary>
     /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
     [PureAxiom]
     public static TResult Result<TResult>() => default!;
+
+    /// <summary>
+    /// Marks a method body that has not been written yet (requirement R4): <c>return Spec.Hole&lt;T&gt;("C3");</c>.
+    /// It compiles, but the build reports it as <c>VER108</c> naming the clause, a method with a hole is never
+    /// proved, and under <c>VERIFIABLE_AGENT=1</c> every hole is listed with its signature, contracts and clause
+    /// text as a work list. Unlike <c>throw new NotImplementedException()</c> it breaks no determinism rule.
+    /// </summary>
+    /// <typeparam name="TResult">Return type of the enclosing method.</typeparam>
+    /// <param name="clause">ID of the spec clause the body must implement.</param>
+    [PureAxiom]
+    public static TResult Hole<TResult>(string clause)
+    {
+        _ = clause;
+        return default!;
+    }
+
+    /// <summary>
+    /// Marks the body of a <c>void</c> method that has not been written yet. See <see cref="Hole{TResult}(string)"/>.
+    /// </summary>
+    /// <param name="clause">ID of the spec clause the body must implement.</param>
+    [PureAxiom]
+    public static void Hole(string clause)
+    {
+        _ = clause;
+    }
 
     /// <summary>
     /// Declares an inductive loop invariant checked on loop entry and preserved across every loop back-edge.

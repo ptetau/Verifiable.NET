@@ -101,6 +101,23 @@ Spec.Ensures<int>(r => r > 0, "A booking ends after it starts", clause: "C2");
 - `verifiable-query clauses --project App.csproj [--clauses spec.clauses.json] --format json` maps each clause to the contracts and rules that carry it, with `missing`, `unknownClauses` and `withoutClause` lists (schema `clauses@1`). It exits `1` when a clause is missing or unknown.
 - `verifiable-query check --clause C2` proves only the symbols that carry clause `C2`, and `check --clauses <file>` runs the coverage rules in-process.
 
+### Holes for unwritten bodies (`Spec.Hole`, `holes`)
+
+A generator writes the signature and contracts, and leaves the body to the LLM (requirement R4):
+
+```csharp
+public static Result<Booking, BookingError> Book(Schedule s, Booking b)
+{
+    Spec.Ensures<Result<Booking, BookingError>>(r => r.IsSuccess == !s.Overlaps(b), "...", clause: "C3");
+    return Spec.Hole<Result<Booking, BookingError>>("C3");
+}
+```
+
+- `Spec.Hole<T>("C3")` (or `Spec.Hole("C3")` in a `void` method) compiles, breaks no determinism rule, and fails the build with `VER108` naming the clause. Set `VerifiableHolesAsWarnings=true` to make it a warning while working (open question 6 suggests warning locally and error in CI).
+- A method with a hole is never proved: the prover skips it (no misleading `VER102`), and `ask` on it is `undecided`.
+- Under `VERIFIABLE_AGENT=1` each `VER108` carries `<verifiable-hole>{...}</verifiable-hole>` with `symbol`, `clause`, `clauseText` (from the manifest), `signature` and `contracts`.
+- `verifiable-query holes --project App.csproj [--clauses spec.clauses.json] --format json` is the whole work list (schema `holes@1`); it exits `1` while any hole remains.
+
 ### Fast, scoped checks (`check --target`)
 
 The fill loop checks one method many times, so `check` can prove just what an agent is working on (requirement R14):

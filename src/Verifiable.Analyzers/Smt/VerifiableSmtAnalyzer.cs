@@ -91,6 +91,13 @@ public sealed class VerifiableSmtAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
+                // R4: a body with a hole is unwritten. It is reported as VER108 and never proved, so no
+                // proof failure (or, worse, a proof) is reported for the placeholder value.
+                if (opCtx.OperationBlocks.Any(b => Holes.ContainsHole(b.Syntax)))
+                {
+                    return;
+                }
+
                 MisplacedPreconditions.Report(opCtx, method);
 
                 if (method.IsOverride &&

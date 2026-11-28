@@ -55,6 +55,7 @@ internal static class ElmCheckEngine
             new VerifiableSmtAnalyzer(),
             new ProofSuppressionAuditor(),
             new ClauseCoverageAnalyzer(),
+            new HoleAnalyzer(),
             new VerifiableNullabilitySuppressor());
 
         var configProvider = new DictAnalyzerConfigOptionsProvider(z3Path, scope, timeoutMs);
